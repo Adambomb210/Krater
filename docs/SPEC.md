@@ -236,7 +236,7 @@ arm64; SkyPilot publishes arm64 images, so that works.
 | `worker` | Same image, runs background jobs: Slack work, the spend reconciler, reviewer-channel sync |
 | `db` | Postgres |
 | `skypilot` | SkyPilot API server with the Vast credentials; out of scope except for its configuration |
-| `auth-proxy` (optional) | oauth2-proxy in front of SkyPilot, if members use the SkyPilot dashboard or CLI directly (see Open questions) |
+| `auth-proxy` | oauth2-proxy with Weave as the OIDC issuer; members sign in to the SkyPilot CLI and dashboard through it |
 
 Networking:
 - Slack must reach `portal` over public HTTPS.
@@ -250,15 +250,15 @@ Networking:
 
 1. **Screenshot storage provider.** S3-compatible for now; pick a provider (self-hosted MinIO next to the portal, or
    R2/B2/S3). A reminder is set to circle back.
-2. **How members use SkyPilot.** Proposed default: Krater issues a SkyPilot service-account token per project, limited to
-   that project's workspace, and shows it to the project team. This needs a spike: confirm service accounts and
-   workspace limits work without SSO on a plain Docker deployment. SkyPilot documents SSO/RBAC only for Helm. The
-   alternative is oauth2-proxy with Weave as the OIDC issuer.
+2. **How members use SkyPilot:** decided. One private SkyPilot workspace per project, and members sign in to SkyPilot
+   with Weave (oauth2-proxy, limited to `ganymede:member`). See
+   [skypilot-integration.md §0](skypilot-integration.md#0-member-access-one-workspace-per-project-sign-in-with-weave).
+   Still to confirm in the spike: the full flow on Docker Compose.
 3. **What happens at the ceiling.** Proposed: warn at 80%, block new launches and tear down at 100%, with no grace
    period. Consider a small admin-configurable grace so a running training job isn't killed at 100.1%.
-4. **Weave changes.** Krater's v1 depends on the `groups` claim, the `slack_id` claim and the directory endpoints in
-   [weave-integration.md](weave-integration.md). The Slack gate in [weave#118](https://github.com/patchworklabsorg/weave/issues/118)
-   is tracked; the rest still need issues.
+4. **Weave changes.** The `groups` claim, `slack_id` claim and directory endpoints are implemented on Weave branch
+   `claude/exciting-sagan-7oh2zh` (not merged yet). The Slack membership gate is tracked in
+   [weave#118](https://github.com/patchworklabsorg/weave/issues/118).
 
 ## Parked / future work
 

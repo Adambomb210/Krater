@@ -15,8 +15,8 @@ Checked against the SkyPilot docs (docs.skypilot.ai) and `skypilot-org/skypilot`
 | Spend figures | ⚠️ `sky cost-report` / `cost_report()` | Per-cluster **estimate**: catalog price × uptime. The docstring says it "may not be accurate for the cluster with autostop/use_spot set or terminated/stopped on the cloud console." Rows include `workspace` and `total_cost` |
 | Isolating projects | ✅ Workspaces | `private: true` + `allowed_users`. The API server has `/workspaces/create`, `/update`, `/delete`, `/batch_add_users`, `/batch_remove_users` (these return async request IDs) |
 | Gating launches | ✅ Admin policies | Server-side `validate_and_mutate(UserRequest)`. Can reject or rewrite any launch. `RestfulAdminPolicy` POSTs the request to a URL and treats **HTTP 400 as a rejection** |
-| Machine access | ✅ Service-account tokens | `/users/service-account-tokens`; restrict one to a workspace by giving it the `user` role and adding it to `allowed_users` |
-| SSO / RBAC | ⚠️ Helm only | Any OIDC issuer works through oauth2-proxy, so Weave could be the issuer, but it's documented only for the Helm chart. RBAC only works with SSO. Plain Docker gets basic auth |
+| Machine access | ✅ Service-account tokens | Bearer tokens (`/users/service-account-tokens`). Krater's admin token uses this |
+| Member sign-in (SSO) + RBAC | ✅ via oauth2-proxy | The docs only show the Helm chart, but in the source it's two env vars on the API server (`SKYPILOT_AUTH_OAUTH2_PROXY_ENABLED=true`, `SKYPILOT_AUTH_OAUTH2_PROXY_BASE_URL`) pointing at an oauth2-proxy. That works in Docker Compose. Users are identified by email. RBAC (roles, private workspaces) needs SSO to be on |
 | arm64 images | ✅ | `linux/amd64` and `linux/arm64` are published |
 
 ### Vast.ai caveats
@@ -39,7 +39,45 @@ Checked against the SkyPilot docs (docs.skypilot.ai) and `skypilot-org/skypilot`
             │                                        │
             │ reconciler ── cost_report, down/cancel ┼──► SkyPilot API server
             └────────────────────────────────────────┘
+
+ member ── sky CLI / dashboard ──► oauth2-proxy ──(Weave OIDC)──► SkyPilot API server
 ```
+
+### 0. Member access: one workspace per project, sign-in with Weave
+
+- **Identity:** members sign in to SkyPilot with their Weave account. oauth2-proxy runs as its own container, with Weave
+  as the OIDC issuer. The SkyPilot API server delegates authentication to it through the two env vars above. The CLI
+  works too: `sky api login -e https://<skypilot-host>` opens a browser to the Weave sign-in.
+- **Who may sign in:** oauth2-proxy only lets in Ganymede members. It requests the `groups` scope from Weave and
+  requires `ganymede:member`.
+- **Isolation:** each approved project gets its own **private** workspace. `allowed_users` is set to the project team's
+  emails (the same `email` claim oauth2-proxy passes on). A member on two projects can use both workspaces and picks one
+  per launch. Everyone else can't see the workspace at all.
+- **Roles:** SkyPilot's default role for new users is `user`. Only Krater's service account (and SkyPilot operators)
+  get `admin`, since SkyPilot admins can see and edit every workspace.
+- **Offboarding:** when a project is completed or withdrawn, Krater removes the team from `allowed_users` before tearing
+  the workspace down. Someone suspended in Weave can't sign in again. Existing SkyPilot sessions last until they expire,
+  so keep the oauth2-proxy cookie lifetime short (e.g. 8h).
+
+oauth2-proxy settings (sketch):
+
+```ini
+provider = "oidc"
+oidc_issuer_url = "https://weave.patchworklabs.org"
+client_id = "<weave oauth app uid>"            # a separate confidential Weave app, not Krater's
+client_secret = "<secret>"
+scope = "openid email profile groups"
+oidc_groups_claim = "groups"
+allowed_groups = ["ganymede:member"]
+email_domains = ["*"]
+redirect_url = "https://<skypilot-host>/oauth2/callback"
+cookie_expire = "8h"
+code_challenge_method = "S256"                 # Weave requires PKCE
+```
+
+Depends on Weave's `groups` claim (on Weave branch `claude/exciting-sagan-7oh2zh`, not merged yet). Until it lands, drop
+`allowed_groups` and rely on private workspaces alone. Anyone with a Weave account could then sign in, but they'd see
+nothing.
 
 ### 1. Provisioning (on approval)
 
@@ -48,7 +86,8 @@ When a project's proposal is approved, a worker job:
 1. Creates a private workspace named `ganymede-<project_id>` with `allowed_users` set to the project team. Other
    clouds are disabled in that workspace, so it can only use Vast.
 2. Saves the workspace name on `Project.skypilot_workspace`.
-3. Sets up the project team's access to that workspace. How is an open question (see below).
+3. Keeps `allowed_users` in step with the team: the submitter plus credited builders, by their Weave email. Members
+   sign in with Weave (see section 0); no per-project tokens are handed out.
 
 When the project is completed or withdrawn: tear down its clusters and managed jobs, cut off its access, and keep the
 workspace until the cost history has been recorded, then delete it.
@@ -114,9 +153,10 @@ gallery's "compute spent" (shown as an estimate), and the unspent remainder is w
    includes managed-job clusters. The jobs controller's own cost isn't attributed to any project.
 2. The workspace create, update and add-users endpoints work with a service-account token on a plain Docker (non-Helm)
    deployment, and don't need a server restart.
-3. **Member access:** can a service-account token limited to a single workspace be issued per project without SSO? If
-   so, that's the v1 access model (Krater shows the token to the project team). If not, fall back to oauth2-proxy in
-   front of the API server with Weave as the OIDC issuer, and map users to workspaces by email.
+3. **Member access:** end to end on Docker Compose: oauth2-proxy + Weave sign-in, `sky api login` from the CLI, a
+   private workspace blocking a non-member, and a member launching on Vast in it. Also check that SkyPilot's user
+   identity is the email (so `allowed_users` entries match), and whether allowing users into a workspace needs them to
+   have signed in once first.
 4. Whether autodown and `max_hourly_cost` changes made by the policy are respected for Vast launches and managed jobs.
 5. How far `cost_report` drifts from actual Vast billing on a few real runs. That sets the safety margin (if any) to take
    off the ceiling.
