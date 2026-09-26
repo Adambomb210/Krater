@@ -100,7 +100,7 @@ Register Krater in Weave at `/admin/oauth_applications`:
 class WeaveClient(Protocol):
     # OIDC
     def authorization_url(self, state: str, code_verifier: str) -> str: ...
-    def exchange_code(self, code: str, code_verifier: str) -> WeaveIdentity: ...   # verifies id_token via JWKS
+    def exchange_code(self, code: str, code_verifier: str) -> WeaveIdentity: ...  # verifies id_token via JWKS
 
     # Directory (service key)
     def get_user(self, sub: str) -> WeaveUser | None: ...
@@ -111,12 +111,12 @@ class WeaveClient(Protocol):
 ```python
 @dataclass(frozen=True)
 class WeaveUser:
-    sub: str               # PWL…; Krater's external ID
+    sub: str  # PWL…; Krater's external ID
     name: str
     email: str
     slack_id: str | None
     groups: frozenset[str]
-    active: bool           # status == "active"
+    active: bool  # status == "active"
 ```
 
 Rules:
