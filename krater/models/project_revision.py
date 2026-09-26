@@ -43,6 +43,12 @@ class ProjectRevision(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
 
     # Null until the revision is actually submitted for review (vs. a draft edited in place).
     submitted_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+
+    # The review message posted for this revision (see `krater.services.slack_notify`), so a later
+    # decision can update it in place rather than posting a new one. Both null until it's posted.
+    slack_message_channel_id: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
+    slack_message_ts: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
+
     outcome: Mapped[RevisionOutcome] = mapped_column(
         pg_enum(RevisionOutcome, name="revision_outcome"),
         nullable=False,

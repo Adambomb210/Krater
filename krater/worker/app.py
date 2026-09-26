@@ -6,13 +6,18 @@ Run with: `uv run procrastinate --app=krater.worker.app.app worker`
 from __future__ import annotations
 
 import logging
+import uuid
 
 import procrastinate
 
 from krater.config import get_settings
 from krater.db import get_sessionmaker
+from krater.models import Project, ProjectRevision
+from krater.services import slack_notify, slack_reviews
 from krater.services.skypilot_sync import reconcile
 from krater.skypilot import SkyPilotError, get_skypilot_client
+from krater.slack import SlackError, get_slack_client
+from krater.weave import get_weave_client
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +28,13 @@ def _psycopg_conninfo(database_url: str) -> str:
 
 
 app = procrastinate.App(
-    connector=procrastinate.PsycopgConnector(conninfo=_psycopg_conninfo(get_settings().database_url)),
+    # `min_size`/`max_size`: the web app also opens this same connector (see `krater.web.app`'s
+    # lifespan) purely to defer jobs, which needs far fewer connections than a worker actually running
+    # tasks -- kept small so `create_app()` (and every test that builds one) doesn't reserve a large
+    # pool it barely uses.
+    connector=procrastinate.PsycopgConnector(
+        conninfo=_psycopg_conninfo(get_settings().database_url), min_size=1, max_size=5
+    ),
 )
 
 
@@ -57,5 +68,169 @@ def skypilot_reconcile(timestamp: int) -> None:
         # `reconcile` already catches per-step SkyPilot errors and logs+continues; this is a last-resort
         # net for anything that still escapes (e.g. a step raising before its own try/except is reached).
         logger.exception("krater.skypilot_reconcile task failed")
+    finally:
+        session.close()
+
+
+# --------------------------------------------------------------------------------------------------
+# Slack: channel/message upkeep, deferred immediately after the web request (or Slack interaction) that
+# causes it commits, plus a periodic reconcile for anything missed. See `krater.services.slack_notify`
+# and `krater.services.slack_reviews` for the actual logic -- these are thin, self-guarding wrappers
+# (each underlying call is a safe-to-retry no-op when it doesn't apply), mirroring `skypilot_reconcile`.
+# --------------------------------------------------------------------------------------------------
+
+
+@app.task(name="slack_notify_revision_submitted")
+def slack_notify_revision_submitted(revision_id: str) -> None:
+    """Ensure the project's channel exists, invite the team, and post the review message. Deferred
+    from `krater.web.routers.projects` right after a proposal/amendment/completion submission commits.
+    """
+    settings = get_settings()
+    session = get_sessionmaker()()
+    try:
+        revision = session.get(ProjectRevision, uuid.UUID(revision_id))
+        if revision is None:
+            return
+        slack_notify.notify_revision_submitted(
+            session,
+            get_slack_client(),
+            get_weave_client(),
+            revision=revision,
+            feed_channel_id=settings.slack_feed_channel_id or None,
+        )
+        session.commit()
+    except SlackError:
+        logger.exception("krater.slack_notify_revision_submitted failed")
+        session.rollback()
+    finally:
+        session.close()
+
+
+@app.task(name="slack_notify_decision")
+def slack_notify_decision(revision_id: str) -> None:
+    """Update the review message to show a revision's decided outcome. A no-op if the revision is
+    still pending -- see `krater.services.slack_notify.notify_decision` -- so it's safe to defer
+    unconditionally after any decision (web, Slack, or admin override)."""
+    session = get_sessionmaker()()
+    try:
+        revision = session.get(ProjectRevision, uuid.UUID(revision_id))
+        if revision is None:
+            return
+        slack_notify.notify_decision(session, get_slack_client(), revision=revision)
+        session.commit()
+    except SlackError:
+        logger.exception("krater.slack_notify_decision failed")
+        session.rollback()
+    finally:
+        session.close()
+
+
+@app.task(name="slack_post_admin_override")
+def slack_post_admin_override(
+    project_id: str, *, action: str, actor_name: str, reason: str | None = None, extra: str | None = None
+) -> None:
+    """Post an admin-override notice to a project's channel. A no-op if it has none yet."""
+    session = get_sessionmaker()()
+    try:
+        project = session.get(Project, uuid.UUID(project_id))
+        if project is None:
+            return
+        slack_notify.post_admin_override(
+            session,
+            get_slack_client(),
+            project=project,
+            action=action,
+            actor_name=actor_name,
+            reason=reason,
+            extra=extra,
+        )
+        session.commit()
+    except SlackError:
+        logger.exception("krater.slack_post_admin_override failed")
+        session.rollback()
+    finally:
+        session.close()
+
+
+@app.task(name="slack_archive_channel")
+def slack_archive_channel(project_id: str) -> None:
+    """Archive a project's channel. A no-op unless the project is actually `completed`/`withdrawn` --
+    see `krater.services.slack_notify.archive_project_channel` -- so it's safe to defer unconditionally
+    after every decision/withdrawal, whether or not it actually finished the project."""
+    session = get_sessionmaker()()
+    try:
+        project = session.get(Project, uuid.UUID(project_id))
+        if project is None:
+            return
+        slack_notify.archive_project_channel(session, get_slack_client(), project=project)
+        session.commit()
+    except SlackError:
+        logger.exception("krater.slack_archive_channel failed")
+        session.rollback()
+    finally:
+        session.close()
+
+
+@app.task(name="slack_process_approve")
+def slack_process_approve(revision_id: str, slack_user_id: str, response_url: str) -> None:
+    """Handle a Slack Approve button click. Deferred from `POST /slack/interactions` so the route
+    itself can ack within Slack's 3s window."""
+    session = get_sessionmaker()()
+    try:
+        slack_reviews.process_approve(
+            session,
+            get_slack_client(),
+            get_weave_client(),
+            revision_id=uuid.UUID(revision_id),
+            slack_user_id=slack_user_id,
+            response_url=response_url,
+        )
+    except SlackError:
+        logger.exception("krater.slack_process_approve failed")
+        session.rollback()
+    finally:
+        session.close()
+
+
+@app.task(name="slack_process_reject")
+def slack_process_reject(revision_id: str, slack_user_id: str, reason: str, response_url: str) -> None:
+    """Handle a Slack reject-modal submission. Deferred from `POST /slack/interactions`."""
+    session = get_sessionmaker()()
+    try:
+        slack_reviews.process_reject(
+            session,
+            get_slack_client(),
+            get_weave_client(),
+            revision_id=uuid.UUID(revision_id),
+            slack_user_id=slack_user_id,
+            reason=reason,
+            response_url=response_url,
+        )
+    except SlackError:
+        logger.exception("krater.slack_process_reject failed")
+        session.rollback()
+    finally:
+        session.close()
+
+
+def _slack_reconcile_cron() -> str:
+    """`*/N * * * *` from `slack_reconcile_interval_minutes` -- see `_skypilot_reconcile_cron` above."""
+    return f"*/{get_settings().slack_reconcile_interval_minutes} * * * *"
+
+
+@app.periodic(cron=_slack_reconcile_cron())
+@app.task(name="slack_reconcile")
+def slack_reconcile(timestamp: int) -> None:
+    """Invite newly-added reviewers to open project channels, post any missed budget warning/teardown
+    notifications, and archive any finished project's channel that was missed. Thin wrapper around
+    `krater.services.slack_notify.reconcile`."""
+    del timestamp
+    session = get_sessionmaker()()
+    try:
+        slack_notify.reconcile(session, get_slack_client(), get_weave_client())
+    except SlackError:
+        # `reconcile` already catches per-step Slack errors and logs+continues; last-resort net, as in
+        # `skypilot_reconcile` above.
+        logger.exception("krater.slack_reconcile task failed")
     finally:
         session.close()
