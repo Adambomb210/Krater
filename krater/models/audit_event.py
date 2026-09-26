@@ -20,8 +20,11 @@ if TYPE_CHECKING:
 class AuditEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     __tablename__ = "audit_events"
 
-    actor_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=False, index=True
+    # Nullable: the SkyPilot reconciler (`krater.services.skypilot_sync`) writes audit events as a
+    # system actor with no `User` behind it (there's no human to attribute a periodic reconcile run
+    # to). Every human-triggered action still always supplies an actor.
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=True, index=True
     )
     # Open-ended (e.g. "admin_approve", "budget_adjust", "launch_blocked") per SPEC.md -- not an enum,
     # since new admin actions shouldn't need a migration to be logged.
@@ -32,7 +35,7 @@ class AuditEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
     reason: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
 
-    actor: Mapped[User] = relationship(back_populates="audit_events")
+    actor: Mapped[User | None] = relationship(back_populates="audit_events")
     project: Mapped[Project | None] = relationship()
 
     def __repr__(self) -> str:
