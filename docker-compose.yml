@@ -76,6 +76,125 @@ services:
     depends_on:
       - storage
 
+  # -- SkyPilot compute (see docs/skypilot-integration.md, docs/dev/skypilot-spike.md) --------------
+  # Both behind the `skypilot` profile: `docker compose up` (no --profile) stays UI-only, no Weave or
+  # Vast credentials required. `docker compose --profile skypilot up` brings these two up too.
+
+  # The SkyPilot API server. Image/version pinned to what docs/dev/skypilot-spike.md was actually run
+  # against -- bump both together and re-check the spike's findings before changing it.
+  #
+  # The server config (~/.sky/config.yaml) is generated from env at container start, the same way
+  # `storage`'s identities file is, so nothing secret (the policy token) is committed. NOTE: the exact
+  # `sky api start` invocation below is our best reading of SkyPilot's own server docs -- it could not
+  # be exercised against a real container in this environment (no Docker here); verify it against a
+  # real `docker compose --profile skypilot up` before relying on it, per docs/dev/staging.md.
+  skypilot:
+    image: berkeleyskypilot/skypilot:0.13.0
+    profiles: ["skypilot"]
+    env_file: .env
+    environment:
+      KRATER_PUBLIC_URL: ${KRATER_PUBLIC_URL:-http://localhost:8000}
+      KRATER_SKYPILOT_POLICY_TOKEN: ${KRATER_SKYPILOT_POLICY_TOKEN}
+      # Member SSO: the API server delegates auth decisions to `auth-proxy` over the internal network.
+      # See docs/dev/skypilot-spike.md section 3 for the GET {base_url}/oauth2/auth contract this uses.
+      SKYPILOT_AUTH_OAUTH2_PROXY_ENABLED: "true"
+      SKYPILOT_AUTH_OAUTH2_PROXY_BASE_URL: "http://auth-proxy:4180"
+      # Krater's admin REST calls use a service-account bearer token instead (see
+      # KRATER_SKYPILOT_SERVICE_TOKEN); both flags are required to mint and accept one (spike Surprise
+      # and section 3). ENABLE_BASIC_AUTH is only needed for the one-time bootstrap that creates that
+      # token (docs/dev/staging.md) -- it doesn't affect member sign-in, which goes through auth-proxy.
+      ENABLE_BASIC_AUTH: "true"
+      ENABLE_SERVICE_ACCOUNTS: "true"
+      SKYPILOT_BASIC_AUTH_USER: ${KRATER_SKYPILOT_BASIC_AUTH_USER:-admin}
+      # No safe default here on purpose -- set a real value in .env before using --profile skypilot.
+      SKYPILOT_BASIC_AUTH_PASSWORD: ${KRATER_SKYPILOT_BASIC_AUTH_PASSWORD:-changeme-set-in-dot-env}
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      set -eu
+      mkdir -p /root/.sky /root/.config/vastai
+      cat > /root/.sky/config.yaml <<CFG
+      # Generated at container start by docker-compose.yml's "skypilot" service -- do not edit by hand.
+
+      # docs/dev/skypilot-spike.md Surprise #1: this URL is also called from members' own machines
+      # (client-side, before the request ever reaches this server), so it must be publicly reachable,
+      # not an internal Docker hostname like http://portal:8000.
+      admin_policy: ${KRATER_PUBLIC_URL}/internal/skypilot/policy?token=${KRATER_SKYPILOT_POLICY_TOKEN}
+
+      # Spike Surprise #5: without this, every new SSO login defaults to SkyPilot role admin.
+      rbac:
+        default_role: user
+
+      # The "default" workspace isn't tied to any Ganymede project -- disable every cloud in it so
+      # nothing can be launched outside a project's own (per-project) workspace. There is no
+      # workspace-level cloud allowlist (spike section 2): each cloud has to be deny-listed individually.
+      workspaces:
+        default:
+          aws: {disabled: true}
+          azure: {disabled: true}
+          cudo: {disabled: true}
+          do: {disabled: true}
+          fluidstack: {disabled: true}
+          gcp: {disabled: true}
+          hyperbolic: {disabled: true}
+          ibm: {disabled: true}
+          kubernetes: {disabled: true}
+          lambda: {disabled: true}
+          mithril: {disabled: true}
+          nebius: {disabled: true}
+          oci: {disabled: true}
+          paperspace: {disabled: true}
+          primeintellect: {disabled: true}
+          runpod: {disabled: true}
+          scp: {disabled: true}
+          seeweb: {disabled: true}
+          shadeform: {disabled: true}
+          ssh: {disabled: true}
+          vast: {disabled: true}
+          vsphere: {disabled: true}
+          yotta: {disabled: true}
+      CFG
+      exec sky api start --deploy --foreground
+    ports:
+      - "${SKYPILOT_PORT:-46580}:46580"
+    volumes:
+      - krater_skypilot_data:/root/.sky
+      # A local file holding the Vast API key, never committed. Falls back to /dev/null (an empty,
+      # always-present file) so plain `docker compose up` (this service isn't in its default profile)
+      # never fails to parse just because this isn't set.
+      - ${KRATER_SKYPILOT_VAST_KEY_FILE:-/dev/null}:/root/.config/vastai/vast_api_key:ro
+    depends_on:
+      - auth-proxy
+
+  # oauth2-proxy in front of `skypilot`, authenticating members against Weave. See
+  # docs/skypilot-integration.md section 0 for the settings this follows.
+  auth-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+    profiles: ["skypilot"]
+    env_file: .env
+    environment:
+      OAUTH2_PROXY_HTTP_ADDRESS: "0.0.0.0:4180"
+      OAUTH2_PROXY_UPSTREAMS: "http://skypilot:46580"
+      OAUTH2_PROXY_PROVIDER: "oidc"
+      OAUTH2_PROXY_OIDC_ISSUER_URL: ${KRATER_WEAVE_ISSUER}
+      # A separate, confidential Weave OAuth app -- not Krater's own KRATER_WEAVE_CLIENT_ID/SECRET.
+      OAUTH2_PROXY_CLIENT_ID: ${KRATER_SKYPILOT_AUTH_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${KRATER_SKYPILOT_AUTH_CLIENT_SECRET}
+      OAUTH2_PROXY_COOKIE_SECRET: ${KRATER_SKYPILOT_AUTH_COOKIE_SECRET}
+      OAUTH2_PROXY_REDIRECT_URL: "${KRATER_SKYPILOT_PUBLIC_URL:-http://localhost:46580}/oauth2/callback"
+      OAUTH2_PROXY_SCOPE: "openid email profile groups"
+      OAUTH2_PROXY_OIDC_GROUPS_CLAIM: "groups"
+      # Depends on Weave's `groups` claim (branch Krater-Integration, not yet merged) -- see
+      # docs/skypilot-integration.md section 0 for the fallback (drop this, rely on private workspaces
+      # alone) if it isn't available yet.
+      OAUTH2_PROXY_ALLOWED_GROUPS: "ganymede:member"
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_CODE_CHALLENGE_METHOD: "S256"
+      OAUTH2_PROXY_COOKIE_EXPIRE: "8h"
+      OAUTH2_PROXY_COOKIE_SECURE: ${KRATER_SKYPILOT_AUTH_COOKIE_SECURE:-true}
+    ports:
+      - "${SKYPILOT_AUTH_PROXY_PORT:-8080}:4180"
+
 volumes:
   krater_db_data:
   krater_storage_data:
+  krater_skypilot_data:
