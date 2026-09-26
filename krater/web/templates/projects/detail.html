@@ -23,6 +23,25 @@
     <p class="policy-note">{{ summary.policy_explanation }}</p>
   {% endif %}
 
+  {% if skypilot_budget_flag == "teardown" %}
+    <p class="skypilot-banner">
+      Budget reached: this project's SkyPilot clusters and managed jobs have been torn down. New
+      launches are blocked until the ceiling is raised.
+    </p>
+  {% elif skypilot_budget_flag == "warning" %}
+    <p class="skypilot-banner">
+      Warning: this project is approaching its compute budget ceiling.
+    </p>
+  {% endif %}
+
+  {% if project.skypilot_workspace %}
+    <p class="skypilot-hint">
+      SkyPilot workspace: <code>{{ project.skypilot_workspace }}</code>.
+      Sign in with <code>sky api login</code> and launch with
+      <code>sky launch -w {{ project.skypilot_workspace }} ...</code>.
+    </p>
+  {% endif %}
+
   {% if summary.current_revision %}
     <h2>{{ "Draft" if not summary.current_revision.submitted_at else "Write-up" }}</h2>
     <p class="write-up">{{ summary.current_revision.write_up | nl2br }}</p>
