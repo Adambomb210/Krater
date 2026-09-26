@@ -236,6 +236,7 @@ arm64; SkyPilot publishes arm64 images, so that works.
 | `worker` | Same image, runs background jobs: Slack work, the spend reconciler, reviewer-channel sync |
 | `db` | Postgres |
 | `skypilot` | SkyPilot API server with the Vast credentials; out of scope except for its configuration |
+| `storage` | Temporary self-hosted S3-compatible storage (SeaweedFS) for gallery screenshots, until a provider is chosen |
 | `auth-proxy` | oauth2-proxy with Weave as the OIDC issuer; members sign in to the SkyPilot CLI and dashboard through it |
 
 Networking:
@@ -248,8 +249,9 @@ Networking:
 
 ## Open questions
 
-1. **Screenshot storage provider.** S3-compatible for now; pick a provider (self-hosted MinIO next to the portal, or
-   R2/B2/S3). A reminder is set to circle back.
+1. **Screenshot storage provider.** Temporarily a self-hosted SeaweedFS container (`storage` in docker-compose).
+   MinIO was ruled out because its community edition stopped publishing images in 2025. Still to pick a long-term
+   provider (e.g. R2/B2/S3, or keep SeaweedFS with backups). A reminder is set to circle back.
 2. **How members use SkyPilot:** decided. One private SkyPilot workspace per project, and members sign in to SkyPilot
    with Weave (oauth2-proxy, limited to `ganymede:member`). See
    [skypilot-integration.md §0](skypilot-integration.md#0-member-access-one-workspace-per-project-sign-in-with-weave).
