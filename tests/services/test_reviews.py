@@ -259,3 +259,84 @@ def test_cannot_review_a_draft_revision(db_session: Session, member: Actor, revi
             decision=ReviewDecision.APPROVE,
             source=ReviewSource.WEB,
         )
+
+
+def test_withdraw_supersedes_the_pending_revision_and_a_review_cannot_bring_it_back(
+    db_session: Session, member: Actor, reviewer: Actor
+) -> None:
+    """A withdrawn project's still-`pending` submitted revision must not be approvable back to life:
+    `withdraw` has to mark it `superseded`, and `record_review` has to reject it regardless."""
+    project = _submitted_project(db_session, member)
+    pending_revision = project.current_revision
+
+    projects.withdraw(db_session, member, project=project)
+    db_session.refresh(project)
+    assert project.status is ProjectStatus.WITHDRAWN
+    db_session.refresh(pending_revision)
+    assert pending_revision.outcome is RevisionOutcome.SUPERSEDED
+
+    with pytest.raises(InvalidState):
+        projects.record_review(
+            db_session,
+            reviewer,
+            revision=pending_revision,
+            decision=ReviewDecision.APPROVE,
+            source=ReviewSource.WEB,
+        )
+    db_session.refresh(project)
+    assert project.status is ProjectStatus.WITHDRAWN
+
+
+def test_withdrawn_project_does_not_appear_in_the_review_queue(
+    db_session: Session, member: Actor, reviewer: Actor
+) -> None:
+    project = _submitted_project(db_session, member)
+    projects.withdraw(db_session, member, project=project)
+
+    queue = projects.review_queue(db_session, reviewer)
+
+    assert project.current_revision not in queue
+
+
+def test_admin_decide_cannot_resurrect_a_withdrawn_project(db_session: Session, member: Actor, admin: Actor) -> None:
+    project = _submitted_project(db_session, member)
+    pending_revision = project.current_revision
+    projects.withdraw(db_session, member, project=project)
+
+    with pytest.raises(InvalidState):
+        projects.admin_decide(
+            db_session, admin, revision=pending_revision, decision=ReviewDecision.APPROVE, reason="override"
+        )
+    db_session.refresh(project)
+    assert project.status is ProjectStatus.WITHDRAWN
+
+
+def test_cannot_review_a_completion_revision_while_project_is_not_in_completion_review(
+    db_session: Session, member: Actor, admin: Actor, reviewer: Actor
+) -> None:
+    """A completion revision must only be decided while the project is `pending_completion_review` --
+    e.g. not after an admin has withdrawn the project out from under an in-flight completion review."""
+    project = _submitted_project(db_session, member)
+    projects.admin_decide(
+        db_session, admin, revision=project.current_revision, decision=ReviewDecision.APPROVE, reason="ok"
+    )
+    db_session.refresh(project)
+    projects.start_completion(db_session, member, project=project)
+    project = projects.submit_completion(db_session, member, project=project)
+    completion_revision = project.current_revision
+    assert project.status is ProjectStatus.PENDING_COMPLETION_REVIEW
+
+    projects.withdraw(db_session, admin, project=project, reason="stopping the completion review")
+    db_session.refresh(project)
+    assert project.status is ProjectStatus.WITHDRAWN
+    db_session.refresh(completion_revision)
+    assert completion_revision.outcome is RevisionOutcome.SUPERSEDED
+
+    with pytest.raises(InvalidState):
+        projects.record_review(
+            db_session,
+            reviewer,
+            revision=completion_revision,
+            decision=ReviewDecision.APPROVE,
+            source=ReviewSource.WEB,
+        )
