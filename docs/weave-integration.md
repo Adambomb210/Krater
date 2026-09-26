@@ -26,7 +26,7 @@ exists.** Build against `config/routes.rb`, not that doc.
 
 ## Required Weave changes
 
-Krater v1 depends on these. Changes 1–3 are implemented on Weave branch `claude/exciting-sagan-7oh2zh` (not merged yet;
+Krater v1 depends on these. Changes 1–3 are implemented on Weave branch `Krater-Integration` (not merged yet;
 see that branch's `docs/OAUTH.md`). The directory API there requires a service key with the `directory:read` scope.
 
 ### 1. `groups` claim (new `groups` scope)

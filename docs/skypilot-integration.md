@@ -75,7 +75,7 @@ cookie_expire = "8h"
 code_challenge_method = "S256"                 # Weave requires PKCE
 ```
 
-Depends on Weave's `groups` claim (on Weave branch `claude/exciting-sagan-7oh2zh`, not merged yet). Until it lands, drop
+Depends on Weave's `groups` claim (on Weave branch `Krater-Integration`, not merged yet). Until it lands, drop
 `allowed_groups` and rely on private workspaces alone. Anyone with a Weave account could then sign in, but they'd see
 nothing.
 
