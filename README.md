@@ -10,6 +10,7 @@ gallery of completed projects.
 - [Weave integration](docs/weave-integration.md): sign-in, roles, and the Weave changes Krater depends on
 - [SkyPilot integration](docs/skypilot-integration.md): workspaces, the admin-policy launch gate, and the spend reconciler
 - [Future work](docs/FUTURE.md): what comes after v1, loose ends, and parked ideas
+- [Run only when compute is cheap](docs/guides/run-when-cheap.md): member guide to interruptible machines
 
 ## Development
 

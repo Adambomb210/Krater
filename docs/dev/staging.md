@@ -198,6 +198,17 @@ Copy the returned `token` (starts `sky_...`) into `.env`'s `KRATER_SKYPILOT_SERV
    policy endpoint with a clear "budget exhausted" message (test this directly too: it's the fastest way to confirm
    `krater/services/launch_policy.py`'s reject path against a real `sky launch`, not just its unit tests).
 
+9. **Interruptible (spot) machines and recovery.** Raise the ceiling, then follow
+   [../guides/run-when-cheap.md](../guides/run-when-cheap.md) with a tiny job: `use_spot: true`, a low
+   `max_hourly_cost`, launched with `sky jobs launch -w ganymede-<project-id>`. Confirm that:
+   - the launch gate allows it, and the chosen machine is at or under your `max_hourly_cost`;
+   - an interruption triggers an automatic relaunch. To force one, stop the instance from the Vast console and watch
+     `sky jobs queue`;
+   - the job resumes from its checkpoint;
+   - `cost_report` reflects the interruptible price.
+   Record whether a custom bid via `vast.create_instance_kwargs` (`price` / `bid_price`) works in this SkyPilot version,
+   and whether the launch gate caps it.
+
 ## 7. Comparing spend against Vast billing
 
 SkyPilot's `cost_report` is a **catalog-price × uptime estimate**, not a bill (see
