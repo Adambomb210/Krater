@@ -254,9 +254,12 @@ def test_teardown_does_not_repeat_without_new_clusters(
     assert len(events) == 1
 
 
-def test_teardown_repeats_when_a_new_cluster_appears(
+def test_teardown_downs_a_new_cluster_but_does_not_spam_a_new_audit_event(
     db_session: Session, member: Actor, reviewer: Actor, client
 ) -> None:
+    """A new cluster appearing after the first teardown (still over the *same* ceiling) must still be
+    torn down every run, but the audit trail dedupes to one event per crossing (like the warning) with
+    a running count, rather than a fresh row every reconcile tick."""
     project = _approve(db_session, member, reviewer, budget_cents=1000)
     sync_workspaces(db_session, client)
     name = project.skypilot_workspace
@@ -268,11 +271,43 @@ def test_teardown_repeats_when_a_new_cluster_appears(
     client.add_cluster(name, cost_cents=1200)
     enforce_budgets(db_session, client, warn_percent=WARN_PERCENT)
 
+    assert client.list_clusters(name) == []
     events = db_session.scalars(
         select(AuditEvent).where(AuditEvent.action == AUDIT_BUDGET_TEARDOWN, AuditEvent.project_id == project.id)
     ).all()
-    assert len(events) == 2
-    assert client.list_clusters(name) == []
+    assert len(events) == 1
+    assert events[0].payload["teardown_count"] == 2
+
+
+def test_teardown_tears_down_a_relaunched_cluster_with_a_reused_name(
+    db_session: Session, member: Actor, admin: Actor, client
+) -> None:
+    """The HIGH finding: a member relaunches a cluster under the *same name* after the ceiling was
+    raised. Gating the teardown on "have I seen this cluster name before" (rather than tearing down
+    unconditionally whenever spend >= ceiling) let a reused name dodge every subsequent teardown."""
+    project = projects.create_project(db_session, member, title="T", write_up="w", budget_requested_cents=10_000)
+    project = projects.submit(db_session, member, project=project)
+    projects.admin_decide(
+        db_session, admin, revision=project.current_revision, decision=ReviewDecision.APPROVE, reason="ok"
+    )
+    sync_workspaces(db_session, client)
+    workspace = project.skypilot_workspace
+
+    client.add_cluster(workspace, 10_000, name="train")
+    sync_spend(db_session, client)
+    enforce_budgets(db_session, client, warn_percent=WARN_PERCENT)
+    assert client.list_clusters(workspace) == []  # first teardown works
+
+    projects.admin_adjust_budget(db_session, admin, project=project, amount_cents=5_000, reason="more budget")
+    client.add_cluster(workspace, 16_000, name="train")  # relaunched with the same name, now over the new ceiling
+    sync_spend(db_session, client)
+    enforce_budgets(db_session, client, warn_percent=WARN_PERCENT)
+
+    assert client.list_clusters(workspace) == []
+    events = db_session.scalars(
+        select(AuditEvent).where(AuditEvent.action == AUDIT_BUDGET_TEARDOWN, AuditEvent.project_id == project.id)
+    ).all()
+    assert len(events) == 2  # re-armed by the ceiling change, per-crossing
 
 
 def test_raising_the_ceiling_re_arms_the_warning(db_session: Session, member: Actor, reviewer: Actor, client) -> None:
