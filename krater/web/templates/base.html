@@ -14,7 +14,16 @@
           <a href="/">Home</a>
           <a href="#">Projects</a>
           <a href="#">Gallery</a>
-          <a href="#">Sign in</a>
+          {% set signed_in_name = request.session.get('display_name') %}
+          {% if signed_in_name %}
+            <span class="site-nav__user">{{ signed_in_name }}</span>
+            <form class="site-nav__logout" action="/logout" method="post">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="link-button">Sign out</button>
+            </form>
+          {% else %}
+            <a href="/login">Sign in</a>
+          {% endif %}
         </nav>
       </div>
     </header>

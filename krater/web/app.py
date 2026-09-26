@@ -12,7 +12,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.staticfiles import StaticFiles
 
 from krater.config import get_settings
-from krater.web.routers import pages
+from krater.web.routers import auth, pages
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -27,5 +27,6 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     app.include_router(pages.router)
+    app.include_router(auth.router)
 
     return app
