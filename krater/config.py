@@ -86,7 +86,12 @@ class Settings(BaseSettings):
                 raise ValueError("KRATER_S3_MODE cannot be 'fake' when KRATER_ENV=production")
             if self.skypilot_mode == "live" and len(self.skypilot_policy_token) < 32:
                 raise ValueError("KRATER_SKYPILOT_POLICY_TOKEN must be at least 32 characters in production")
-            if len(self.secret_key) < MIN_SECRET_KEY_LENGTH or self.secret_key == DEFAULT_SECRET_KEY:
+            # Also refuse anything that still looks like a placeholder (e.g. a lengthened copy of .env.example's).
+            if (
+                len(self.secret_key) < MIN_SECRET_KEY_LENGTH
+                or self.secret_key == DEFAULT_SECRET_KEY
+                or "change-me" in self.secret_key.lower()
+            ):
                 raise ValueError(
                     f"KRATER_SECRET_KEY must be set to a non-default value of at least "
                     f"{MIN_SECRET_KEY_LENGTH} characters when KRATER_ENV=production"

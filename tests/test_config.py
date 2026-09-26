@@ -59,6 +59,11 @@ def test_production_rejects_the_default_secret_key() -> None:
         Settings(**{**_PRODUCTION_READY, "secret_key": "insecure-dev-secret-change-me"})
 
 
+def test_production_rejects_a_long_placeholder_secret_key() -> None:
+    with pytest.raises(ValueError, match="SECRET_KEY"):
+        Settings(**{**_PRODUCTION_READY, "secret_key": "change-me-in-production-" + "x" * 40})
+
+
 def test_production_rejects_a_short_secret_key() -> None:
     with pytest.raises(ValueError, match="SECRET_KEY"):
         Settings(**{**_PRODUCTION_READY, "secret_key": "x" * (MIN_SECRET_KEY_LENGTH - 1)})
