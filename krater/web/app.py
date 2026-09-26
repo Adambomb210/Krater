@@ -5,6 +5,7 @@ Run with: `uv run uvicorn krater.web.app:create_app --factory --reload`
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,11 +16,18 @@ from starlette.staticfiles import StaticFiles
 
 from krater.config import get_settings
 from krater.services.errors import NotAllowed, NotFound
+from krater.web.logging_config import configure_logging
+from krater.web.rate_limit import RateLimitMiddleware
+from krater.web.request_id import RequestIdMiddleware
 from krater.web.routers import admin, auth, gallery, pages, projects, reviews, skypilot_policy, slack_interactions
+from krater.web.security_headers import SecurityHeadersMiddleware, apply_security_headers
 from krater.web.templates import templates
 from krater.worker.app import app as procrastinate_app
 
 STATIC_DIR = Path(__file__).parent / "static"
+SESSION_COOKIE_NAME = "krater_session"
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -36,10 +44,29 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    configure_logging(settings)
 
     app = FastAPI(title="Krater", lifespan=_lifespan)
 
-    app.add_middleware(SessionMiddleware, secret_key=settings.secret_key)
+    # Middleware order matters here (see each middleware's own docstring):
+    #  - `RequestIdMiddleware` outermost, so every log line from everything inside it -- including
+    #    session handling and the security-headers pass -- carries the same request id.
+    #  - `SessionMiddleware` next, so `request.session` is populated before `RateLimitMiddleware` (which
+    #    keys general POSTs by signed-in user id when there is one) ever needs it.
+    #  - `SecurityHeadersMiddleware` stamps every response, including a 429 from the rate limiter below
+    #    it or a 403/404/500 from the exception handlers further in.
+    #  - `RateLimitMiddleware` innermost, closest to the actual routes.
+    app.add_middleware(RateLimitMiddleware, settings=settings)
+    app.add_middleware(SecurityHeadersMiddleware, settings=settings)
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=settings.secret_key,
+        session_cookie=SESSION_COOKIE_NAME,
+        max_age=settings.session_cookie_max_age_seconds,
+        same_site="lax",
+        https_only=settings.env == "production",
+    )
+    app.add_middleware(RequestIdMiddleware)
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -59,5 +86,18 @@ def create_app() -> FastAPI:
     @app.exception_handler(NotFound)
     def _handle_not_found(request: Request, exc: NotFound):
         return templates.TemplateResponse(request, "errors/404.html", status_code=404)
+
+    @app.exception_handler(Exception)
+    def _handle_unexpected_error(request: Request, exc: Exception):
+        logger.exception("unhandled exception handling %s %s", request.method, request.url.path)
+        # Outside production, let it propagate: local dev/tests want the real traceback, not a page
+        # asking them to look at logs that are, in this case, right there in the terminal.
+        if get_settings().env != "production":
+            raise exc
+        response = templates.TemplateResponse(request, "errors/500.html", status_code=500)
+        # This handler runs on Starlette's `ServerErrorMiddleware`, outside `SecurityHeadersMiddleware` --
+        # see `apply_security_headers`'s docstring for why it has to be called directly here too.
+        apply_security_headers(response, get_settings())
+        return response
 
     return app
