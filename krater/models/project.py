@@ -50,6 +50,11 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     repo_url: Mapped[str | None] = mapped_column(sa.String(2048), nullable=True)
     slack_channel_id: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
+    # Set once the channel has been archived (on `completed`/`withdrawn`; see `krater.services.slack_notify`).
+    # `slack_channel_id` is kept even after archiving, so the project page can still link to it.
+    slack_channel_archived: Mapped[bool] = mapped_column(
+        sa.Boolean, nullable=False, default=False, server_default=sa.false()
+    )
     skypilot_workspace: Mapped[str | None] = mapped_column(sa.String(255), nullable=True)
 
     submitter: Mapped[User] = relationship(foreign_keys=[submitter_id], back_populates="projects")

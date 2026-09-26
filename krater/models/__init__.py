@@ -16,6 +16,7 @@ from krater.models.enums import (
 from krater.models.project import Project
 from krater.models.project_revision import ProjectRevision
 from krater.models.review import Review
+from krater.models.slack_notification import SlackNotification
 from krater.models.spend_snapshot import SpendSnapshot
 from krater.models.user import User
 
@@ -33,6 +34,7 @@ __all__ = [
     "ReviewSource",
     "RevisionKind",
     "RevisionOutcome",
+    "SlackNotification",
     "SpendSnapshot",
     "SpendSource",
     "User",

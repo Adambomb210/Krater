@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     skypilot_autodown_idle_minutes: int = 30
     skypilot_max_hourly_cost_cents: int = 500  # per-instance cap forced onto every launch
 
+    # Slack integration (review happens in Slack; see docs/SPEC.md "Slack integration" and
+    # docs/dev/slack-setup.md). `fake` is an in-memory Slack for dev and tests, mirroring `skypilot_mode`.
+    slack_mode: Literal["fake", "live"] = "fake"
+    slack_bot_token: str = ""
+    slack_signing_secret: str = ""
+    slack_feed_channel_id: str = ""
+    slack_reconcile_interval_minutes: int = 10
+
     # S3-compatible object storage (gallery screenshots). docker-compose runs a temporary SeaweedFS as `storage`.
     s3_endpoint_url: str = ""
     s3_public_endpoint_url: str = ""
@@ -59,6 +67,8 @@ class Settings(BaseSettings):
                 raise ValueError("KRATER_WEAVE_MODE cannot be 'stub' when KRATER_ENV=production")
             if self.skypilot_mode == "fake":
                 raise ValueError("KRATER_SKYPILOT_MODE cannot be 'fake' when KRATER_ENV=production")
+            if self.slack_mode == "fake":
+                raise ValueError("KRATER_SLACK_MODE cannot be 'fake' when KRATER_ENV=production")
             if self.skypilot_mode == "live" and len(self.skypilot_policy_token) < 32:
                 raise ValueError("KRATER_SKYPILOT_POLICY_TOKEN must be at least 32 characters in production")
             if self.secret_key == DEFAULT_SECRET_KEY:

@@ -9,6 +9,7 @@ conversions), calling the service, and turning its domain errors into the right 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from typing import Annotated
 
 import sqlalchemy as sa
@@ -29,19 +30,45 @@ from krater.models import (
     User,
 )
 from krater.services import projects as project_service
+from krater.services import slack_membership
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
 from krater.services.skypilot_sync import current_budget_flag
+from krater.slack import get_slack_client
 from krater.web.csrf import verify_csrf_token
 from krater.web.deps import fresh_actor
 from krater.web.flash import flash
 from krater.web.forms import UnknownEmails, parse_credited_builder_emails, parse_tags
 from krater.web.money import InvalidDollarAmount, cents_to_input, parse_dollars
 from krater.web.templates import templates
+from krater.worker.app import (
+    slack_archive_channel,
+    slack_notify_decision,
+    slack_notify_revision_submitted,
+    slack_post_admin_override,
+)
 
 router = APIRouter()
 
 _TERMINAL_STATUSES = (ProjectStatus.COMPLETED, ProjectStatus.WITHDRAWN)
+
+#: `docs/SPEC.md` "Roles & authentication" -- shown when the interim Slack membership gate blocks a
+#: submission. Plain text (flash messages aren't rendered as HTML), with the Weave URL spelled out so
+#: it still reads as a link.
+_SLACK_MEMBERSHIP_REQUIRED_MESSAGE = (
+    "Join the Patchwork Labs Slack and accept the code of conduct before you can submit. "
+    "Manage your account at {weave_url}, then try again."
+)
+
+
+def _enforce_slack_membership(db_session: Session, actor: Actor) -> str | None:
+    """`None` if `actor` passes the interim Slack membership gate (`docs/SPEC.md` "Roles &
+    authentication"), else a user-facing error message to flash. Drafts are always allowed; this is
+    only called from the submit routes, right before handing off to `project_service`."""
+    if slack_membership.is_full_slack_member(db_session, get_slack_client(), actor.user):
+        return None
+    weave_url = get_settings().weave_issuer or "your Weave profile"
+    return _SLACK_MEMBERSHIP_REQUIRED_MESSAGE.format(weave_url=weave_url)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -73,8 +100,19 @@ def _invalid_state_redirect(
     return _redirect_to_project(project_id)
 
 
-def _success_redirect(db_session: Session, request: Request, project_id: uuid.UUID, message: str) -> RedirectResponse:
+def _success_redirect(
+    db_session: Session,
+    request: Request,
+    project_id: uuid.UUID,
+    message: str,
+    *,
+    after_commit: Callable[[], None] | None = None,
+) -> RedirectResponse:
+    """Commit, run `after_commit` (e.g. deferring a Slack job -- see `docs/SPEC.md` "deferred after the
+    web request commits"), flash `message`, and redirect back to the project."""
     db_session.commit()
+    if after_commit is not None:
+        after_commit()
     flash(request, message, "success")
     return _redirect_to_project(project_id)
 
@@ -350,6 +388,13 @@ def submit_project(
     actor: Annotated[Actor, Depends(fresh_actor)],
 ):
     project = _get_visible_project(db_session, actor, project_id)
+
+    membership_error = _enforce_slack_membership(db_session, actor)
+    if membership_error is not None:
+        db_session.rollback()
+        flash(request, membership_error, "error")
+        return _redirect_to_project(project_id)
+
     try:
         project_service.submit(db_session, actor, project=project)
     except ValidationFailed as exc:
@@ -364,7 +409,13 @@ def submit_project(
         )
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
-    return _success_redirect(db_session, request, project_id, "Project submitted for review.")
+
+    revision_id = project.current_revision_id
+
+    def _notify() -> None:
+        slack_notify_revision_submitted.defer(revision_id=str(revision_id))
+
+    return _success_redirect(db_session, request, project_id, "Project submitted for review.", after_commit=_notify)
 
 
 @router.post("/projects/{project_id}/submit-completion", dependencies=[Depends(verify_csrf_token)])
@@ -375,6 +426,13 @@ def submit_completion(
     actor: Annotated[Actor, Depends(fresh_actor)],
 ):
     project = _get_visible_project(db_session, actor, project_id)
+
+    membership_error = _enforce_slack_membership(db_session, actor)
+    if membership_error is not None:
+        db_session.rollback()
+        flash(request, membership_error, "error")
+        return _redirect_to_project(project_id)
+
     try:
         project_service.submit_completion(db_session, actor, project=project)
     except ValidationFailed as exc:
@@ -389,7 +447,13 @@ def submit_completion(
         )
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
-    return _success_redirect(db_session, request, project_id, "Completion submitted for review.")
+
+    revision_id = project.current_revision_id
+
+    def _notify() -> None:
+        slack_notify_revision_submitted.defer(revision_id=str(revision_id))
+
+    return _success_redirect(db_session, request, project_id, "Completion submitted for review.", after_commit=_notify)
 
 
 @router.post("/projects/{project_id}/amend", dependencies=[Depends(verify_csrf_token)])
@@ -433,6 +497,7 @@ def withdraw_project(
     reason: Annotated[str, Form()] = "",
 ):
     project = _get_visible_project(db_session, actor, project_id)
+    is_self = actor.user.id == project.submitter_id
     try:
         project_service.withdraw(db_session, actor, project=project, reason=reason or None)
     except ValidationFailed as exc:
@@ -441,7 +506,15 @@ def withdraw_project(
         return templates.TemplateResponse(request, "projects/detail.html", context, status_code=422)
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
-    return _success_redirect(db_session, request, project_id, "Project withdrawn.")
+
+    def _notify() -> None:
+        slack_archive_channel.defer(project_id=str(project.id))
+        if not is_self:
+            slack_post_admin_override.defer(
+                project_id=str(project.id), action="admin_withdraw", actor_name=actor.user.display_name, reason=reason
+            )
+
+    return _success_redirect(db_session, request, project_id, "Project withdrawn.", after_commit=_notify)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -481,7 +554,16 @@ def record_review(
         return templates.TemplateResponse(request, "projects/detail.html", context, status_code=422)
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
-    return _success_redirect(db_session, request, project_id, "Review recorded.")
+
+    revision_id = revision.id
+
+    def _notify() -> None:
+        # Both are self-guarding no-ops when they don't apply (still pending / not terminal) -- see
+        # `krater.services.slack_notify` -- so it's safe to always defer them after any decision.
+        slack_notify_decision.defer(revision_id=str(revision_id))
+        slack_archive_channel.defer(project_id=str(project.id))
+
+    return _success_redirect(db_session, request, project_id, "Review recorded.", after_commit=_notify)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -519,7 +601,18 @@ def admin_decide(
         return templates.TemplateResponse(request, "projects/detail.html", context, status_code=422)
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
-    return _success_redirect(db_session, request, project_id, "Decision recorded.")
+
+    revision_id = revision.id
+    action = "admin_approve" if decision_enum is ReviewDecision.APPROVE else "admin_reject"
+
+    def _notify() -> None:
+        slack_notify_decision.defer(revision_id=str(revision_id))
+        slack_archive_channel.defer(project_id=str(project.id))
+        slack_post_admin_override.defer(
+            project_id=str(project.id), action=action, actor_name=actor.user.display_name, reason=reason
+        )
+
+    return _success_redirect(db_session, request, project_id, "Decision recorded.", after_commit=_notify)
 
 
 @router.post("/projects/{project_id}/admin-budget", dependencies=[Depends(verify_csrf_token)])
@@ -567,7 +660,17 @@ def admin_adjust_budget(
         return templates.TemplateResponse(request, "projects/detail.html", context, status_code=422)
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
-    return _success_redirect(db_session, request, project_id, "Budget adjusted.")
+
+    def _notify() -> None:
+        slack_post_admin_override.defer(
+            project_id=str(project.id),
+            action="admin_adjust_budget",
+            actor_name=actor.user.display_name,
+            reason=reason,
+            extra=f"Amount: {amount_cents / 100:+.2f}",
+        )
+
+    return _success_redirect(db_session, request, project_id, "Budget adjusted.", after_commit=_notify)
 
 
 @router.post("/projects/{project_id}/admin-reclaim", dependencies=[Depends(verify_csrf_token)])
@@ -613,7 +716,17 @@ def admin_reclaim_budget(
         return templates.TemplateResponse(request, "projects/detail.html", context, status_code=422)
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
-    return _success_redirect(db_session, request, project_id, "Budget reclaimed.")
+
+    def _notify() -> None:
+        slack_post_admin_override.defer(
+            project_id=str(project.id),
+            action="admin_reclaim_budget",
+            actor_name=actor.user.display_name,
+            reason=reason,
+            extra=f"Reclaimed: {amount_cents / 100:.2f}",
+        )
+
+    return _success_redirect(db_session, request, project_id, "Budget reclaimed.", after_commit=_notify)
 
 
 __all__ = ["router"]
