@@ -13,7 +13,7 @@ from starlette.staticfiles import StaticFiles
 
 from krater.config import get_settings
 from krater.services.errors import NotAllowed, NotFound
-from krater.web.routers import admin, auth, gallery, pages, projects, reviews
+from krater.web.routers import admin, auth, gallery, pages, projects, reviews, skypilot_policy
 from krater.web.templates import templates
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -34,6 +34,7 @@ def create_app() -> FastAPI:
     app.include_router(reviews.router)
     app.include_router(admin.router)
     app.include_router(gallery.router)
+    app.include_router(skypilot_policy.router)
 
     @app.exception_handler(NotAllowed)
     def _handle_not_allowed(request: Request, exc: NotAllowed):
