@@ -1,0 +1,127 @@
+/* Krater base styles. Hand-written, no framework. Brand palette from CLAUDE.md. */
+
+:root {
+  --color-ink: #2a2050;
+  --color-grape: #6c3ec1;
+  --color-deep-purple: #4b006e;
+  --color-lavender: #c7b7e2;
+  --color-quilt: #f7f5fb;
+  --color-white: #ffffff;
+
+  --color-bg: var(--color-quilt);
+  --color-surface: var(--color-white);
+  --color-text: var(--color-ink);
+  --color-text-muted: #5b5570;
+  --color-accent: var(--color-grape);
+  --color-accent-strong: var(--color-deep-purple);
+  --color-border: var(--color-lavender);
+
+  --content-max-width: 40rem;
+  --gutter: 1rem;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family:
+    "Segoe UI",
+    system-ui,
+    -apple-system,
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
+  line-height: 1.5;
+}
+
+a {
+  color: var(--color-accent-strong);
+}
+
+a:hover {
+  color: var(--color-accent);
+}
+
+.site-header {
+  background-color: var(--color-accent-strong);
+  color: var(--color-white);
+}
+
+.site-header__inner {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 0.75rem var(--gutter);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.site-header__brand {
+  color: var(--color-white);
+  font-size: 1.25rem;
+  font-weight: 700;
+  text-decoration: none;
+  letter-spacing: 0.02em;
+}
+
+.site-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.site-nav a {
+  color: var(--color-lavender);
+  text-decoration: none;
+  font-size: 0.95rem;
+}
+
+.site-nav a:hover {
+  color: var(--color-white);
+}
+
+.content {
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+  padding: 2rem var(--gutter);
+}
+
+.card {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+  padding: 1.5rem;
+}
+
+.card h1 {
+  margin-top: 0;
+  color: var(--color-accent-strong);
+}
+
+.muted {
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 30rem) {
+  .content {
+    padding: 1.25rem var(--gutter);
+  }
+
+  .card {
+    padding: 1rem;
+    border-radius: 0.5rem;
+  }
+}
