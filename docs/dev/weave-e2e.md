@@ -122,10 +122,12 @@ Weave bugs that a plain HTTP client can't see:
    correctly blocks for `fetch` -- silently breaking sign-in for any returning user in a real browser.
    Fixed by adding `turbo: false`, matching the (already `turbo: false`) `/oauth/authorize` forms.
 2. Weave's CSP `form-action 'self'` is enforced by Chromium against every redirect a form submission
-   leads to, not just its immediate target -- so submitting the OAuth consent ("Authorize") form, which
-   deliberately ends in a redirect to the client's (cross-origin) `redirect_uri`, was blocked outright.
-   Fixed by widening `form-action` to also allow `https:` always, and `http:` in local/dev environments
-   (matching the existing `Rails.env.local?` http/https split used for the OIDC issuer's protocol).
+   leads to, not just its immediate target. Signing in while an OAuth authorization is pending ends in a
+   redirect to the client's (cross-origin) `redirect_uri` once consent already exists, so the sign-in forms
+   were blocked. Fixed narrowly: while an authorization is pending, Weave's sign-in pages add **only that
+   client's registered redirect origins** to `form-action` (the consent screen already did this). An
+   earlier fix that allowed all `https:` origins on every page was replaced, since it weakened the login
+   form's protection.
 
 Both are fixed on the Weave branch used for this check. If you're re-running this against a Weave
 checkout that predates that fix, sign-in will appear to hang or silently fail in a real browser (it still
