@@ -1,7 +1,7 @@
 """Who is performing an action, and what Weave says they may do.
 
-Built by the web layer (or Slack handlers) from a fresh WeaveClient lookup, then passed explicitly into services. Services
-authorize against `groups` here and never read `User.groups_cached`.
+Built by the web layer (or Slack handlers) from a fresh WeaveClient lookup, then passed explicitly into services.
+Services authorize against `groups` here and never read `User.groups_cached`.
 """
 
 from __future__ import annotations
