@@ -8,8 +8,10 @@ from typing import Literal
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-#: Sentinel used as the default `secret_key`. Production must override it.
+#: Sentinel used as the default `secret_key`. Production must override it (and, either way, production
+#: requires at least `MIN_SECRET_KEY_LENGTH` characters -- see `_validate_production_safety`).
 DEFAULT_SECRET_KEY = "insecure-dev-secret-change-me"
+MIN_SECRET_KEY_LENGTH = 32
 
 
 class Settings(BaseSettings):
@@ -21,6 +23,14 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://root:root@localhost:5432/krater_dev"
     secret_key: str = DEFAULT_SECRET_KEY
     base_url: str = "http://localhost:8000"
+    session_cookie_max_age_seconds: int = 60 * 60 * 24 * 14  # 14 days
+
+    # Trusted reverse proxies in front of this app (e.g. an nginx/ALB terminating TLS). Each hop is
+    # expected to append the client's address to `X-Forwarded-For` -- this is how many trailing hops of
+    # that header the app trusts as having been added by infrastructure it controls, so it can pick out
+    # the real client IP for rate limiting instead of blindly trusting a header any client can forge.
+    # 0 (the default) means: don't trust `X-Forwarded-For` at all, use the socket peer address.
+    trusted_proxy_count: int = 0
 
     # Weave (Patchwork Labs identity provider) integration. See docs/weave-integration.md.
     weave_mode: Literal["stub", "live"] = "stub"
@@ -76,8 +86,26 @@ class Settings(BaseSettings):
                 raise ValueError("KRATER_S3_MODE cannot be 'fake' when KRATER_ENV=production")
             if self.skypilot_mode == "live" and len(self.skypilot_policy_token) < 32:
                 raise ValueError("KRATER_SKYPILOT_POLICY_TOKEN must be at least 32 characters in production")
-            if self.secret_key == DEFAULT_SECRET_KEY:
-                raise ValueError("KRATER_SECRET_KEY must be set to a non-default value when KRATER_ENV=production")
+            if len(self.secret_key) < MIN_SECRET_KEY_LENGTH or self.secret_key == DEFAULT_SECRET_KEY:
+                raise ValueError(
+                    f"KRATER_SECRET_KEY must be set to a non-default value of at least "
+                    f"{MIN_SECRET_KEY_LENGTH} characters when KRATER_ENV=production"
+                )
+            if not self.base_url.startswith("https://"):
+                raise ValueError("KRATER_BASE_URL must be an https:// URL when KRATER_ENV=production")
+            # The live modes above are mandatory in production, so their secrets must actually be set --
+            # an empty value would otherwise pass every mode check above and fail confusingly later
+            # (an unauthenticated Weave/Slack/S3 client, or one Weave rejects) instead of at startup.
+            if not self.weave_client_secret:
+                raise ValueError("KRATER_WEAVE_CLIENT_SECRET must be set when KRATER_ENV=production")
+            if not self.weave_service_key:
+                raise ValueError("KRATER_WEAVE_SERVICE_KEY must be set when KRATER_ENV=production")
+            if not self.slack_signing_secret:
+                raise ValueError("KRATER_SLACK_SIGNING_SECRET must be set when KRATER_ENV=production")
+            if not self.s3_access_key_id:
+                raise ValueError("KRATER_S3_ACCESS_KEY_ID must be set when KRATER_ENV=production")
+            if not self.s3_secret_access_key:
+                raise ValueError("KRATER_S3_SECRET_ACCESS_KEY must be set when KRATER_ENV=production")
         return self
 
 
