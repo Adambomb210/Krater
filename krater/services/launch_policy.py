@@ -17,9 +17,9 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from krater.config import Settings
-from krater.models import Project, ProjectStatus
+from krater.models import Project, ProjectStatus, User
 from krater.services import budget
-from krater.skypilot_policy.envelope import PolicyRequest
+from krater.skypilot_policy.envelope import PolicyRequest, PolicyUser
 
 #: `request_name` values that actually reserve/consume compute, and so are the only ones subject to
 #: rejection (missing/unknown workspace, inactive project, exhausted budget). Everything else --
@@ -53,6 +53,14 @@ _WORKSPACE_HELP = (
     "name is on your project's Krater page), or add `active_workspace: <workspace>` under your "
     "`~/.sky/config.yaml`."
 )
+
+#: Generic reject messages for someone *not* on the project's team (see `_is_on_team`): they carry none
+#: of the project's title, status or spend/ceiling figures. Any Krater project's workspace name can be
+#: put in a `sky launch -w <name>` by anyone who guesses or overhears it -- this endpoint has no auth of
+#: its own (see the module docstring's "no side effects" note) -- so a non-member shouldn't be able to
+#: learn anything about a project they're not on by probing workspace names against it.
+_GENERIC_NOT_ACTIVE_MESSAGE = "This Ganymede project isn't available for compute launches right now."
+_GENERIC_BUDGET_MESSAGE = "This Ganymede project's compute budget doesn't allow launches right now."
 
 
 @dataclass(frozen=True)
@@ -123,6 +131,26 @@ def _apply_mutations(task: dict[str, Any], settings: Settings) -> dict[str, Any]
     return task
 
 
+def _is_on_team(session: Session, project: Project, user: PolicyUser | None) -> bool:
+    """Whether the requester in `user` (SkyPilot's server-side `user:` block, empty client-side -- see
+    `docs/dev/skypilot-spike.md` "User identity") is on `project`'s team: its submitter or a credited
+    builder on its current revision. SkyPilot identifies users by email (`docs/skypilot-integration.md`
+    section 0), and the spike confirms `user.name` carries it -- the same field the route already logs
+    as `"user"` on a reject.
+
+    `user` is `None`/has no `name` on the client-side call (or a fake/local server we've never seen);
+    treated as "not on the team" -- fail toward the generic message, never toward leaking details.
+    """
+    if user is None or not user.name:
+        return False
+    emails = {project.submitter.email}
+    revision = project.current_revision
+    if revision is not None and revision.credited_builder_ids:
+        builders = session.scalars(sa.select(User).where(User.id.in_(revision.credited_builder_ids)))
+        emails.update(builder.email for builder in builders)
+    return user.name in emails
+
+
 def decide(request: PolicyRequest, session: Session, settings: Settings) -> PolicyDecision:
     """Decide whether to allow `request`'s launch.
 
@@ -147,6 +175,8 @@ def decide(request: PolicyRequest, session: Session, settings: Settings) -> Poli
             return Reject(f"Workspace '{workspace}' isn't a Ganymede project on Krater. {_WORKSPACE_HELP}")
 
         if project.status not in _ACTIVE_STATUSES:
+            if not _is_on_team(session, project, request.user):
+                return Reject(_GENERIC_NOT_ACTIVE_MESSAGE)
             return Reject(
                 f"Project '{project.title}' isn't active on Krater right now (status: {project.status.value}). "
                 "Compute launches are only allowed while a project is approved or in its completion review."
@@ -154,6 +184,8 @@ def decide(request: PolicyRequest, session: Session, settings: Settings) -> Poli
 
         remaining = budget.remaining_cents(session, project)
         if remaining <= 0:
+            if not _is_on_team(session, project, request.user):
+                return Reject(_GENERIC_BUDGET_MESSAGE)
             ceiling = budget.ceiling_cents(session, project)
             spend = budget.latest_spend_cents(session, project)
             return Reject(

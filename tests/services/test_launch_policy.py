@@ -5,10 +5,19 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from krater.config import Settings
-from krater.models import BudgetEntryKind, Project, ProjectStatus, SpendSnapshot, SpendSource
+from krater.models import (
+    BudgetEntryKind,
+    Project,
+    ProjectRevision,
+    ProjectStatus,
+    RevisionKind,
+    RevisionOutcome,
+    SpendSnapshot,
+    SpendSource,
+)
 from krater.services import budget, launch_policy
 from krater.services.actor import Actor
-from krater.skypilot_policy.envelope import PolicyRequest
+from krater.skypilot_policy.envelope import PolicyRequest, PolicyUser
 
 SETTINGS = Settings(skypilot_autodown_idle_minutes=30, skypilot_max_hourly_cost_cents=500)
 
@@ -18,6 +27,7 @@ def _request(
     task: dict | None = None,
     workspace: str | None = "ganymede-test",
     request_name: str = "launch",
+    user: PolicyUser | None = None,
 ) -> PolicyRequest:
     skypilot_config: dict = {}
     if workspace is not None:
@@ -28,10 +38,14 @@ def _request(
         request_name=request_name,
         request_options={"cluster_name": "test", "dryrun": True},
         at_client_side=True,
-        user=None,
+        user=user,
         client_api_version=None,
         client_version=None,
     )
+
+
+def _user(email: str) -> PolicyUser:
+    return PolicyUser(id="hash123", name=email, user_type=None, preferred_workspace=None)
 
 
 def _make_project(
@@ -75,7 +89,9 @@ def test_rejects_when_workspace_is_not_a_krater_project(db_session: Session) -> 
 def test_rejects_when_project_is_not_active(db_session: Session, member: Actor) -> None:
     _make_project(db_session, member, status=ProjectStatus.COMPLETED)
 
-    decision = launch_policy.decide(_request(), db_session, SETTINGS)
+    # On the project's own team (the submitter): sees the specific reason (see the "leaks details"
+    # section below for the generic message an off-team requester gets instead).
+    decision = launch_policy.decide(_request(user=_user(member.user.email)), db_session, SETTINGS)
 
     assert isinstance(decision, launch_policy.Reject)
     assert "completed" in decision.message.lower()
@@ -99,7 +115,7 @@ def test_rejects_when_budget_is_exhausted(db_session: Session, member: Actor) ->
     )
     db_session.flush()
 
-    decision = launch_policy.decide(_request(), db_session, SETTINGS)
+    decision = launch_policy.decide(_request(user=_user(member.user.email)), db_session, SETTINGS)
 
     assert isinstance(decision, launch_policy.Reject)
     assert "$10.00" in decision.message
@@ -296,3 +312,101 @@ def test_nested_any_of_inside_a_candidate_is_capped(db_session: Session, member:
 
     assert isinstance(decision, launch_policy.Allow)
     assert decision.task["resources"]["any_of"][0]["ordered"][0]["max_hourly_cost"] == 5.0
+
+
+# --------------------------------------------------------------------------------------------------
+# Reject messages must not leak another project's details to someone off its team.
+# --------------------------------------------------------------------------------------------------
+
+
+def test_inactive_project_message_is_generic_for_a_non_team_requester(db_session: Session, member: Actor) -> None:
+    project = _make_project(db_session, member, status=ProjectStatus.COMPLETED)
+
+    decision = launch_policy.decide(_request(user=_user("stranger@example.com")), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Reject)
+    assert project.title not in decision.message
+    assert "completed" not in decision.message.lower()
+
+
+def test_inactive_project_message_is_generic_when_no_user_is_present(db_session: Session, member: Actor) -> None:
+    """The client-side policy call never carries a `user:` block at all (spike: empty client-side) --
+    that must fail toward the generic message too, not toward leaking details."""
+    project = _make_project(db_session, member, status=ProjectStatus.COMPLETED)
+
+    decision = launch_policy.decide(_request(user=None), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Reject)
+    assert project.title not in decision.message
+
+
+def test_inactive_project_message_is_specific_for_the_submitter(db_session: Session, member: Actor) -> None:
+    project = _make_project(db_session, member, status=ProjectStatus.COMPLETED)
+
+    decision = launch_policy.decide(_request(user=_user(member.user.email)), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Reject)
+    assert project.title in decision.message
+    assert "completed" in decision.message.lower()
+
+
+def test_inactive_project_message_is_specific_for_a_credited_builder(
+    db_session: Session, member: Actor, make_actor
+) -> None:
+    builder = make_actor(groups=frozenset({"ganymede:member"}))
+    project = _make_project(db_session, member, status=ProjectStatus.COMPLETED)
+
+    # A draft revision crediting the builder, as the project's current revision.
+    revision = ProjectRevision(
+        project_id=project.id,
+        number=1,
+        kind=RevisionKind.PROPOSAL,
+        write_up="w",
+        budget_requested_cents=100,
+        credited_builder_ids=[builder.user.id],
+        submitted_at=None,
+        outcome=RevisionOutcome.PENDING,
+    )
+    db_session.add(revision)
+    db_session.flush()
+    project.current_revision = revision
+    db_session.flush()
+
+    decision = launch_policy.decide(_request(user=_user(builder.user.email)), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Reject)
+    assert project.title in decision.message
+
+
+def test_exhausted_budget_message_is_generic_for_a_non_team_requester(db_session: Session, member: Actor) -> None:
+    project = _make_project(db_session, member, status=ProjectStatus.APPROVED)
+    budget.add_entry(
+        db_session, project=project, kind=BudgetEntryKind.INITIAL_APPROVAL, amount_cents=1_000, actor=member
+    )
+    db_session.add(
+        SpendSnapshot(project_id=project.id, estimated_spend_cents=1_000, source=SpendSource.SKYPILOT_COST_REPORT)
+    )
+    db_session.flush()
+
+    decision = launch_policy.decide(_request(user=_user("stranger@example.com")), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Reject)
+    assert project.title not in decision.message
+    assert "$10.00" not in decision.message
+
+
+def test_exhausted_budget_message_is_specific_for_the_submitter(db_session: Session, member: Actor) -> None:
+    project = _make_project(db_session, member, status=ProjectStatus.APPROVED)
+    budget.add_entry(
+        db_session, project=project, kind=BudgetEntryKind.INITIAL_APPROVAL, amount_cents=1_000, actor=member
+    )
+    db_session.add(
+        SpendSnapshot(project_id=project.id, estimated_spend_cents=1_000, source=SpendSource.SKYPILOT_COST_REPORT)
+    )
+    db_session.flush()
+
+    decision = launch_policy.decide(_request(user=_user(member.user.email)), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Reject)
+    assert project.title in decision.message
+    assert "$10.00" in decision.message
