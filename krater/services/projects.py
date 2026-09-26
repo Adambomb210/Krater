@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from krater.models import (
@@ -334,6 +335,19 @@ def submit_completion(session: Session, actor: Actor, *, project: Project) -> Pr
 # --------------------------------------------------------------------------------------------------
 
 
+def _has_existing_review(session: Session, *, revision_id: uuid.UUID, reviewer_id: uuid.UUID) -> bool:
+    """Whether `reviewer_id` already has a `Review` recorded against `revision_id`.
+
+    A plain SELECT, split out so it's easy to simulate the race the `reviews` unique constraint (and
+    the `IntegrityError` handling in `record_review`) guards against: two concurrent requests that both
+    call this and both see `False` before either has inserted its row.
+    """
+    return (
+        session.scalar(sa.select(Review.id).where(Review.revision_id == revision_id, Review.reviewer_id == reviewer_id))
+        is not None
+    )
+
+
 def record_review(
     session: Session,
     actor: Actor,
@@ -370,10 +384,7 @@ def record_review(
     if revision.outcome is not RevisionOutcome.PENDING:
         raise InvalidState("This revision has already been decided.")
 
-    already_reviewed = session.scalar(
-        sa.select(Review.id).where(Review.revision_id == revision.id, Review.reviewer_id == actor.user.id)
-    )
-    if already_reviewed is not None:
+    if _has_existing_review(session, revision_id=revision.id, reviewer_id=actor.user.id):
         raise InvalidState("You have already reviewed this revision.")
 
     if decision is ReviewDecision.REJECT and not (reason and reason.strip()):
@@ -388,7 +399,16 @@ def record_review(
         reviewer_groups=sorted(actor.groups),
     )
     session.add(review)
-    session.flush()
+    try:
+        # A SAVEPOINT around just the insert: two concurrent requests (a double-click, a retried Slack
+        # action) can both pass the `_has_existing_review` check above before either has inserted its
+        # row. The `reviews` unique constraint is what actually stops the second one; this turns the
+        # resulting `IntegrityError` into the same friendly `InvalidState` the pre-check normally gives,
+        # without aborting the whole transaction the caller is relying on to commit.
+        with session.begin_nested():
+            session.flush()
+    except IntegrityError as exc:
+        raise InvalidState("You have already reviewed this revision.") from exc
 
     if decision is ReviewDecision.REJECT:
         _apply_reject(session, revision)

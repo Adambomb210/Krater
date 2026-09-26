@@ -20,6 +20,11 @@ if TYPE_CHECKING:
 
 class Review(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     __tablename__ = "reviews"
+    # One review per reviewer per revision. Also enforced in `record_review` (via a pre-check, for a
+    # clean error message in the common case), but the constraint is what actually prevents two
+    # concurrent requests (a double-click, a retried Slack action) from both passing that check and
+    # inserting a second row.
+    __table_args__ = (sa.UniqueConstraint("revision_id", "reviewer_id", name="uq_reviews_revision_id_reviewer_id"),)
 
     revision_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), sa.ForeignKey("project_revisions.id"), nullable=False, index=True

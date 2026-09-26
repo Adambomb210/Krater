@@ -3,9 +3,19 @@
 from __future__ import annotations
 
 import pytest
+import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from krater.models import ApprovalPolicy, ApprovalStage, ProjectStatus, ReviewDecision, ReviewSource, RevisionOutcome
+from krater.models import (
+    ApprovalPolicy,
+    ApprovalStage,
+    Project,
+    ProjectStatus,
+    Review,
+    ReviewDecision,
+    ReviewSource,
+    RevisionOutcome,
+)
 from krater.services import projects
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
@@ -90,6 +100,55 @@ def test_double_review_by_the_same_reviewer_is_blocked(db_session: Session, memb
             decision=ReviewDecision.APPROVE,
             source=ReviewSource.WEB,
         )
+
+
+def test_concurrent_double_review_is_blocked_by_the_db_constraint(
+    db_session: Session, member: Actor, reviewer: Actor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Simulates two concurrent requests that both pass the `_has_existing_review` pre-check before
+    either has inserted its row (e.g. a double-click, or a retried Slack action): the `reviews` unique
+    constraint is what actually stops the second insert, and `record_review` must turn the resulting
+    `IntegrityError` into the same `InvalidState` the pre-check normally raises.
+
+    Mirrors how this plays out for real, across two separate requests/sessions: the first review is
+    committed (as the router would on success) before the "concurrent" second attempt comes in, and a
+    plain `session.rollback()` (as the router would do on an `InvalidState`) is enough to leave the
+    session usable again -- it only discards the second attempt's own (already-failed) work.
+    """
+    # A multi-approval policy keeps the revision `pending` after the first approval, so there's still a
+    # decision to (attempt to) record when the "concurrent" second request comes in.
+    db_session.add(ApprovalPolicy(stage=ApprovalStage.PROPOSAL, min_approvals=2))
+    db_session.flush()
+    project = _submitted_project(db_session, member)
+
+    projects.record_review(
+        db_session,
+        reviewer,
+        revision=project.current_revision,
+        decision=ReviewDecision.APPROVE,
+        source=ReviewSource.WEB,
+    )
+    db_session.commit()
+
+    monkeypatch.setattr(projects, "_has_existing_review", lambda *args, **kwargs: False)
+    with pytest.raises(InvalidState):
+        projects.record_review(
+            db_session,
+            reviewer,
+            revision=project.current_revision,
+            decision=ReviewDecision.APPROVE,
+            source=ReviewSource.WEB,
+        )
+    db_session.rollback()
+
+    # The first (committed) review survived, and the session is usable again for a fresh query.
+    reloaded = db_session.get(Project, project.id)
+    assert reloaded is not None
+    assert reloaded.status is ProjectStatus.PENDING_REVIEW
+    review_count = db_session.scalar(
+        sa.select(sa.func.count()).select_from(Review).where(Review.revision_id == project.current_revision_id)
+    )
+    assert review_count == 1
 
 
 def test_reject_requires_a_reason(db_session: Session, member: Actor, reviewer: Actor) -> None:
