@@ -437,6 +437,33 @@ a:hover {
   line-height: 1.6;
 }
 
+/* SkyPilot workspace hint + budget banner */
+
+.skypilot-hint {
+  padding: 0.6rem 0.9rem;
+  background-color: var(--color-quilt);
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.skypilot-hint code {
+  background-color: var(--color-white);
+  border: 1px solid var(--color-border);
+  border-radius: 0.25rem;
+  padding: 0.05rem 0.3rem;
+}
+
+.skypilot-banner {
+  padding: 0.6rem 0.9rem;
+  border: 1px solid #a33636;
+  background-color: #fbe9e7;
+  color: #a33636;
+  border-radius: 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
 .revision {
   padding: 1rem 0;
   border-top: 1px solid var(--color-border);

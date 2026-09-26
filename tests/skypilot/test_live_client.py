@@ -1,0 +1,288 @@
+"""`LiveSkyPilotClient` against a fake SkyPilot API server (`httpx.MockTransport`): async request-id
+polling, the FAILED/timeout/network-error error mapping, and cents conversion. Wire shapes taken from
+`tests/fixtures/skypilot/` (see `docs/dev/skypilot-spike.md`)."""
+
+from __future__ import annotations
+
+import itertools
+import json
+
+import httpx
+import pytest
+
+from krater.config import Settings
+from krater.skypilot.errors import SkyPilotRequestFailedError, SkyPilotUnavailableError
+from krater.skypilot.live import LiveSkyPilotClient
+
+API_URL = "https://skypilot.test"
+TOKEN = "sky_test_token"
+
+#: Paths handled by the generic async-schedule-then-poll machinery below.
+_SCHEDULED_PATHS = {
+    "/workspaces/create",
+    "/workspaces/update",
+    "/workspaces/delete",
+    "/workspaces",
+    "/cost_report",
+    "/status",
+    "/jobs/queue",
+    "/down",
+    "/jobs/cancel",
+}
+
+
+def _settings() -> Settings:
+    return Settings(skypilot_mode="live", skypilot_api_url=API_URL, skypilot_service_token=TOKEN)
+
+
+class FakeSkyPilotServer:
+    """A minimal fake of SkyPilot's REST surface, driven by an `httpx.MockTransport`.
+
+    Every scheduled ("async") endpoint replies `200` + `null` body + an `x-skypilot-request-id`
+    header, exactly like the spike found; the *next* `GET /api/get` for that id returns the queued
+    poll response for that path (`self.poll_queue`), defaulting to an immediate `SUCCEEDED` with a
+    `null` return value. `self.sync_error`, when set, makes every scheduled endpoint fail
+    synchronously instead (no request id issued at all) -- the shape of the spike's
+    `workspaces_update_forbidden_nonmember_response.json` fixture.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[httpx.Request] = []
+        self._request_id_seq = itertools.count(1)
+        #: path -> list of `{"status": ..., "return_value": ..., "error": ...}` dicts to hand back in
+        #: order, one per call to that path (repeats the last one once exhausted).
+        self.poll_queue: dict[str, list[dict]] = {}
+        self.sync_error: tuple[int, dict] | None = None
+        #: request_id -> (source path, the poll response fixed at schedule time).
+        self._pending: dict[str, tuple[str, dict]] = {}
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        path = request.url.path
+
+        if path == "/api/get":
+            request_id = request.url.params["request_id"]
+            source_path, poll_response = self._pending[request_id]
+            return httpx.Response(200, json={"request_id": request_id, **poll_response})
+
+        if path not in _SCHEDULED_PATHS:
+            return httpx.Response(404, json={"error": "not_found"})
+
+        if self.sync_error is not None:
+            status, body = self.sync_error
+            return httpx.Response(status, json=body)
+
+        queue = self.poll_queue.get(path, [{"status": "SUCCEEDED", "return_value": "null", "error": None}])
+        poll_response = queue[0] if len(queue) == 1 else queue.pop(0)
+        request_id = f"req-{next(self._request_id_seq)}"
+        self._pending[request_id] = (path, poll_response)
+        return httpx.Response(200, headers={"x-skypilot-request-id": request_id})
+
+
+@pytest.fixture
+def fake_server() -> FakeSkyPilotServer:
+    return FakeSkyPilotServer()
+
+
+@pytest.fixture
+def client(fake_server: FakeSkyPilotServer) -> LiveSkyPilotClient:
+    http_client = httpx.Client(transport=httpx.MockTransport(fake_server.handler))
+    return LiveSkyPilotClient(
+        _settings(), http_client=http_client, poll_timeout_seconds=0.2, poll_interval_seconds=0.02
+    )
+
+
+def test_create_workspace_sends_bearer_token_and_vast_only_config(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    client.create_workspace("ganymede-abc123", allowed_users=["a@x.com", "b@x.com"])
+
+    request = next(r for r in fake_server.requests if r.url.path == "/workspaces/create")
+    assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+    body = json.loads(request.content)
+    assert body["workspace_name"] == "ganymede-abc123"
+    assert body["config"]["private"] is True
+    assert body["config"]["allowed_users"] == ["a@x.com", "b@x.com"]
+    # Every other cloud denied, per the spike's "no per-workspace allowlist" finding.
+    assert body["config"]["aws"] == {"disabled": True}
+    assert "vast" not in body["config"]
+
+
+def test_update_workspace_replaces_allowed_users(fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient) -> None:
+    client.update_workspace("ganymede-abc123", allowed_users=["only-this-one@x.com"])
+
+    request = next(r for r in fake_server.requests if r.url.path == "/workspaces/update")
+    body = json.loads(request.content)
+    assert body["config"]["allowed_users"] == ["only-this-one@x.com"]
+
+
+def test_delete_workspace(fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient) -> None:
+    client.delete_workspace("ganymede-abc123")
+
+    request = next(r for r in fake_server.requests if r.url.path == "/workspaces/delete")
+    assert json.loads(request.content) == {"workspace_name": "ganymede-abc123"}
+
+
+def test_list_workspaces_decodes_the_returned_mapping(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    fake_server.poll_queue["/workspaces"] = [
+        {
+            "status": "SUCCEEDED",
+            "return_value": {"ganymede-priv-test": {"private": True, "allowed_users": ["54400d50"]}, "default": {}},
+            "error": None,
+        }
+    ]
+
+    names = client.list_workspaces()
+
+    assert sorted(names) == ["default", "ganymede-priv-test"]
+
+
+def test_cost_report_converts_dollars_to_cents_and_groups_by_workspace(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    # `return_value` is itself a JSON-encoded string in the real spike fixture
+    # (`tests/fixtures/skypilot/cost_report_request_response.json`), not a bare JSON array.
+    fake_server.poll_queue["/cost_report"] = [
+        {
+            "status": "SUCCEEDED",
+            "return_value": json.dumps(
+                [
+                    {"name": "cluster-a", "workspace": "ganymede-abc123", "total_cost": 12.34},
+                    {"name": "cluster-b", "workspace": "ganymede-abc123", "total_cost": 0.5},
+                    {"name": "controller", "workspace": "default", "total_cost": 1.0},
+                ]
+            ),
+            "error": None,
+        }
+    ]
+
+    rows = client.cost_report(days=30)
+
+    request = next(r for r in fake_server.requests if r.url.path == "/cost_report")
+    assert json.loads(request.content) == {"days": 30}
+    by_cluster = {row.cluster_name: (row.workspace, row.total_cost_cents) for row in rows}
+    assert by_cluster["cluster-a"] == ("ganymede-abc123", 1234)
+    assert by_cluster["cluster-b"] == ("ganymede-abc123", 50)
+    assert by_cluster["controller"] == ("default", 100)
+
+
+def test_cost_report_handles_an_empty_report(fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient) -> None:
+    fake_server.poll_queue["/cost_report"] = [{"status": "SUCCEEDED", "return_value": "[]", "error": None}]
+
+    assert client.cost_report(days=30) == []
+
+
+def test_list_clusters_filters_to_the_requested_workspace(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    fake_server.poll_queue["/status"] = [
+        {
+            "status": "SUCCEEDED",
+            "return_value": json.dumps(
+                [
+                    {"name": "in-workspace", "workspace": "ganymede-abc123", "status": "UP"},
+                    {"name": "other-workspace", "workspace": "ganymede-other", "status": "UP"},
+                ]
+            ),
+            "error": None,
+        }
+    ]
+
+    clusters = client.list_clusters("ganymede-abc123")
+
+    assert [c.name for c in clusters] == ["in-workspace"]
+    request = next(r for r in fake_server.requests if r.url.path == "/status")
+    body = json.loads(request.content)
+    assert body["override_skypilot_config"]["active_workspace"] == "ganymede-abc123"
+
+
+def test_list_managed_jobs_filters_to_the_requested_workspace(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    fake_server.poll_queue["/jobs/queue"] = [
+        {
+            "status": "SUCCEEDED",
+            "return_value": json.dumps(
+                [
+                    {"job_id": 1, "job_name": "train", "workspace": "ganymede-abc123", "status": "RUNNING"},
+                    {"job_id": 2, "job_name": "other", "workspace": "ganymede-other", "status": "RUNNING"},
+                ]
+            ),
+            "error": None,
+        }
+    ]
+
+    jobs = client.list_managed_jobs("ganymede-abc123")
+
+    assert [(j.job_id, j.name) for j in jobs] == [(1, "train")]
+
+
+def test_down_cluster_sends_purge(fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient) -> None:
+    client.down_cluster("some-cluster")
+
+    request = next(r for r in fake_server.requests if r.url.path == "/down")
+    body = json.loads(request.content)
+    assert body["cluster_name"] == "some-cluster"
+    assert body["purge"] is True
+
+
+def test_cancel_managed_jobs_scopes_to_the_workspace(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    client.cancel_managed_jobs("ganymede-abc123")
+
+    request = next(r for r in fake_server.requests if r.url.path == "/jobs/cancel")
+    body = json.loads(request.content)
+    assert body["all"] is True
+    assert body["override_skypilot_config"]["active_workspace"] == "ganymede-abc123"
+
+
+def test_a_failed_poll_raises_request_failed_with_the_servers_message(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    fake_server.poll_queue["/workspaces/create"] = [
+        {"status": "FAILED", "return_value": None, "error": "boom: traceback"}
+    ]
+
+    with pytest.raises(SkyPilotRequestFailedError, match="boom"):
+        client.create_workspace("ganymede-x", allowed_users=[])
+
+
+def test_a_synchronous_error_response_raises_request_failed_with_the_servers_message(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    # No x-skypilot-request-id at all -- exactly the shape of the spike's
+    # `workspaces_update_forbidden_nonmember_response.json` fixture (a 403 with a plain `detail`).
+    fake_server.sync_error = (403, {"detail": "Forbidden"})
+
+    with pytest.raises(SkyPilotRequestFailedError, match="Forbidden"):
+        client.update_workspace("ganymede-x", allowed_users=["nonmember@x.com"])
+
+
+def test_a_5xx_response_raises_unavailable(fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient) -> None:
+    fake_server.sync_error = (503, {"detail": "starting up"})
+
+    with pytest.raises(SkyPilotUnavailableError):
+        client.create_workspace("ganymede-x", allowed_users=[])
+
+
+def test_a_network_error_raises_unavailable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = LiveSkyPilotClient(_settings(), http_client=http_client)
+
+    with pytest.raises(SkyPilotUnavailableError):
+        client.create_workspace("ganymede-x", allowed_users=[])
+
+
+def test_a_request_that_never_completes_times_out_as_unavailable(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    fake_server.poll_queue["/workspaces/create"] = [{"status": "RUNNING", "return_value": None, "error": None}]
+
+    with pytest.raises(SkyPilotUnavailableError, match="did not complete"):
+        client.create_workspace("ganymede-x", allowed_users=[])

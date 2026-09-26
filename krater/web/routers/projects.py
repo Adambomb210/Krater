@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
+from krater.config import get_settings
 from krater.db import get_session
 from krater.models import (
     Project,
@@ -30,6 +31,7 @@ from krater.models import (
 from krater.services import projects as project_service
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
+from krater.services.skypilot_sync import current_budget_flag
 from krater.web.csrf import verify_csrf_token
 from krater.web.deps import fresh_actor
 from krater.web.flash import flash
@@ -168,9 +170,16 @@ def _build_detail_context(
 
     can_review = actor.is_reviewer and not is_submitter and not is_credited_builder and current_is_pending
 
+    skypilot_budget_flag = None
+    if project.skypilot_workspace is not None:
+        skypilot_budget_flag = current_budget_flag(
+            session, project, warn_percent=get_settings().skypilot_budget_warn_percent
+        )
+
     return {
         "project": project,
         "summary": summary,
+        "skypilot_budget_flag": skypilot_budget_flag,
         "revisions": revisions,
         "users_by_id": users_by_id,
         "is_submitter": is_submitter,
