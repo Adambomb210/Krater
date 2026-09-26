@@ -21,6 +21,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
@@ -51,6 +52,29 @@ _TERMINAL_STATUSES = (ProjectStatus.COMPLETED, ProjectStatus.WITHDRAWN)
 # --------------------------------------------------------------------------------------------------
 
 
+MAX_URL_LENGTH = 2048
+
+
+def _clean_url(field: str, value: str | None) -> str | None:
+    """Validate a user-supplied link that will be rendered as an `href`, including on the public gallery.
+
+    Only absolute http(s) URLs are allowed: anything else (`javascript:`, `data:`, relative paths) would let a
+    submitter put script in front of every gallery visitor. Blank means "no link".
+    """
+    if value is None or not value.strip():
+        return None
+    value = value.strip()
+    parsed = urlparse(value)
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.netloc
+        or len(value) > MAX_URL_LENGTH
+        or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+    ):
+        raise ValidationFailed({field: "Enter a full http:// or https:// URL."})
+    return value
+
+
 def create_project(
     session: Session,
     actor: Actor,
@@ -69,6 +93,7 @@ def create_project(
     if not actor.is_member:
         raise NotAllowed("Only Ganymede members may create a project.")
 
+    repo_url = _clean_url("repo_url", repo_url)
     project = Project(title=title, submitter_id=actor.user.id, status=ProjectStatus.DRAFT, repo_url=repo_url)
     session.add(project)
     session.flush()
@@ -121,13 +146,13 @@ def update_draft(
     if title is not None:
         project.title = title
     if repo_url is not None:
-        project.repo_url = repo_url
+        project.repo_url = _clean_url("repo_url", repo_url)
     if write_up is not None:
         draft.write_up = write_up
     if budget_requested_cents is not None:
         draft.budget_requested_cents = budget_requested_cents
     if demo_url is not None:
-        draft.demo_url = demo_url
+        draft.demo_url = _clean_url("demo_url", demo_url)
     if screenshot_keys is not None:
         draft.screenshot_keys = list(screenshot_keys)
     if credited_builder_ids is not None:

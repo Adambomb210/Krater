@@ -204,3 +204,36 @@ def test_project_summary_reports_policy_explanation_while_pending(
     assert summary.ceiling_cents == 1_000
     assert summary.current_revision.kind is RevisionKind.PROPOSAL
     assert summary.approved_revision is not None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript:alert(1)",
+        "JavaScript:alert(1)",
+        "data:text/html,<script>x</script>",
+        "/relative/path",
+        "ftp://example.com/x",
+        "https://",
+        "https://example.com/a b",
+    ],
+)
+def test_links_must_be_http_urls(db_session: Session, member: Actor, url: str) -> None:
+    with pytest.raises(ValidationFailed) as exc:
+        projects.create_project(db_session, member, title="x", write_up="y", budget_requested_cents=100, repo_url=url)
+    assert "repo_url" in exc.value.errors
+
+    project = projects.create_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
+    with pytest.raises(ValidationFailed) as exc:
+        projects.update_draft(db_session, member, project=project, demo_url=url)
+    assert "demo_url" in exc.value.errors
+
+
+def test_links_accept_http_urls_and_blank_clears(db_session: Session, member: Actor) -> None:
+    project = projects.create_project(
+        db_session, member, title="x", write_up="y", budget_requested_cents=100, repo_url="  https://github.com/o/r  "
+    )
+    assert project.repo_url == "https://github.com/o/r"
+
+    projects.update_draft(db_session, member, project=project, repo_url="")
+    assert project.repo_url is None
