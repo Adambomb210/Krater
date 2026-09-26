@@ -257,7 +257,7 @@ Networking:
 3. **What happens at the ceiling.** Proposed: warn at 80%, block new launches and tear down at 100%, with no grace
    period. Consider a small admin-configurable grace so a running training job isn't killed at 100.1%.
 4. **Weave changes.** The `groups` claim, `slack_id` claim and directory endpoints are implemented on Weave branch
-   `claude/exciting-sagan-7oh2zh` (not merged yet). The Slack membership gate is tracked in
+   `Krater-Integration` (not merged yet). The Slack membership gate is tracked in
    [weave#118](https://github.com/patchworklabsorg/weave/issues/118).
 
 ## Parked / future work
