@@ -44,6 +44,22 @@ _CLOUDS_TO_DISABLE = [
 ]  # fmt: skip
 
 
+#: Confirmed live against a real 0.13.0 server (not documented anywhere): `/jobs/queue` and
+#: `/jobs/cancel` both raise `sky.exceptions.ClusterNotUpError("No in-progress managed jobs.")` when
+#: the workspace's managed-jobs *controller* cluster doesn't exist yet -- i.e. no managed job has ever
+#: been launched there. That's the common case for essentially every Ganymede workspace (most compute
+#: is a plain `sky launch`, not `sky jobs launch`), so treating it as a real failure would make
+#: `list_managed_jobs`/`cancel_managed_jobs` -- and therefore `sync_workspaces`'s teardown and
+#: `enforce_budgets`'s budget-exceeded teardown -- fail on almost every project. It means exactly what
+#: an empty managed-jobs queue means, so both methods below treat it as one.
+_NO_JOBS_CONTROLLER_MARKERS = ("ClusterNotUpError", "No in-progress managed jobs")
+
+
+def _is_no_jobs_controller_error(exc: SkyPilotRequestFailedError) -> bool:
+    message = str(exc)
+    return any(marker in message for marker in _NO_JOBS_CONTROLLER_MARKERS)
+
+
 def _decode_return_value(raw: Any) -> Any:
     """Decode a polled request's `return_value`.
 
@@ -91,7 +107,19 @@ class LiveSkyPilotClient:
         )
 
     def delete_workspace(self, name: str) -> None:
-        self._post_async("/workspaces/delete", {"workspace_name": name})
+        # Confirmed live against a real 0.13.0 server: deleting a workspace that doesn't exist is a
+        # polled `FAILED` request ("Workspace '<name>' does not exist."), not a no-op -- unlike, say,
+        # `down_cluster`'s `purge=True`. The `SkyPilotClient` protocol promises callers this method is
+        # "safe to call on a workspace that's already gone" (`sync_workspaces` leans on that for a
+        # reconcile pass that crashes between deleting a workspace and clearing
+        # `Project.skypilot_workspace`, which would otherwise retry this same delete, and fail closed
+        # on it, forever), so swallow exactly that one message here instead of every caller re-deriving
+        # it.
+        try:
+            self._post_async("/workspaces/delete", {"workspace_name": name})
+        except SkyPilotRequestFailedError as exc:
+            if "does not exist" not in str(exc):
+                raise
 
     def list_workspaces(self) -> list[str]:
         result = self._get_async("/workspaces") or {}
@@ -127,7 +155,11 @@ class LiveSkyPilotClient:
                 "/status",
                 {
                     "cluster_names": None,
-                    "refresh": False,
+                    # `StatusBody.refresh` is `StatusRefreshMode` ("NONE"/"AUTO"/"FORCE"), not a bool --
+                    # a real 0.13.0 server 422s on `false` (confirmed live; see
+                    # docs/dev/skypilot-spike.md). "NONE" matches this call's old (fake-client-only)
+                    # intent of not forcing a live refresh against the cloud.
+                    "refresh": "NONE",
                     "all_users": True,
                     # `/status` has no `workspace` field; scoping is via the request's active-workspace
                     # context (spike section 5). We also filter defensively below, since cost_report's row
@@ -145,18 +177,23 @@ class LiveSkyPilotClient:
         ]
 
     def list_managed_jobs(self, workspace: str) -> list[ManagedJobInfo]:
-        rows = (
-            self._post_async(
-                "/jobs/queue",
-                {
-                    "refresh": False,
-                    "skip_finished": True,
-                    "all_users": True,
-                    "override_skypilot_config": {"active_workspace": workspace},
-                },
+        try:
+            rows = (
+                self._post_async(
+                    "/jobs/queue",
+                    {
+                        "refresh": False,
+                        "skip_finished": True,
+                        "all_users": True,
+                        "override_skypilot_config": {"active_workspace": workspace},
+                    },
+                )
+                or []
             )
-            or []
-        )
+        except SkyPilotRequestFailedError as exc:
+            if _is_no_jobs_controller_error(exc):
+                return []
+            raise
         return [
             ManagedJobInfo(
                 job_id=row["job_id"],
@@ -174,10 +211,14 @@ class LiveSkyPilotClient:
         self._post_async("/down", {"cluster_name": name, "purge": True, "graceful": False})
 
     def cancel_managed_jobs(self, workspace: str) -> None:
-        self._post_async(
-            "/jobs/cancel",
-            {"all": True, "all_users": True, "override_skypilot_config": {"active_workspace": workspace}},
-        )
+        try:
+            self._post_async(
+                "/jobs/cancel",
+                {"all": True, "all_users": True, "override_skypilot_config": {"active_workspace": workspace}},
+            )
+        except SkyPilotRequestFailedError as exc:
+            if not _is_no_jobs_controller_error(exc):
+                raise
 
     # -- Transport: request + async request-id polling ------------------------------------------------
 
@@ -211,13 +252,18 @@ class LiveSkyPilotClient:
         interval = self._poll_interval_seconds
         while True:
             response = self._request("GET", "/api/get", params={"request_id": request_id})
-            self._raise_for_status(response)
-            data = response.json()
+            data = self._poll_response_data(response)
+            if data is None:
+                # Not the polled-request shape at all (either direction) -- a genuine transport/server
+                # problem `_raise_for_status` can describe; if it somehow doesn't raise, fall through
+                # to unavailable below rather than silently treating an unrecognized 2xx as success.
+                self._raise_for_status(response)
+                raise SkyPilotUnavailableError(f"SkyPilot returned an unrecognized response for request {request_id}")
             status = data.get("status")
             if status == "SUCCEEDED":
                 return _decode_return_value(data.get("return_value"))
             if status == "FAILED":
-                raise SkyPilotRequestFailedError(str(data.get("error") or "SkyPilot request failed"))
+                raise SkyPilotRequestFailedError(self._poll_failure_message(data))
             if time.monotonic() >= deadline:
                 raise SkyPilotUnavailableError(
                     f"SkyPilot request {request_id} did not complete within {self._poll_timeout_seconds}s "
@@ -225,6 +271,48 @@ class LiveSkyPilotClient:
                 )
             time.sleep(interval)
             interval = min(interval * POLL_BACKOFF_FACTOR, MAX_POLL_INTERVAL_SECONDS)
+
+    @staticmethod
+    def _poll_response_data(response: httpx.Response) -> dict[str, Any] | None:
+        """Return `/api/get`'s polled-request dict (the one with `status`/`return_value`/`error`),
+        regardless of which of the two shapes a real 0.13.0 server used for it.
+
+        Confirmed live: a request that finishes normally (`SUCCEEDED` or a "clean" `FAILED`, e.g. our
+        own admin-policy rejecting something upstream) comes back as HTTP 200 with that dict at the
+        body's top level -- but a request that failed because the *handler itself* raised an
+        uncaught exception (e.g. `ClusterNotUpError` from `/jobs/queue`/`/jobs/cancel` when a
+        workspace's managed-jobs controller doesn't exist yet, see `_is_no_jobs_controller_error`)
+        comes back as HTTP **500**, with the identical dict nested one level down, under `detail`.
+        Callers must handle both or a routine "this failed" case (never mind our own no-jobs-
+        controller handling above it) gets misread as SkyPilot being unreachable. Returns `None` if
+        the body matches neither shape, so the caller can fall back to the generic transport-error path.
+        """
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+        if isinstance(body, dict) and "status" in body:
+            return body
+        detail = body.get("detail") if isinstance(body, dict) else None
+        if isinstance(detail, dict) and "status" in detail:
+            return detail
+        return None
+
+    @staticmethod
+    def _poll_failure_message(data: dict[str, Any]) -> str:
+        """`data["error"]` for a FAILED polled request is itself a JSON-encoded string (a pickled
+        exception's `type`/`message`/... per the spike's fixtures) -- decode it for a readable
+        message, falling back to the raw value for anything that doesn't parse that way."""
+        error = data.get("error")
+        if isinstance(error, str):
+            try:
+                parsed = json.loads(error)
+            except (TypeError, ValueError):
+                return error or "SkyPilot request failed"
+            if isinstance(parsed, dict):
+                return str(parsed.get("message") or parsed.get("type") or error)
+            return error
+        return str(error or "SkyPilot request failed")
 
     @staticmethod
     def _raise_for_status(response: httpx.Response) -> None:

@@ -365,3 +365,46 @@ in order of weight:
 
 If a future need arises for something genuinely SDK-only (there wasn't one found in this spike),
 re-evaluate then rather than paying the dependency cost up front.
+
+## 7. The contract run: three `LiveSkyPilotClient` bugs this spike's reasoning missed
+
+Follow-up, 2026-09-26, same day: `krater/skypilot/live.py` (built from this spike, before this section
+existed) was run for real against a fresh 0.13.0 API server -- `sync_workspaces`/`reconcile` via
+`python -m krater.skypilot.reconcile_once` against a real Postgres-backed project, and `sky launch
+--dryrun` as a real signed-in non-admin service-account user targeting that project's workspace. See
+`docs/dev/skypilot-contract.md` for the full repeatable check (`scripts/dev/skypilot_contract.sh`,
+`tests/live/test_skypilot_live.py`). Provisioning, team updates, teardown, and every launch-gate
+scenario (allowed with forced autodown + capped `max_hourly_cost`, missing/`default` workspace,
+over-budget, wrong policy token) all worked as designed once these three were fixed -- none of them
+were guessable from reading `sky`'s Pydantic models alone; they only showed up by actually calling the
+real server:
+
+- **`StatusBody.refresh` is `StatusRefreshMode` (`"NONE"`/`"AUTO"`/`"FORCE"`), not a bool.** `POST
+  /status` with `"refresh": false` (the natural reading of "don't force a refresh") 422s:
+  `Input should be 'NONE', 'AUTO' or 'FORCE'`. `JobsQueueBody.refresh` really is a plain bool (checked
+  by reading `sky/server/requests/payloads.py` after this broke) -- the two endpoints disagree with
+  each other, so this isn't a pattern to extrapolate from elsewhere without checking.
+- **`/jobs/queue` and `/jobs/cancel` raise `sky.exceptions.ClusterNotUpError("No in-progress managed
+  jobs.")` when the workspace's managed-jobs *controller* cluster doesn't exist yet** -- i.e. whenever
+  no managed job has ever been launched there, which is true of essentially every fresh Ganymede
+  workspace (most compute is a plain `sky launch`, not `sky jobs launch`). Worse, this particular
+  failure comes back from `GET /api/get` as **HTTP 500**, with the usual `status`/`error` polled-request
+  dict nested one level down under `detail` -- not the flat `200` body every other polled request
+  (`SUCCEEDED` or a "clean" `FAILED`) uses. A client that treats every 5xx from `/api/get` as "SkyPilot
+  is down" (the reasonable-sounding reading of the design doc's async-polling section) would make
+  `list_managed_jobs`/`cancel_managed_jobs` -- and therefore `sync_workspaces`'s teardown and
+  `enforce_budgets`'s over-budget teardown -- fail on almost every real project. `LiveSkyPilotClient`
+  now unwraps both response shapes and treats this specific error as "no managed jobs" (an empty list /
+  a no-op), matching what it actually means.
+- **`POST /workspaces/delete` on a workspace that doesn't exist is a polled `FAILED` request** (`"Workspace
+  '<name>' does not exist."`), not a no-op. The `SkyPilotClient` protocol's `delete_workspace` promises
+  callers it's "safe to call on a workspace that's already gone" -- `sync_workspaces` leans on that for
+  a reconcile pass that crashes between deleting a workspace and clearing `Project.skypilot_workspace`
+  (which would otherwise retry the same delete on the next tick, fail the same way, and get stuck
+  retrying forever, since `reconcile()` rolls back and re-tries a failed step on its next scheduled
+  run). Fixed the same way: swallow that one message, re-raise everything else.
+
+All three are now regression-tested against a fake server in `tests/skypilot/test_live_client.py`
+(so a future contributor touching `live.py` gets caught without needing a real SkyPilot server) and
+against the real one in `tests/live/test_skypilot_live.py` (so a future SkyPilot upgrade that changes
+the wire format again is caught there first).

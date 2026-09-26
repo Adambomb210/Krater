@@ -63,6 +63,14 @@ class FakeSkyPilotServer:
         if path == "/api/get":
             request_id = request.url.params["request_id"]
             source_path, poll_response = self._pending[request_id]
+            del source_path
+            # A request whose *handler* raised (rather than one that completed and rejected
+            # something) comes back as HTTP 500 with the same `status`/`error` dict nested under
+            # `detail`, not the flat 200 body every other FAILED/SUCCEEDED poll uses -- confirmed
+            # live against a real 0.13.0 server (`/jobs/queue`, `/jobs/cancel` with no jobs
+            # controller yet; see `docs/dev/skypilot-spike.md`).
+            if poll_response.pop("_wrap_in_5xx_detail", False):
+                return httpx.Response(500, json={"detail": {"request_id": request_id, **poll_response}})
             return httpx.Response(200, json={"request_id": request_id, **poll_response})
 
         if path not in _SCHEDULED_PATHS:
@@ -121,6 +129,30 @@ def test_delete_workspace(fake_server: FakeSkyPilotServer, client: LiveSkyPilotC
 
     request = next(r for r in fake_server.requests if r.url.path == "/workspaces/delete")
     assert json.loads(request.content) == {"workspace_name": "ganymede-abc123"}
+
+
+def test_delete_workspace_is_a_no_op_when_already_gone(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    # Confirmed live against a real 0.13.0 server: deleting a workspace that doesn't exist is a polled
+    # `FAILED` request, not a no-op -- the `SkyPilotClient` protocol's "safe to call on a workspace
+    # that's already gone" promise (which `sync_workspaces` relies on) has to be implemented here.
+    fake_server.poll_queue["/workspaces/delete"] = [
+        {"status": "FAILED", "return_value": None, "error": "Workspace 'ganymede-x' does not exist."}
+    ]
+
+    client.delete_workspace("ganymede-x")  # must not raise
+
+
+def test_delete_workspace_still_raises_for_a_different_failure(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    fake_server.poll_queue["/workspaces/delete"] = [
+        {"status": "FAILED", "return_value": None, "error": "permission denied"}
+    ]
+
+    with pytest.raises(SkyPilotRequestFailedError, match="permission denied"):
+        client.delete_workspace("ganymede-x")
 
 
 def test_list_workspaces_decodes_the_returned_mapping(
@@ -196,6 +228,9 @@ def test_list_clusters_filters_to_the_requested_workspace(
     request = next(r for r in fake_server.requests if r.url.path == "/status")
     body = json.loads(request.content)
     assert body["override_skypilot_config"]["active_workspace"] == "ganymede-abc123"
+    # `StatusBody.refresh` is a `StatusRefreshMode` enum ("NONE"/"AUTO"/"FORCE"), not a bool -- a real
+    # 0.13.0 server 422s on `false` (confirmed live; see docs/dev/skypilot-spike.md).
+    assert body["refresh"] == "NONE"
 
 
 def test_list_managed_jobs_filters_to_the_requested_workspace(
@@ -286,3 +321,66 @@ def test_a_request_that_never_completes_times_out_as_unavailable(
 
     with pytest.raises(SkyPilotUnavailableError, match="did not complete"):
         client.create_workspace("ganymede-x", allowed_users=[])
+
+
+# --------------------------------------------------------------------------------------------------
+# "No jobs controller yet" (`sky.exceptions.ClusterNotUpError`) -- confirmed live against a real
+# 0.13.0 server: `/jobs/queue` and `/jobs/cancel` both raise this when a workspace's managed-jobs
+# controller cluster doesn't exist yet (i.e. no managed job has ever been launched there), which is
+# the common case for essentially every Ganymede workspace. See docs/dev/skypilot-spike.md.
+# --------------------------------------------------------------------------------------------------
+
+_NO_JOBS_CONTROLLER_POLL_RESPONSE = {
+    "status": "FAILED",
+    "return_value": "null",
+    "error": json.dumps({"type": "ClusterNotUpError", "message": "No in-progress managed jobs."}),
+    "_wrap_in_5xx_detail": True,
+}
+
+
+def test_list_managed_jobs_treats_no_jobs_controller_as_empty(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    fake_server.poll_queue["/jobs/queue"] = [dict(_NO_JOBS_CONTROLLER_POLL_RESPONSE)]
+
+    assert client.list_managed_jobs("ganymede-abc123") == []
+
+
+def test_cancel_managed_jobs_treats_no_jobs_controller_as_a_no_op(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    fake_server.poll_queue["/jobs/cancel"] = [dict(_NO_JOBS_CONTROLLER_POLL_RESPONSE)]
+
+    client.cancel_managed_jobs("ganymede-abc123")  # must not raise
+
+
+def test_list_managed_jobs_still_raises_for_a_different_5xx_wrapped_failure(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    fake_server.poll_queue["/jobs/queue"] = [
+        {
+            "status": "FAILED",
+            "return_value": "null",
+            "error": json.dumps({"type": "RuntimeError", "message": "something else broke"}),
+            "_wrap_in_5xx_detail": True,
+        }
+    ]
+
+    with pytest.raises(SkyPilotRequestFailedError, match="something else broke"):
+        client.list_managed_jobs("ganymede-abc123")
+
+
+def test_cancel_managed_jobs_still_raises_for_a_different_5xx_wrapped_failure(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    fake_server.poll_queue["/jobs/cancel"] = [
+        {
+            "status": "FAILED",
+            "return_value": "null",
+            "error": json.dumps({"type": "RuntimeError", "message": "something else broke"}),
+            "_wrap_in_5xx_detail": True,
+        }
+    ]
+
+    with pytest.raises(SkyPilotRequestFailedError, match="something else broke"):
+        client.cancel_managed_jobs("ganymede-abc123")
