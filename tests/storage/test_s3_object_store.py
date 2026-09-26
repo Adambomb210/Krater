@@ -1,15 +1,17 @@
 """`S3ObjectStore` against fake boto3 clients: presign shapes via real (local, no-network) SigV4 signing,
-and `head`/`delete` against `botocore.stub.Stubber` for the calls that actually hit the wire.
+and `head`/`read_prefix`/`delete` against `botocore.stub.Stubber` for the calls that actually hit the wire.
 """
 
 from __future__ import annotations
 
 import base64
+import io
 import json
 
 import boto3
 import pytest
 from botocore.client import Config as BotoConfig
+from botocore.response import StreamingBody
 from botocore.stub import Stubber
 
 from krater.config import Settings
@@ -88,7 +90,7 @@ def test_presign_download_targets_the_public_endpoint(clients) -> None:
 
 
 # --------------------------------------------------------------------------------------------------
-# head / delete: real API calls, against the *internal* client -- stubbed.
+# head / read_prefix / delete: real API calls, against the *internal* client -- stubbed.
 # --------------------------------------------------------------------------------------------------
 
 
@@ -133,6 +135,51 @@ def test_head_raises_storage_unavailable_on_a_real_failure(clients) -> None:
         stubber.add_client_error("head_object", service_error_code="500", http_status_code=500)
         with pytest.raises(StorageUnavailableError):
             store.head("k")
+
+
+def test_read_prefix_returns_the_ranged_bytes(clients) -> None:
+    settings, internal, public = clients
+    store = S3ObjectStore(settings, internal_client=internal, public_client=public)
+    body = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00\x00\x00\x00\x00"
+
+    with Stubber(internal) as stubber:
+        stubber.add_response(
+            "get_object",
+            {"Body": StreamingBody(io.BytesIO(body), len(body))},
+            {"Bucket": settings.s3_bucket, "Key": "k", "Range": "bytes=0-15"},
+        )
+        prefix = store.read_prefix("k", 16)
+
+    assert prefix == body
+
+
+def test_read_prefix_returns_none_for_a_missing_object(clients) -> None:
+    settings, internal, public = clients
+    store = S3ObjectStore(settings, internal_client=internal, public_client=public)
+
+    with Stubber(internal) as stubber:
+        stubber.add_client_error("get_object", service_error_code="NoSuchKey", http_status_code=404)
+        assert store.read_prefix("missing", 16) is None
+
+
+def test_read_prefix_returns_empty_bytes_for_an_out_of_range_request(clients) -> None:
+    """A shorter-than-requested (including empty) object: not an error, just fewer bytes."""
+    settings, internal, public = clients
+    store = S3ObjectStore(settings, internal_client=internal, public_client=public)
+
+    with Stubber(internal) as stubber:
+        stubber.add_client_error("get_object", service_error_code="InvalidRange", http_status_code=416)
+        assert store.read_prefix("short", 16) == b""
+
+
+def test_read_prefix_raises_storage_unavailable_on_a_real_failure(clients) -> None:
+    settings, internal, public = clients
+    store = S3ObjectStore(settings, internal_client=internal, public_client=public)
+
+    with Stubber(internal) as stubber:
+        stubber.add_client_error("get_object", service_error_code="500", http_status_code=500)
+        with pytest.raises(StorageUnavailableError):
+            store.read_prefix("k", 16)
 
 
 def test_delete_calls_the_internal_client(clients) -> None:

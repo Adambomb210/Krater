@@ -9,16 +9,22 @@ from approved completion revisions are served publicly"). The three-step flow th
 2. The browser uploads directly to storage, bypassing Krater's own process entirely.
 3. `confirm_screenshot` -- the submitter tells Krater the upload finished. This is the only step that
    actually changes `ProjectRevision.screenshot_keys`, and it re-checks the object via `ObjectStore.head`
-   before trusting it: the presigned policy is *storage's* enforcement, not Krater's, so a client that
-   skips step 1 (or a storage backend that doesn't enforce every policy condition -- see
-   `docs/dev/storage.md`) must not be able to sneak an oversized or wrong-type object into the gallery.
+   and `ObjectStore.read_prefix` before trusting it: the presigned policy is *storage's* enforcement,
+   not Krater's, so a client that skips step 1 (or a storage backend that doesn't enforce every policy
+   condition -- see `docs/dev/storage.md`) must not be able to sneak an oversized, wrong-type, or
+   not-actually-that-type object into the gallery. The signature check catches the specific gap
+   `docs/dev/storage.md` documents: a real S3-compatible backend takes the stored `Content-Type` from
+   the presigned POST's form field, not from the uploaded bytes themselves, so a client can legitimately
+   sign for `image/png` and then upload anything under that label.
 
-No image is ever decoded (no Pillow, no magic-byte sniffing beyond what `head` reports). That's an
-acceptable gap for now because: uploads require a signed-in member on their own completion draft, not an
-anonymous/public endpoint; a mislabeled object is only ever rendered back as an `<img src>`, which just
-fails to display rather than executing anything; and decoding untrusted image bytes server-side is its
-own attack surface (image-parser CVEs) not worth adding for this. If screenshots ever accept broader or
-more adversarial input, add a decode-and-reencode step before confirming.
+No image is ever *decoded* (no Pillow) -- only its first few bytes are checked against the declared
+type's magic number (PNG/JPEG/WebP each start with a fixed signature). That's an acceptable gap for now
+because: uploads require a signed-in member on their own completion draft, not an anonymous/public
+endpoint; a file whose signature matches but whose body is otherwise malformed is only ever rendered
+back as an `<img src>`, which just fails to display rather than executing anything; and decoding
+untrusted image bytes server-side is its own attack surface (image-parser CVEs) not worth adding for
+this. If screenshots ever accept broader or more adversarial input, add a decode-and-reencode step
+before confirming.
 """
 
 from __future__ import annotations
@@ -46,6 +52,26 @@ ALLOWED_CONTENT_TYPES: dict[str, str] = {
 
 MAX_SCREENSHOTS = 6
 MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024
+
+#: How many leading bytes `confirm_screenshot` reads to check a file's magic-byte signature. 16 is more
+#: than any of the three signatures below need (WebP's is the longest, at 12: `RIFF` + a 4-byte size
+#: field + `WEBP`), with a little headroom.
+SIGNATURE_CHECK_BYTES = 16
+
+#: PNG and JPEG signatures are a fixed byte prefix. WebP's isn't quite (bytes 4-7 are a little-endian
+#: file size, not part of the signature), so it gets its own check in `_matches_signature` below.
+_FIXED_SIGNATURES: dict[str, bytes] = {
+    "image/png": bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)),
+    "image/jpeg": bytes((0xFF, 0xD8, 0xFF)),
+}
+
+
+def _matches_signature(content_type: str, prefix: bytes) -> bool:
+    """Whether `prefix` (the object's leading bytes) starts with `content_type`'s magic number."""
+    if content_type == "image/webp":
+        return prefix[:4] == b"RIFF" and prefix[8:12] == b"WEBP"
+    signature = _FIXED_SIGNATURES.get(content_type)
+    return signature is not None and prefix.startswith(signature)
 
 
 @dataclass(frozen=True)
@@ -115,10 +141,10 @@ def confirm_screenshot(
 
     Re-validates everything server-side rather than trusting the browser's earlier presign request:
     `key` must belong to this project's current draft (never an arbitrary, client-chosen key), the
-    screenshot limit must still hold, and the object must actually exist in storage with an allowed
-    content type and size at or under `MAX_SCREENSHOT_BYTES` (`ValidationFailed` if `head` finds
-    anything else, including nothing at all). A rejected object is best-effort deleted from storage so
-    it doesn't linger.
+    screenshot limit must still hold, the object must actually exist in storage with an allowed content
+    type and size at or under `MAX_SCREENSHOT_BYTES`, and its first `SIGNATURE_CHECK_BYTES` bytes must
+    match that content type's magic number (`ValidationFailed` if any of that doesn't hold, including no
+    object at all). A rejected object is best-effort deleted from storage so it doesn't linger.
     """
     draft = _require_completion_draft(actor, project)
 
@@ -130,12 +156,17 @@ def confirm_screenshot(
         raise ValidationFailed({"screenshot": f"At most {MAX_SCREENSHOTS} screenshots are allowed."})
 
     meta = store.head(key)
-    if meta is None:
-        raise ValidationFailed({"screenshot": "Upload not found. Try again."})
-    if meta.content_type not in ALLOWED_CONTENT_TYPES or meta.size_bytes > MAX_SCREENSHOT_BYTES:
+    invalid = meta is None or meta.content_type not in ALLOWED_CONTENT_TYPES or meta.size_bytes > MAX_SCREENSHOT_BYTES
+    if not invalid:
+        prefix = store.read_prefix(key, SIGNATURE_CHECK_BYTES) or b""
+        invalid = not _matches_signature(meta.content_type, prefix)
+
+    if invalid:
         # Best-effort: the object is orphaned but harmless, and never gets linked to the draft either way.
         with contextlib.suppress(StorageError):
             store.delete(key)
+        if meta is None:
+            raise ValidationFailed({"screenshot": "Upload not found. Try again."})
         raise ValidationFailed({"screenshot": "That upload isn't a valid PNG, JPEG or WebP under 5 MB."})
 
     draft.screenshot_keys = [*draft.screenshot_keys, key]
@@ -175,6 +206,7 @@ __all__ = [
     "ALLOWED_CONTENT_TYPES",
     "MAX_SCREENSHOTS",
     "MAX_SCREENSHOT_BYTES",
+    "SIGNATURE_CHECK_BYTES",
     "ScreenshotUpload",
     "confirm_screenshot",
     "presign_screenshot",

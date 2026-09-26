@@ -6,16 +6,18 @@ Starts `weed server -s3 ...` the same way `docker-compose.yml`'s `storage` servi
 `docs/dev/storage.md`), against a throwaway data directory, and stops it afterwards regardless of
 outcome. Skips cleanly if no `weed` binary is configured.
 
-This is the regression net for the three things `docs/dev/storage.md` documents as verified against
+This is the regression net for the things `docs/dev/storage.md` documents as verified against
 SeaweedFS rather than assumed from the S3 spec: that a presigned POST's `content-length-range`
 condition is actually enforced (it is), that its exact `Content-Type` match condition is actually
-enforced against the posted form field (it is -- tampering with that field breaks the signature), and
-that bucket CORS set via `put-bucket-cors` is actually applied to live requests (it is). None of this
-makes `krater.services.screenshots.confirm_screenshot`'s own re-check of the stored object redundant:
-that check is what actually reads back *what got stored* (the `Content-Type` field is trusted input,
-not a guarantee the bytes behind it are what they claim to be -- see that module's docstring on why
-decoding them isn't done either), and it's what makes `krater.storage.ObjectStore` safe to implement
-against a future backend that enforces these conditions less strictly than SeaweedFS does.
+enforced against the posted form field (it is -- tampering with that field breaks the signature), that
+bucket CORS set via `put-bucket-cors` is actually applied to live requests (it is), and that a ranged
+GET (`Range: bytes=0-15`, what `ObjectStore.read_prefix` sends) works against a real SeaweedFS object,
+including one shorter than the requested range. None of this makes
+`krater.services.screenshots.confirm_screenshot`'s own re-checks of the stored object redundant: the
+`Content-Type` field is trusted input, not a guarantee the bytes behind it are what they claim to be
+(that's what the magic-byte signature check via `read_prefix` catches -- see that module's docstring on
+why full decoding still isn't done), and all of it is what makes `krater.storage.ObjectStore` safe to
+implement against a future backend that enforces these conditions less strictly than SeaweedFS does.
 """
 
 from __future__ import annotations
@@ -213,6 +215,12 @@ def test_presigned_post_upload_head_get_and_delete(store: S3ObjectStore) -> None
     assert meta.size_bytes == len(_PNG_BYTES)
     assert meta.content_type == "image/png"
 
+    # A real ranged GET (Range: bytes=0-15), not a full download -- what
+    # `krater.services.screenshots.confirm_screenshot` uses for its magic-byte signature check.
+    prefix = store.read_prefix(key, 16)
+    assert prefix == _PNG_BYTES[:16]
+    assert prefix.startswith(bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)))  # the PNG signature
+
     download_url = store.presign_download(key, expires=3600)
     downloaded = httpx.get(download_url)
     assert downloaded.status_code == 200
@@ -257,6 +265,24 @@ def test_presigned_post_enforces_the_signed_content_type(store: S3ObjectStore) -
     assert response.status_code == 403
     assert "Policy" in response.text
     assert store.head(key) is None
+
+
+@skip_without_weed
+def test_read_prefix_on_a_short_object_returns_what_exists(store: S3ObjectStore) -> None:
+    """Requesting more bytes than the object has (a 3-byte object, `Range: bytes=0-15`) is a real
+    SeaweedFS edge case worth pinning down: not an error, just fewer bytes back."""
+    key = "projects/live-test/rev/tiny.png"
+    post = store.presign_upload(key, content_type="image/png", max_bytes=100)
+    httpx.post(post.url, data=post.fields, files={"file": ("tiny.png", b"abc", "image/png")})
+
+    assert store.read_prefix(key, 16) == b"abc"
+
+    store.delete(key)
+
+
+@skip_without_weed
+def test_read_prefix_on_a_missing_key_returns_none(store: S3ObjectStore) -> None:
+    assert store.read_prefix("projects/live-test/rev/never-uploaded.png", 16) is None
 
 
 @skip_without_weed

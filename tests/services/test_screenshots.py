@@ -18,6 +18,15 @@ def store() -> FakeObjectStore:
     return FakeObjectStore()
 
 
+#: Real magic-byte headers for each allowed type, padded out past `SIGNATURE_CHECK_BYTES` so tests can
+#: use these directly as a confirmed upload's `content`.
+_VALID_SIGNATURES: dict[str, bytes] = {
+    "image/png": bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)) + b"\x00" * 8,
+    "image/jpeg": bytes((0xFF, 0xD8, 0xFF)) + b"\x00" * 13,
+    "image/webp": b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"\x00" * 4,
+}
+
+
 def _completion_draft(db_session: Session, member: Actor, reviewer: Actor):
     """An approved project with a fresh, unsubmitted completion draft."""
     project = projects.create_project(
@@ -47,9 +56,10 @@ def _confirm_upload(
     content_type: str = "image/png",
     size_bytes: int = 1024,
 ) -> str:
-    """Presign, simulate the browser's upload, then confirm. Returns the confirmed key."""
+    """Presign, simulate the browser's upload (with a real signature for `content_type`), then confirm.
+    Returns the confirmed key."""
     upload = screenshots.presign_screenshot(db_session, member, project=project, content_type=content_type, store=store)
-    store.put(upload.key, content_type=content_type, size_bytes=size_bytes)
+    store.put(upload.key, content_type=content_type, size_bytes=size_bytes, content=_VALID_SIGNATURES[content_type])
     screenshots.confirm_screenshot(db_session, member, project=project, key=upload.key, store=store)
     return upload.key
 
@@ -136,8 +146,8 @@ def test_confirm_also_enforces_the_limit(
     upload_b = screenshots.presign_screenshot(
         db_session, member, project=project, content_type="image/png", store=store
     )
-    store.put(upload_a.key, content_type="image/png", size_bytes=100)
-    store.put(upload_b.key, content_type="image/png", size_bytes=100)
+    store.put(upload_a.key, content_type="image/png", size_bytes=100, content=_VALID_SIGNATURES["image/png"])
+    store.put(upload_b.key, content_type="image/png", size_bytes=100, content=_VALID_SIGNATURES["image/png"])
 
     screenshots.confirm_screenshot(db_session, member, project=project, key=upload_a.key, store=store)
     assert len(draft.screenshot_keys) == screenshots.MAX_SCREENSHOTS
@@ -197,6 +207,34 @@ def test_confirm_rejects_a_mismatched_content_type(
         screenshots.confirm_screenshot(db_session, member, project=project, key=upload.key, store=store)
 
     assert upload.key not in draft.screenshot_keys
+
+
+def test_confirm_rejects_bytes_that_dont_match_the_declared_signature(
+    db_session: Session, member: Actor, reviewer: Actor, store: FakeObjectStore
+) -> None:
+    """A client can legitimately sign a presigned POST for `image/png` and then upload arbitrary bytes
+    under that label (the stored Content-Type comes from the signed form field, not the bytes -- see
+    docs/dev/storage.md); the magic-byte check is what actually catches that."""
+    project, draft = _completion_draft(db_session, member, reviewer)
+    upload = screenshots.presign_screenshot(db_session, member, project=project, content_type="image/png", store=store)
+    store.put(upload.key, content_type="image/png", size_bytes=100, content=b"not actually a png file at all!")
+
+    with pytest.raises(ValidationFailed):
+        screenshots.confirm_screenshot(db_session, member, project=project, key=upload.key, store=store)
+
+    assert upload.key not in draft.screenshot_keys
+    assert store.head(upload.key) is None  # best-effort deleted
+
+
+@pytest.mark.parametrize("content_type", sorted(screenshots.ALLOWED_CONTENT_TYPES))
+def test_confirm_accepts_a_valid_signature_for_every_allowed_type(
+    db_session: Session, member: Actor, reviewer: Actor, store: FakeObjectStore, content_type: str
+) -> None:
+    project, draft = _completion_draft(db_session, member, reviewer)
+
+    key = _confirm_upload(db_session, member, project=project, store=store, content_type=content_type)
+
+    assert key in draft.screenshot_keys
 
 
 def test_confirm_rejects_a_key_outside_this_draft(

@@ -12,7 +12,7 @@ from krater.services import projects as project_service
 from krater.services import screenshots as screenshot_service
 from krater.storage import get_object_store
 from tests.conftest import MEMBER_SUB, REVIEWER_SUB
-from tests.web.conftest import actor_for
+from tests.web.conftest import PNG_SIGNATURE, actor_for
 
 
 def _completed_project(db_session: Session, approved_project, member, reviewer, *, with_screenshot: bool = False):
@@ -30,7 +30,7 @@ def _completed_project(db_session: Session, approved_project, member, reviewer, 
         upload = screenshot_service.presign_screenshot(
             db_session, actor_for(member), project=project, content_type="image/png", store=store
         )
-        store.put(upload.key, content_type="image/png", size_bytes=1024)
+        store.put(upload.key, content_type="image/png", size_bytes=1024, content=PNG_SIGNATURE)
         screenshot_service.confirm_screenshot(
             db_session, actor_for(member), project=project, key=upload.key, store=store
         )

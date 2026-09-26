@@ -40,6 +40,11 @@ class ObjectStore(Protocol):
         """`key`'s size and declared content type, or `None` if no such object exists."""
         ...
 
+    def read_prefix(self, key: str, n: int) -> bytes | None:
+        """The first `n` bytes of `key` (a ranged `GET`, not a full download), or `None` if no such
+        object exists. Used to check a file's magic-byte signature without fetching the whole object."""
+        ...
+
     def delete(self, key: str) -> None:
         """Delete `key`. Safe to call on a key that's already gone (S3's own `DeleteObject` semantics)."""
         ...

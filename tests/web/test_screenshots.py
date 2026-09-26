@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from krater.services import projects as project_service
 from krater.storage import get_object_store
 from tests.conftest import MEMBER_SUB, OTHER_MEMBER_SUB, REVIEWER_SUB, get_csrf_token
-from tests.web.conftest import actor_for
+from tests.web.conftest import PNG_SIGNATURE, actor_for
 
 
 def _completion_draft(db_session: Session, approved_project, member, reviewer):
@@ -50,7 +50,7 @@ def test_presign_confirm_and_display_happy_path(
 
     # Simulate the browser's direct upload to storage.
     store = get_object_store()
-    store.put(key, content_type="image/png", size_bytes=2048)
+    store.put(key, content_type="image/png", size_bytes=2048, content=PNG_SIGNATURE)
 
     confirm_response = client.post(f"/projects/{project.id}/screenshots/confirm", data={"csrf_token": csrf, "key": key})
     assert confirm_response.status_code == 200, confirm_response.text
@@ -152,7 +152,7 @@ def test_delete_removes_the_screenshot_without_js(
         f"/projects/{project.id}/screenshots/presign", data={"csrf_token": csrf, "content_type": "image/png"}
     ).json()
     store = get_object_store()
-    store.put(presign["key"], content_type="image/png", size_bytes=100)
+    store.put(presign["key"], content_type="image/png", size_bytes=100, content=PNG_SIGNATURE)
     client.post(f"/projects/{project.id}/screenshots/confirm", data={"csrf_token": csrf, "key": presign["key"]})
 
     delete_response = client.post(

@@ -38,6 +38,14 @@ def _is_not_found(exc: ClientError) -> bool:
     return error.get("Code") in ("404", "NoSuchKey", "NotFound") or status == 404
 
 
+def _is_invalid_range(exc: ClientError) -> bool:
+    """A `Range` past the end of a shorter-than-requested (including empty) object: not an error worth
+    surfacing to `read_prefix`'s caller, just fewer bytes than asked for."""
+    error = exc.response.get("Error", {})
+    status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return error.get("Code") == "InvalidRange" or status == 416
+
+
 class S3ObjectStore:
     """An `ObjectStore` backed by a real S3-compatible bucket. `internal_client`/`public_client` are
     injectable for tests (e.g. botocore's `Stubber`); production code leaves them out and gets real
@@ -95,6 +103,17 @@ class S3ObjectStore:
                 return None
             raise StorageUnavailableError(f"could not head {key!r}: {exc}") from exc
         return ObjectMeta(size_bytes=int(response["ContentLength"]), content_type=response.get("ContentType"))
+
+    def read_prefix(self, key: str, n: int) -> bytes | None:
+        try:
+            response = self._internal.get_object(Bucket=self._bucket, Key=key, Range=f"bytes=0-{n - 1}")
+        except ClientError as exc:
+            if _is_not_found(exc):
+                return None
+            if _is_invalid_range(exc):
+                return b""
+            raise StorageUnavailableError(f"could not read {key!r}: {exc}") from exc
+        return response["Body"].read()
 
     def delete(self, key: str) -> None:
         try:

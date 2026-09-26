@@ -71,10 +71,19 @@ elsewhere:
   form field**, not from the uploaded file part's own multipart headers. Changing that form field away
   from what was signed breaks the signature (`403 AccessDenied: Policy Condition failed`) -- but a
   client is always free to send *whatever bytes* it wants under a form field it's still allowed to sign
-  correctly (e.g. non-image bytes labeled `image/png`). That gap is exactly why
-  `krater.services.screenshots.confirm_screenshot` re-checks the *stored* object's reported content type
-  via `ObjectStore.head` rather than trusting that the presigned request succeeded, and exactly why that
-  module's docstring is explicit about not decoding the bytes themselves either.
+  correctly (e.g. non-image bytes labeled `image/png`). That gap is why
+  `krater.services.screenshots.confirm_screenshot` re-checks the *stored* object rather than trusting
+  that the presigned request succeeded: it re-reads `head`'s reported content type and size, **and**
+  reads the object's first `SIGNATURE_CHECK_BYTES` bytes (`ObjectStore.read_prefix`, a ranged
+  `GET` -- verified against real SeaweedFS below) to confirm they actually start with that content
+  type's magic number (PNG `89 50 4E 47 0D 0A 1A 0A`, JPEG `FF D8 FF`, WebP `RIFF????WEBP`). That check
+  catches exactly the gap above -- a form field that matches but bytes that don't -- cheaply, without
+  decoding the image. Krater still never decodes the file itself (no Pillow); see that module's
+  docstring for why that remaining gap is an acceptable one for now.
+- **A ranged GET (`Range: bytes=0-15`) works as expected**, including against an object shorter than
+  the requested range (a real SeaweedFS edge case: it returns just the bytes that exist, not an error).
+  This is what `ObjectStore.read_prefix` uses for the signature check above, rather than downloading the
+  whole object just to look at its first few bytes.
 
 ## Running the live test locally
 
