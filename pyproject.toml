@@ -42,3 +42,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `live` tests talk to real running services (a local Weave, a real SkyPilot API server). They're skipped by default;
+# run them with `uv run pytest -m live` once those services are up (see docs/dev/).
+addopts = "-m 'not live'"
+markers = ["live: needs real external services running; deselected by default"]
