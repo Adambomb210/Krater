@@ -57,7 +57,10 @@ services:
     volumes:
       - krater_storage_data:/data
 
-  # One-shot: create the bucket. Safe to re-run.
+  # One-shot: create the bucket and set its CORS policy. Safe to re-run. The CORS rule is what lets a
+  # browser upload straight to `storage` (and load screenshot thumbnails from it) via the presigned
+  # URLs `krater.storage` hands out -- see docs/dev/storage.md, which also documents that this is
+  # verified against real SeaweedFS, not assumed from the S3 spec.
   storage-init:
     image: amazon/aws-cli:${AWS_CLI_VERSION:-latest}
     environment:
@@ -69,10 +72,12 @@ services:
     command:
       - >-
         for i in $$(seq 1 30); do
-          aws --endpoint-url http://storage:8333 s3api head-bucket --bucket "$$BUCKET" 2>/dev/null && exit 0;
-          aws --endpoint-url http://storage:8333 s3 mb "s3://$$BUCKET" 2>/dev/null && exit 0;
+          aws --endpoint-url http://storage:8333 s3api head-bucket --bucket "$$BUCKET" 2>/dev/null && break;
+          aws --endpoint-url http://storage:8333 s3 mb "s3://$$BUCKET" 2>/dev/null && break;
           sleep 2;
-        done; echo "storage not reachable" >&2; exit 1
+        done;
+        aws --endpoint-url http://storage:8333 s3api head-bucket --bucket "$$BUCKET" 2>/dev/null || { echo "storage not reachable" >&2; exit 1; };
+        aws --endpoint-url http://storage:8333 s3api put-bucket-cors --bucket "$$BUCKET" --cors-configuration '{"CORSRules":[{"AllowedOrigins":["*"],"AllowedMethods":["GET","PUT","POST"],"AllowedHeaders":["*"],"ExposeHeaders":["ETag"],"MaxAgeSeconds":3000}]}'
     depends_on:
       - storage
 

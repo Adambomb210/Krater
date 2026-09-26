@@ -1,0 +1,154 @@
+"""`S3ObjectStore` against fake boto3 clients: presign shapes via real (local, no-network) SigV4 signing,
+and `head`/`delete` against `botocore.stub.Stubber` for the calls that actually hit the wire.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+
+import boto3
+import pytest
+from botocore.client import Config as BotoConfig
+from botocore.stub import Stubber
+
+from krater.config import Settings
+from krater.storage.errors import StorageUnavailableError
+from krater.storage.live import S3ObjectStore
+
+_BOTO_CONFIG = BotoConfig(signature_version="s3v4", s3={"addressing_style": "path"})
+
+
+def _settings() -> Settings:
+    return Settings(
+        s3_mode="live",
+        s3_endpoint_url="http://internal-storage:8333",
+        s3_public_endpoint_url="https://public-storage.example.com",
+        s3_bucket="krater-screenshots",
+        s3_region="us-east-1",
+        s3_access_key_id="AKIAFAKEACCESSKEY",
+        s3_secret_access_key="fake-secret-key",
+    )
+
+
+def _client(endpoint: str):
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        region_name="us-east-1",
+        aws_access_key_id="AKIAFAKEACCESSKEY",
+        aws_secret_access_key="fake-secret-key",
+        config=_BOTO_CONFIG,
+    )
+
+
+@pytest.fixture
+def clients():
+    settings = _settings()
+    internal = _client(settings.s3_endpoint_url)
+    public = _client(settings.s3_public_endpoint_url)
+    return settings, internal, public
+
+
+def _decode_policy(fields: dict[str, str]) -> dict:
+    return json.loads(base64.b64decode(fields["policy"]))
+
+
+# --------------------------------------------------------------------------------------------------
+# Presign: pure local SigV4 signing, no network -- Stubber not needed/applicable.
+# --------------------------------------------------------------------------------------------------
+
+
+def test_presign_upload_targets_the_public_endpoint_and_pins_type_and_size(clients) -> None:
+    settings, internal, public = clients
+    store = S3ObjectStore(settings, internal_client=internal, public_client=public)
+
+    post = store.presign_upload("projects/p/r/x.png", content_type="image/png", max_bytes=5 * 1024 * 1024)
+
+    assert post.url.startswith(settings.s3_public_endpoint_url)
+    assert post.fields["Content-Type"] == "image/png"
+    assert post.fields["key"] == "projects/p/r/x.png"
+    assert "x-amz-signature" in post.fields
+
+    policy = _decode_policy(post.fields)
+    conditions = policy["conditions"]
+    assert {"Content-Type": "image/png"} in conditions
+    assert ["content-length-range", 1, 5 * 1024 * 1024] in conditions
+
+
+def test_presign_download_targets_the_public_endpoint(clients) -> None:
+    settings, internal, public = clients
+    store = S3ObjectStore(settings, internal_client=internal, public_client=public)
+
+    url = store.presign_download("projects/p/r/x.png", expires=3600)
+
+    assert url.startswith(settings.s3_public_endpoint_url)
+    assert "projects/p/r/x.png" in url
+    assert "X-Amz-Signature" in url
+
+
+# --------------------------------------------------------------------------------------------------
+# head / delete: real API calls, against the *internal* client -- stubbed.
+# --------------------------------------------------------------------------------------------------
+
+
+def test_head_returns_object_meta(clients) -> None:
+    settings, internal, public = clients
+    store = S3ObjectStore(settings, internal_client=internal, public_client=public)
+
+    with Stubber(internal) as stubber:
+        stubber.add_response(
+            "head_object",
+            {"ContentLength": 2048, "ContentType": "image/png"},
+            {"Bucket": settings.s3_bucket, "Key": "k"},
+        )
+        meta = store.head("k")
+
+    assert meta is not None
+    assert meta.size_bytes == 2048
+    assert meta.content_type == "image/png"
+
+
+def test_head_returns_none_for_a_missing_object(clients) -> None:
+    settings, internal, public = clients
+    store = S3ObjectStore(settings, internal_client=internal, public_client=public)
+
+    with Stubber(internal) as stubber:
+        stubber.add_client_error(
+            "head_object",
+            service_error_code="404",
+            http_status_code=404,
+            expected_params={"Bucket": settings.s3_bucket, "Key": "missing"},
+        )
+        meta = store.head("missing")
+
+    assert meta is None
+
+
+def test_head_raises_storage_unavailable_on_a_real_failure(clients) -> None:
+    settings, internal, public = clients
+    store = S3ObjectStore(settings, internal_client=internal, public_client=public)
+
+    with Stubber(internal) as stubber:
+        stubber.add_client_error("head_object", service_error_code="500", http_status_code=500)
+        with pytest.raises(StorageUnavailableError):
+            store.head("k")
+
+
+def test_delete_calls_the_internal_client(clients) -> None:
+    settings, internal, public = clients
+    store = S3ObjectStore(settings, internal_client=internal, public_client=public)
+
+    with Stubber(internal) as stubber:
+        stubber.add_response("delete_object", {}, {"Bucket": settings.s3_bucket, "Key": "k"})
+        store.delete("k")  # no exception
+
+
+def test_delete_raises_storage_unavailable_on_failure(clients) -> None:
+    settings, internal, public = clients
+    store = S3ObjectStore(settings, internal_client=internal, public_client=public)
+
+    with Stubber(internal) as stubber:
+        stubber.add_client_error("delete_object", service_error_code="500", http_status_code=500)
+        with pytest.raises(StorageUnavailableError):
+            store.delete("k")

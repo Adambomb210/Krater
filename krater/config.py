@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     skypilot_max_hourly_cost_cents: int = 500  # per-instance cap forced onto every launch
 
     # S3-compatible object storage (gallery screenshots). docker-compose runs a temporary SeaweedFS as `storage`.
+    # `fake` uses an in-memory store for dev and tests; `live` talks to a real S3-compatible bucket. See
+    # docs/dev/storage.md.
+    s3_mode: Literal["fake", "live"] = "fake"
     s3_endpoint_url: str = ""
     s3_public_endpoint_url: str = ""
     s3_region: str = "us-east-1"
@@ -59,6 +62,8 @@ class Settings(BaseSettings):
                 raise ValueError("KRATER_WEAVE_MODE cannot be 'stub' when KRATER_ENV=production")
             if self.skypilot_mode == "fake":
                 raise ValueError("KRATER_SKYPILOT_MODE cannot be 'fake' when KRATER_ENV=production")
+            if self.s3_mode == "fake":
+                raise ValueError("KRATER_S3_MODE cannot be 'fake' when KRATER_ENV=production")
             if self.skypilot_mode == "live" and len(self.skypilot_policy_token) < 32:
                 raise ValueError("KRATER_SKYPILOT_POLICY_TOKEN must be at least 32 characters in production")
             if self.secret_key == DEFAULT_SECRET_KEY:

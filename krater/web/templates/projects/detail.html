@@ -46,6 +46,15 @@
     <h2>{{ "Draft" if not summary.current_revision.submitted_at else "Write-up" }}</h2>
     <p class="write-up">{{ summary.current_revision.write_up | nl2br }}</p>
   {% endif %}
+
+  {% if screenshots %}
+    <h2>Screenshots</h2>
+    <ul class="gallery-screenshots">
+      {% for shot in screenshots %}
+        <li><img src="{{ shot.url }}" alt="{{ project.title or 'Project' }} screenshot" loading="lazy"></li>
+      {% endfor %}
+    </ul>
+  {% endif %}
 </section>
 
 {% if is_submitter and (can_edit_draft or can_submit or can_submit_completion or can_start_amendment or can_start_completion or can_withdraw) %}

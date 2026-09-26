@@ -13,7 +13,7 @@ from typing import Annotated
 
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from krater.config import get_settings
@@ -29,9 +29,11 @@ from krater.models import (
     User,
 )
 from krater.services import projects as project_service
+from krater.services import screenshots as screenshot_service
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
 from krater.services.skypilot_sync import current_budget_flag
+from krater.storage import ObjectStore, get_object_store
 from krater.web.csrf import verify_csrf_token
 from krater.web.deps import fresh_actor
 from krater.web.flash import flash
@@ -176,10 +178,13 @@ def _build_detail_context(
             session, project, warn_percent=get_settings().skypilot_budget_warn_percent
         )
 
+    screenshots = _screenshot_entries(get_object_store(), current) if current is not None else []
+
     return {
         "project": project,
         "summary": summary,
         "skypilot_budget_flag": skypilot_budget_flag,
+        "screenshots": screenshots,
         "revisions": revisions,
         "users_by_id": users_by_id,
         "is_submitter": is_submitter,
@@ -244,12 +249,18 @@ def _require_editable_draft(project: Project) -> ProjectRevision | None:
     return draft
 
 
+def _screenshot_entries(store: ObjectStore, draft: ProjectRevision) -> list[dict[str, str]]:
+    """Short-lived presigned GET URLs for a draft's screenshots, for the edit page's thumbnails."""
+    return [{"key": key, "url": store.presign_download(key)} for key in draft.screenshot_keys]
+
+
 @router.get("/projects/{project_id}/edit")
 def edit_draft_form(
     request: Request,
     project_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    store: Annotated[ObjectStore, Depends(get_object_store)],
 ):
     project = _get_visible_project(db_session, actor, project_id)
     if actor.user.id != project.submitter_id:
@@ -261,9 +272,12 @@ def edit_draft_form(
         return _redirect_to_project(project_id)
 
     values = _edit_form_values(db_session, project, draft)
-    return templates.TemplateResponse(
-        request, "projects/edit.html", {"project": project, "draft": draft, "errors": {}, "values": values}
-    )
+    context = {"project": project, "draft": draft, "errors": {}, "values": values}
+    if draft.kind is RevisionKind.COMPLETION:
+        context["screenshots"] = _screenshot_entries(store, draft)
+        context["max_screenshots"] = screenshot_service.MAX_SCREENSHOTS
+        context["max_screenshot_bytes"] = screenshot_service.MAX_SCREENSHOT_BYTES
+    return templates.TemplateResponse(request, "projects/edit.html", context)
 
 
 @router.post("/projects/{project_id}/edit", dependencies=[Depends(verify_csrf_token)])
@@ -272,6 +286,7 @@ def update_draft(
     project_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    store: Annotated[ObjectStore, Depends(get_object_store)],
     title: Annotated[str, Form()] = "",
     repo_url: Annotated[str, Form()] = "",
     write_up: Annotated[str, Form()] = "",
@@ -315,12 +330,12 @@ def update_draft(
             "tags": tags,
             "credited_builder_emails": credited_builder_emails,
         }
-        return templates.TemplateResponse(
-            request,
-            "projects/edit.html",
-            {"project": project, "draft": draft, "errors": errors, "values": values},
-            status_code=422,
-        )
+        context = {"project": project, "draft": draft, "errors": errors, "values": values}
+        if draft.kind is RevisionKind.COMPLETION:
+            context["screenshots"] = _screenshot_entries(store, draft)
+            context["max_screenshots"] = screenshot_service.MAX_SCREENSHOTS
+            context["max_screenshot_bytes"] = screenshot_service.MAX_SCREENSHOT_BYTES
+        return templates.TemplateResponse(request, "projects/edit.html", context, status_code=422)
 
     update_kwargs: dict = {
         "title": title,
@@ -614,6 +629,73 @@ def admin_reclaim_budget(
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
     return _success_redirect(db_session, request, project_id, "Budget reclaimed.")
+
+
+# --------------------------------------------------------------------------------------------------
+# Screenshots (completion draft only): presign/confirm are called by the edit page's upload widget
+# (krater/web/static/js/screenshot-upload.js) via `fetch`, and return JSON rather than a redirect.
+# Remove is a plain CSRF-protected form post, so it works with JavaScript disabled.
+# --------------------------------------------------------------------------------------------------
+
+
+@router.post("/projects/{project_id}/screenshots/presign", dependencies=[Depends(verify_csrf_token)])
+def presign_screenshot(
+    project_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+    store: Annotated[ObjectStore, Depends(get_object_store)],
+    content_type: Annotated[str, Form()] = "",
+):
+    project = _get_visible_project(db_session, actor, project_id)
+    try:
+        upload = screenshot_service.presign_screenshot(
+            db_session, actor, project=project, content_type=content_type, store=store
+        )
+    except ValidationFailed as exc:
+        return JSONResponse({"errors": exc.errors}, status_code=422)
+    except InvalidState as exc:
+        return JSONResponse({"errors": {"screenshot": str(exc)}}, status_code=409)
+    return JSONResponse({"key": upload.key, "url": upload.post.url, "fields": upload.post.fields})
+
+
+@router.post("/projects/{project_id}/screenshots/confirm", dependencies=[Depends(verify_csrf_token)])
+def confirm_screenshot(
+    project_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+    store: Annotated[ObjectStore, Depends(get_object_store)],
+    key: Annotated[str, Form()] = "",
+):
+    project = _get_visible_project(db_session, actor, project_id)
+    try:
+        screenshot_service.confirm_screenshot(db_session, actor, project=project, key=key, store=store)
+    except ValidationFailed as exc:
+        db_session.rollback()
+        return JSONResponse({"errors": exc.errors}, status_code=422)
+    except InvalidState as exc:
+        db_session.rollback()
+        return JSONResponse({"errors": {"screenshot": str(exc)}}, status_code=409)
+    db_session.commit()
+    return JSONResponse({"key": key})
+
+
+@router.post("/projects/{project_id}/screenshots/{key:path}/delete", dependencies=[Depends(verify_csrf_token)])
+def delete_screenshot(
+    request: Request,
+    project_id: uuid.UUID,
+    key: str,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+    store: Annotated[ObjectStore, Depends(get_object_store)],
+):
+    project = _get_visible_project(db_session, actor, project_id)
+    try:
+        screenshot_service.remove_screenshot(db_session, actor, project=project, key=key, store=store)
+    except InvalidState as exc:
+        return _invalid_state_redirect(db_session, request, project_id, exc)
+    db_session.commit()
+    flash(request, "Screenshot removed.", "success")
+    return RedirectResponse(f"/projects/{project_id}/edit", status_code=303)
 
 
 __all__ = ["router"]

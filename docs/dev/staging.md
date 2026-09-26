@@ -142,7 +142,8 @@ docker compose --profile skypilot up --build
 ```
 
 This starts everything, including `skypilot` and `auth-proxy` (the `skypilot` profile), on top of the usual
-`db`/`migrate`/`portal`/`worker`/`storage` services.
+`db`/`migrate`/`portal`/`worker`/`storage` services. See `docs/dev/storage.md` for `storage`'s own env vars,
+its CORS setup, and what's been verified against it.
 
 ### Bootstrap the SkyPilot service-account token
 
