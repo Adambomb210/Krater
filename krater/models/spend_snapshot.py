@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
@@ -25,7 +25,11 @@ class SpendSnapshot(UUIDPrimaryKeyMixin, Base):
     project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), sa.ForeignKey("projects.id"), nullable=False)
     estimated_spend_cents: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     source: Mapped[SpendSource] = mapped_column(pg_enum(SpendSource, name="spend_source"), nullable=False)
-    taken_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now())
+    # Set in Python, not by the server default alone: Postgres `now()` is frozen for the whole transaction, so snapshots
+    # written together (as the reconciler does) would tie and "latest" would be arbitrary.
+    taken_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC), server_default=sa.func.now()
+    )
 
     project: Mapped[Project] = relationship(back_populates="spend_snapshots")
 
