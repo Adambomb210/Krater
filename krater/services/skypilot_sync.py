@@ -103,6 +103,11 @@ def sync_workspaces(session: Session, client: SkyPilotClient) -> None:
         for cluster in client.list_clusters(name):
             client.down_cluster(cluster.name)
         client.cancel_managed_jobs(name)
+        # Serve services (and their controller/replica clusters) aren't part of `list_clusters`'
+        # accounting -- a completed/withdrawn project with a live service would otherwise keep it (and
+        # its compute) running forever, orphaned once the workspace itself is deleted below.
+        for service in client.list_services(name):
+            client.down_service(service.name)
 
         final_spend_cents = _workspace_total_cents(client, name)
         if final_spend_cents != budget.latest_spend_cents(session, project):
@@ -225,6 +230,11 @@ def enforce_budgets(session: Session, client: SkyPilotClient, *, warn_percent: i
             for cluster in clusters:
                 client.down_cluster(cluster.name)
             client.cancel_managed_jobs(workspace)
+            # Serve services provision their own controller/replica clusters outside `list_clusters`'
+            # view -- an over-budget project's live service must be torn down too, or it keeps running
+            # (and spending) past the point the policy endpoint has already started blocking new launches.
+            for service in client.list_services(workspace):
+                client.down_service(service.name)
 
             last_teardown = _latest_audit_event(session, project, AUDIT_BUDGET_TEARDOWN)
             already_armed_at_this_ceiling = last_teardown is not None and ceiling_cents <= last_teardown.payload.get(

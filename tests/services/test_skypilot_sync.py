@@ -160,6 +160,24 @@ def test_a_withdrawn_project_gets_torn_down_too(db_session: Session, member: Act
     assert name not in client.workspaces
 
 
+def test_a_completed_projects_serve_service_is_torn_down_too(
+    db_session: Session, member: Actor, reviewer: Actor, client
+) -> None:
+    """A Serve service (`sky serve up`) provisions its own controller/replica clusters outside
+    `list_clusters`' accounting -- teardown must down it explicitly, or it (and its compute) keeps
+    running past the workspace's own deletion."""
+    project = _approve(db_session, member, reviewer)
+    sync_workspaces(db_session, client)
+    name = project.skypilot_workspace
+    service_name = client.add_service(name)
+
+    projects.withdraw(db_session, member, project=project)
+    sync_workspaces(db_session, client)
+
+    assert client.list_services(name) == []
+    assert service_name  # sanity: a real name was generated and torn down, not a no-op on nothing
+
+
 # --------------------------------------------------------------------------------------------------
 # sync_spend
 # --------------------------------------------------------------------------------------------------
@@ -234,6 +252,22 @@ def test_teardown_at_100_percent_downs_clusters_and_cancels_jobs(
     ).one()
     assert teardown_event.actor_id is None
     assert current_budget_flag(db_session, project, warn_percent=WARN_PERCENT) == "teardown"
+
+
+def test_teardown_at_100_percent_downs_serve_services_too(
+    db_session: Session, member: Actor, reviewer: Actor, client
+) -> None:
+    project = _approve(db_session, member, reviewer, budget_cents=1000)
+    sync_workspaces(db_session, client)
+    name = project.skypilot_workspace
+    client.add_cluster(name, cost_cents=1200)  # over budget
+    service_name = client.add_service(name)
+    sync_spend(db_session, client)
+
+    enforce_budgets(db_session, client, warn_percent=WARN_PERCENT)
+
+    assert client.list_services(name) == []
+    assert service_name
 
 
 def test_teardown_does_not_repeat_without_new_clusters(

@@ -39,3 +39,19 @@ class ManagedJobInfo:
     name: str | None
     workspace: str
     status: str | None
+
+
+@dataclass(frozen=True)
+class ServiceInfo:
+    """One SkyPilot Serve service, as returned by `POST /serve/status` (`sky.serve.server.core.status`:
+    each row has a `name`; scoping to a workspace works the same way `list_clusters` does -- there's no
+    `workspace` field on the row itself, so it's the caller-supplied workspace, filtered defensively).
+
+    A service owns its own controller cluster (`sky-serve-controller-<name>`) plus one cluster per
+    replica; `down_service` tears the whole thing down in one call (unlike clusters, which are downed
+    one at a time), so `sync_workspaces`/`enforce_budgets` don't need to know its replica cluster names.
+    """
+
+    name: str
+    workspace: str
+    status: str | None

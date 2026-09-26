@@ -22,22 +22,42 @@ from krater.services import budget
 from krater.skypilot_policy.envelope import PolicyRequest, PolicyUser
 
 #: `request_name` values that actually reserve/consume compute, and so are the only ones subject to
-#: rejection (missing/unknown workspace, inactive project, exhausted budget). Everything else --
-#: currently just `validate`, SkyPilot's pre-flight schema check, run before the real `launch` call --
-#: still gets the same cost/autodown mutations applied (so a dry validation reflects what the real
-#: launch would do), but is *never* rejected.
+#: rejection (missing/unknown workspace, inactive project, exhausted budget). Everything else still
+#: gets the same cost/autodown mutations applied (so a dry validation reflects what the real launch
+#: would do), but is *never* rejected.
 #:
-#: This matters because of a spike finding (docs/dev/skypilot-spike.md, Surprise #2): a single
-#: `sky launch` triggers 2-3 policy calls (`launch` client-side, `validate` server-side, `launch`
+#: SkyPilot 0.13.0's full `AdminPolicyRequestName` enum (`sky/server/requests/request_names.py`) has
+#: twelve values; every one that actually provisions compute is enforced here:
+#:   - `launch` (`sky launch`/`sky start`) and `exec` (`sky exec`, which can launch a brand-new cluster
+#:     if the target one doesn't already exist -- SkyPilot doesn't tell the policy which case it is).
+#:   - `jobs.launch`, `jobs.launch_controller` (the managed-jobs controller cluster) and
+#:     `jobs.launch_cluster`/`jobs.pool_apply` (a jobs pool's worker clusters).
+#:   - `serve.up` (a new service), `serve.launch_controller` (its controller) and
+#:     `serve.launch_replica` (each replica cluster it spins up), plus `serve.update` (a live service's
+#:     autoscaler can launch *more* replicas to satisfy a new spec, so it provisions too).
+#: Left out, as genuinely incapable of provisioning on their own: `validate` (SkyPilot's pre-flight
+#: schema check, run before the real `launch` call) and `optimize` (cost/resource estimation only).
+#:
+#: `validate` being left out matters for a spike finding (docs/dev/skypilot-spike.md, Surprise #2): a
+#: single `sky launch` triggers 2-3 policy calls (`launch` client-side, `validate` server-side, `launch`
 #: server-side), and the `validate` call routinely omits `skypilot_config.active_workspace` even when
 #: the *actual* `launch` call moments later, from the same invocation, carries it correctly. Rejecting
 #: `validate` on "no workspace" would therefore reject every real launch on its very first hop, before
-#: the hop with the real workspace ever runs -- and rejecting it on budget would double-count nothing
-#: (validate never provisions anything) while still risking that same false rejection. `jobs.launch`,
-#: `jobs.launch_controller` and `exec` exist in SkyPilot's `AdminPolicyRequestName` enum but were never
-#: observed on the wire in the spike; they're deliberately left out of this set (treated like
-#: `validate`, advisory-only) until one is actually seen, rather than guessed at.
-ENFORCED_REQUEST_NAMES = frozenset({"launch"})
+#: the hop with the real workspace ever runs.
+ENFORCED_REQUEST_NAMES = frozenset(
+    {
+        "launch",
+        "exec",
+        "jobs.launch",
+        "jobs.launch_controller",
+        "jobs.launch_cluster",
+        "jobs.pool_apply",
+        "serve.up",
+        "serve.launch_controller",
+        "serve.launch_replica",
+        "serve.update",
+    }
+)
 
 #: Project statuses in which compute launches are allowed. Draft/pending/changes-requested projects
 #: haven't been funded yet; completed/withdrawn ones no longer have live budget to spend.

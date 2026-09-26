@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from krater.skypilot.types import ClusterInfo, CostReportRow, ManagedJobInfo
+from krater.skypilot.types import ClusterInfo, CostReportRow, ManagedJobInfo, ServiceInfo
 
 
 @runtime_checkable
@@ -63,4 +63,16 @@ class SkyPilotClient(Protocol):
 
     def cancel_managed_jobs(self, workspace: str) -> None:
         """Cancel every managed job in `workspace`."""
+        ...
+
+    def list_services(self, workspace: str) -> list[ServiceInfo]:
+        """Every SkyPilot Serve service currently in `workspace` (see `ServiceInfo`). A service's own
+        controller and replica clusters are provisioned outside `list_clusters`' normal accounting, so
+        a project teardown that only downs clusters/cancels jobs leaves a live service (and its
+        compute) running indefinitely."""
+        ...
+
+    def down_service(self, name: str) -> None:
+        """Tear the service down: its controller and every replica cluster, in one call (`purge`-style,
+        matching `down_cluster`'s promise -- safe to call on a service that's already gone)."""
         ...

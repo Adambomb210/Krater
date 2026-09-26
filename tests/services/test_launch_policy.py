@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from sqlalchemy.orm import Session
 
 from krater.config import Settings
@@ -410,3 +411,67 @@ def test_exhausted_budget_message_is_specific_for_the_submitter(db_session: Sess
     assert isinstance(decision, launch_policy.Reject)
     assert project.title in decision.message
     assert "$10.00" in decision.message
+
+
+# --------------------------------------------------------------------------------------------------
+# The launch gate must enforce every SkyPilot request name that can actually provision compute, not
+# just plain `launch` -- `jobs.launch`, `serve.up`, `exec`, etc. can all bypass a project's status/
+# budget checks otherwise.
+# --------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "request_name",
+    [
+        "launch",
+        "exec",
+        "jobs.launch",
+        "jobs.launch_controller",
+        "jobs.launch_cluster",
+        "jobs.pool_apply",
+        "serve.up",
+        "serve.launch_controller",
+        "serve.launch_replica",
+        "serve.update",
+    ],
+)
+def test_every_compute_provisioning_request_name_is_enforced(db_session: Session, request_name: str) -> None:
+    decision = launch_policy.decide(
+        _request(workspace="ganymede-nonexistent", request_name=request_name), db_session, SETTINGS
+    )
+
+    assert isinstance(decision, launch_policy.Reject)
+
+
+@pytest.mark.parametrize("request_name", ["validate", "optimize"])
+def test_advisory_only_request_names_stay_lenient(db_session: Session, request_name: str) -> None:
+    decision = launch_policy.decide(
+        _request(workspace="ganymede-nonexistent", request_name=request_name), db_session, SETTINGS
+    )
+
+    assert isinstance(decision, launch_policy.Allow)
+
+
+def test_jobs_launch_enforces_budget_like_plain_launch(db_session: Session, member: Actor) -> None:
+    project = _make_project(db_session, member, status=ProjectStatus.APPROVED)
+    budget.add_entry(
+        db_session, project=project, kind=BudgetEntryKind.INITIAL_APPROVAL, amount_cents=1_000, actor=member
+    )
+    db_session.add(
+        SpendSnapshot(project_id=project.id, estimated_spend_cents=1_000, source=SpendSource.SKYPILOT_COST_REPORT)
+    )
+    db_session.flush()
+
+    decision = launch_policy.decide(_request(request_name="jobs.launch"), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Reject)
+
+
+def test_serve_up_is_allowed_and_mutated_for_an_active_project(db_session: Session, member: Actor) -> None:
+    _approved_project(db_session, member)
+    task = {"resources": {"infra": "vast", "max_hourly_cost": 999.0}}
+
+    decision = launch_policy.decide(_request(task=task, request_name="serve.up"), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Allow)
+    assert decision.task["resources"]["max_hourly_cost"] == 5.0
