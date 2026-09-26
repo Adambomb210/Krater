@@ -12,8 +12,7 @@
         <a class="site-header__brand" href="/">Krater</a>
         <nav class="site-nav" aria-label="Primary">
           <a href="/">Home</a>
-          <a href="#">Projects</a>
-          <a href="#">Gallery</a>
+          <a href="/gallery">Gallery</a>
           {% set signed_in_name = request.session.get('display_name') %}
           {% if signed_in_name %}
             <span class="site-nav__user">{{ signed_in_name }}</span>
@@ -27,6 +26,16 @@
         </nav>
       </div>
     </header>
-    <main class="content">{% block content %}{% endblock %}</main>
+    <main class="content">
+      {% set flashes = get_flashes() %}
+      {% if flashes %}
+        <div class="flash-list" role="status">
+          {% for item in flashes %}
+            <p class="flash flash--{{ item.category }}">{{ item.message }}</p>
+          {% endfor %}
+        </div>
+      {% endif %}
+      {% block content %}{% endblock %}
+    </main>
   </body>
 </html>

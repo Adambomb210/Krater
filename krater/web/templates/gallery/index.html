@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}Gallery{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h1>Gallery</h1>
+  <p class="muted">Completed Project Ganymede projects.</p>
+
+  {% if entries %}
+    <ul class="gallery-list">
+      {% for entry in entries %}
+        <li class="gallery-list__item">
+          <h2><a href="/gallery/{{ entry.project.id }}">{{ entry.project.title or "Untitled project" }}</a></h2>
+          {% if entry.revision and entry.revision.tags %}
+            <p class="tag-list">
+              {% for tag in entry.revision.tags %}<span class="tag">{{ tag }}</span>{% endfor %}
+            </p>
+          {% endif %}
+          <p class="muted">&asymp; {{ entry.spend_cents | dollars }} estimated</p>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="muted">No completed projects yet.</p>
+  {% endif %}
+</section>
+{% endblock %}
