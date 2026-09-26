@@ -77,25 +77,35 @@ def _dollars(cents: int) -> str:
     return f"${cents / 100:,.2f}"
 
 
-def _resource_items(task: dict[str, Any]) -> list[dict[str, Any]]:
-    """`task["resources"]`, normalized to a list of the dicts to mutate in place.
+def _resource_items(resources: Any) -> list[dict[str, Any]]:
+    """Every resource-candidate dict nested in `resources`, to mutate in place.
 
-    A SkyPilot task's `resources:` can be a single mapping or a list of candidate mappings (`any_of`/
-    `ordered`); either way, the returned dicts are the same objects nested in `task`, so mutating them
-    mutates `task` too.
+    A SkyPilot task's `resources:` can be a single mapping, a bare list of candidate mappings, or a
+    mapping that carries its own top-level fields *and* a list of alternative candidates under
+    `any_of`/`ordered` (see `sky.utils.schemas.get_resources_schema`: `any_of`/`ordered` are additional
+    keys on the same mapping, not a replacement for it) -- and each candidate can itself nest another
+    `any_of`/`ordered`. Per-candidate values **override** the outer mapping's, so capping only the
+    outer dict (the previous bug here) left every `any_of`/`ordered` candidate's own `max_hourly_cost`/
+    `autostop` completely uncapped. This recurses through every shape and returns every dict that needs
+    the same mutation applied -- always the same objects nested in the original structure, so mutating
+    them mutates it too.
     """
-    resources = task.setdefault("resources", {})
-    if isinstance(resources, list):
-        return [item for item in resources if isinstance(item, dict)]
+    items: list[dict[str, Any]] = []
     if isinstance(resources, dict):
-        return [resources]
-    return []
+        items.append(resources)
+        for key in ("any_of", "ordered"):
+            items.extend(_resource_items(resources.get(key)))
+    elif isinstance(resources, list):
+        for candidate in resources:
+            items.extend(_resource_items(candidate))
+    return items
 
 
 def _apply_mutations(task: dict[str, Any], settings: Settings) -> dict[str, Any]:
     """Force autodown and cap `max_hourly_cost` on every resource candidate in `task`, in place."""
     cap_dollars = settings.skypilot_max_hourly_cost_cents / 100
-    for resource in _resource_items(task):
+    resources = task.setdefault("resources", {})
+    for resource in _resource_items(resources):
         existing_cost = resource.get("max_hourly_cost")
         resource["max_hourly_cost"] = (
             min(existing_cost, cap_dollars) if isinstance(existing_cost, int | float) else cap_dollars

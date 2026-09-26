@@ -234,3 +234,65 @@ def test_validate_still_gets_the_same_mutations(db_session: Session) -> None:
     assert isinstance(decision, launch_policy.Allow)
     assert decision.task["resources"]["max_hourly_cost"] == 5.0
     assert decision.task["resources"]["autostop"] == {"idle_minutes": 30, "down": True}
+
+
+# --------------------------------------------------------------------------------------------------
+# `any_of`/`ordered` resource candidates: the outer mutation must not be bypassable by a per-candidate
+# override, since SkyPilot lets a candidate's own value win over the outer mapping's.
+# --------------------------------------------------------------------------------------------------
+
+
+def test_any_of_candidates_are_capped_even_though_they_override_the_outer_dict(
+    db_session: Session, member: Actor
+) -> None:
+    _approved_project(db_session, member)
+    task = {
+        "resources": {
+            "any_of": [
+                {
+                    "accelerators": "H100:8",
+                    "max_hourly_cost": 999.0,
+                    "autostop": {"idle_minutes": 99999, "down": False},
+                }
+            ]
+        }
+    }
+
+    decision = launch_policy.decide(_request(task=task), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Allow)
+    candidate = decision.task["resources"]["any_of"][0]
+    assert candidate["max_hourly_cost"] == 5.0
+    assert candidate["autostop"] == {"idle_minutes": 30, "down": True}
+
+
+def test_ordered_candidates_are_capped_too(db_session: Session, member: Actor) -> None:
+    _approved_project(db_session, member)
+    task = {"resources": {"ordered": [{"max_hourly_cost": 50.0}, {"max_hourly_cost": 0.1}]}}
+
+    decision = launch_policy.decide(_request(task=task), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Allow)
+    candidates = decision.task["resources"]["ordered"]
+    assert candidates[0]["max_hourly_cost"] == 5.0
+    assert candidates[1]["max_hourly_cost"] == 0.1  # the user's own lower cap is kept, per-candidate
+
+
+def test_a_bare_list_of_resource_candidates_is_capped(db_session: Session, member: Actor) -> None:
+    _approved_project(db_session, member)
+    task = {"resources": [{"max_hourly_cost": 999.0}, {"max_hourly_cost": 999.0}]}
+
+    decision = launch_policy.decide(_request(task=task), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Allow)
+    assert [c["max_hourly_cost"] for c in decision.task["resources"]] == [5.0, 5.0]
+
+
+def test_nested_any_of_inside_a_candidate_is_capped(db_session: Session, member: Actor) -> None:
+    _approved_project(db_session, member)
+    task = {"resources": {"any_of": [{"ordered": [{"max_hourly_cost": 999.0}]}]}}
+
+    decision = launch_policy.decide(_request(task=task), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Allow)
+    assert decision.task["resources"]["any_of"][0]["ordered"][0]["max_hourly_cost"] == 5.0
