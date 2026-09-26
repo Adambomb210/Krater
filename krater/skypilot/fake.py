@@ -18,7 +18,13 @@ class FakeSkyPilotClient:
     def __init__(self) -> None:
         self.workspaces: dict[str, list[str]] = {}
         self._clusters: dict[str, ClusterInfo] = {}
-        self._cluster_costs_cents: dict[str, int] = {}
+        # Cost history, keyed by cluster name -- separate from `_clusters` (the *live* set) because
+        # real SkyPilot's `cost_report` reads `cluster_history`, which keeps a torn-down cluster's
+        # final cost around after `down` removes it from the live listing (`/status`). `down_cluster`
+        # below only pops `_clusters`, never this, so a workspace's last `cost_report` total still
+        # includes clusters just torn down in the same reconcile pass (see `sync_workspaces`'s
+        # final-spend-before-teardown step).
+        self._cost_history: dict[str, tuple[str, int]] = {}  # name -> (workspace, cost_cents)
         self._jobs: dict[int, ManagedJobInfo] = {}
         self._job_id_seq = itertools.count(1)
         # A monotonic counter, not `len(self._clusters)`: a cluster added after an earlier one was
@@ -44,10 +50,8 @@ class FakeSkyPilotClient:
     def cost_report(self, days: int) -> list[CostReportRow]:
         del days  # the fake has no notion of time; it just reports whatever's been added
         return [
-            CostReportRow(
-                workspace=cluster.workspace, cluster_name=cluster.name, total_cost_cents=self._cluster_costs_cents[name]
-            )
-            for name, cluster in self._clusters.items()
+            CostReportRow(workspace=workspace, cluster_name=name, total_cost_cents=cost_cents)
+            for name, (workspace, cost_cents) in self._cost_history.items()
         ]
 
     def list_clusters(self, workspace: str) -> list[ClusterInfo]:
@@ -58,7 +62,6 @@ class FakeSkyPilotClient:
 
     def down_cluster(self, name: str) -> None:
         self._clusters.pop(name, None)
-        self._cluster_costs_cents.pop(name, None)
 
     def cancel_managed_jobs(self, workspace: str) -> None:
         for job_id in [job.job_id for job in self._jobs.values() if job.workspace == workspace]:
@@ -70,12 +73,14 @@ class FakeSkyPilotClient:
         """Add a cluster in `workspace` with the given cost estimate, returning its name."""
         name = name or f"{workspace}-cluster-{next(self._cluster_name_seq)}"
         self._clusters[name] = ClusterInfo(name=name, workspace=workspace, status=status)
-        self._cluster_costs_cents[name] = cost_cents
+        self._cost_history[name] = (workspace, cost_cents)
         return name
 
     def set_cluster_cost(self, name: str, cost_cents: int) -> None:
-        """Change an existing cluster's cost estimate (simulating time passing / the meter running)."""
-        self._cluster_costs_cents[name] = cost_cents
+        """Change an existing (or already torn-down) cluster's cost estimate, simulating time passing
+        / the meter running."""
+        workspace, _ = self._cost_history[name]
+        self._cost_history[name] = (workspace, cost_cents)
 
     def add_managed_job(self, workspace: str, *, name: str | None = None, status: str = "RUNNING") -> int:
         """Add a managed job in `workspace`, returning its job id."""

@@ -5,6 +5,7 @@ spend snapshots, and budget warning/teardown enforcement.
 from __future__ import annotations
 
 import uuid
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
@@ -104,6 +105,45 @@ def test_a_completed_project_gets_torn_down(db_session: Session, member: Actor, 
     ).one()
     assert event.actor_id is None
     assert event.payload["workspace"] == name
+    # No prior SpendSnapshot existed (sync_spend was never called), so the teardown's own final
+    # cost_report reading (the cluster's 500) is what gets recorded.
+    assert event.payload["final_spend_cents"] == 500
+    assert budget.latest_spend_cents(db_session, project) == 500
+
+
+def test_a_completed_project_gets_a_final_spend_snapshot_before_teardown(
+    db_session: Session, member: Actor, reviewer: Actor, client
+) -> None:
+    project = _approve(db_session, member, reviewer)
+    sync_workspaces(db_session, client)
+    name = project.skypilot_workspace
+    cluster_name = client.add_cluster(name, cost_cents=500)
+    sync_spend(db_session, client)
+    assert budget.latest_spend_cents(db_session, project) == 500
+
+    completion = projects.start_completion(db_session, member, project=project)
+    projects.submit_completion(db_session, member, project=project)
+    projects.record_review(
+        db_session, reviewer, revision=completion, decision=ReviewDecision.APPROVE, source=ReviewSource.WEB
+    )
+    db_session.refresh(project)
+    assert project.status is ProjectStatus.COMPLETED
+
+    # Spend grows a bit more between the last sync_spend and the teardown pass -- the teardown must
+    # capture this final figure itself, since the workspace (and the ability to attribute cost_report
+    # rows back to this project) is about to disappear.
+    client.set_cluster_cost(cluster_name, 700)
+
+    sync_workspaces(db_session, client)
+
+    assert project.skypilot_workspace is None
+    assert budget.latest_spend_cents(db_session, project) == 700
+    snapshots = db_session.scalars(select(SpendSnapshot).where(SpendSnapshot.project_id == project.id)).all()
+    assert [s.estimated_spend_cents for s in snapshots] == [500, 700]
+    event = db_session.scalars(
+        select(AuditEvent).where(AuditEvent.action == AUDIT_WORKSPACE_TORN_DOWN, AuditEvent.project_id == project.id)
+    ).one()
+    assert event.payload["final_spend_cents"] == 700
 
 
 def test_a_withdrawn_project_gets_torn_down_too(db_session: Session, member: Actor, reviewer: Actor, client) -> None:
@@ -286,8 +326,12 @@ class _OutageOnceClient(FakeSkyPilotClient):
 def test_an_outage_in_one_step_does_not_block_the_others(db_session: Session, member: Actor, reviewer: Actor) -> None:
     flaky_client = _OutageOnceClient()
     project = _approve(db_session, member, reviewer)
+    # Commit the test's own setup first: `reconcile` rolls back the *session* on a failed step (not
+    # just that step's own writes), and since sync_spend now runs first and fails immediately, nothing
+    # else must be left uncommitted on `db_session` for that rollback to catch.
+    db_session.commit()
 
-    # sync_spend (step 2) raises once; sync_workspaces (step 1) and enforce_budgets (step 3) must still
+    # sync_spend (step 1) raises once; enforce_budgets (step 2) and sync_workspaces (step 3) must still
     # run and have their work committed.
     reconcile(db_session, flaky_client, warn_percent=WARN_PERCENT)
 
@@ -299,6 +343,37 @@ def test_an_outage_in_one_step_does_not_block_the_others(db_session: Session, me
     flaky_client.add_cluster(project.skypilot_workspace, cost_cents=42)
     reconcile(db_session, flaky_client, warn_percent=WARN_PERCENT)
     assert budget.latest_spend_cents(db_session, project) == 42
+
+
+def test_reconcile_runs_spend_and_enforcement_before_workspace_teardown(
+    db_session: Session, member: Actor, reviewer: Actor, client
+) -> None:
+    """`sync_spend` and `enforce_budgets` must run (and see this pass's numbers) before
+    `sync_workspaces`'s teardown work, so an active project's budget is enforced against this pass's
+    reading rather than one left over from before a same-pass teardown."""
+    call_order: list[str] = []
+    real_sync_spend, real_enforce_budgets, real_sync_workspaces = sync_spend, enforce_budgets, sync_workspaces
+
+    def spy_sync_spend(session, client):
+        call_order.append("sync_spend")
+        return real_sync_spend(session, client)
+
+    def spy_enforce_budgets(session, client, *, warn_percent):
+        call_order.append("enforce_budgets")
+        return real_enforce_budgets(session, client, warn_percent=warn_percent)
+
+    def spy_sync_workspaces(session, client):
+        call_order.append("sync_workspaces")
+        return real_sync_workspaces(session, client)
+
+    with (
+        patch("krater.services.skypilot_sync.sync_spend", spy_sync_spend),
+        patch("krater.services.skypilot_sync.enforce_budgets", spy_enforce_budgets),
+        patch("krater.services.skypilot_sync.sync_workspaces", spy_sync_workspaces),
+    ):
+        reconcile(db_session, client, warn_percent=WARN_PERCENT)
+
+    assert call_order == ["sync_spend", "enforce_budgets", "sync_workspaces"]
 
 
 def test_workspace_name_for_is_deterministic_lowercase_hex() -> None:

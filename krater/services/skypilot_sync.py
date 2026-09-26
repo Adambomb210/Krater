@@ -81,8 +81,11 @@ def sync_workspaces(session: Session, client: SkyPilotClient) -> None:
       `allowed_users` kept equal to `_team_emails`. Always calls `create`/`update` (never skips), so a
       team change is picked up on the very next reconcile -- cheap, and safe to re-run.
     - Every `completed`/`withdrawn` project that still has a workspace gets its clusters downed, its
-      managed jobs cancelled, its workspace deleted, its `skypilot_workspace` column cleared, and a
-      `skypilot_workspace_torn_down` audit event.
+      managed jobs cancelled, one final `cost_report` total recorded (as a `SpendSnapshot`, if it
+      changed, and in the `skypilot_workspace_torn_down` audit event's payload) *before* the workspace
+      is deleted and `skypilot_workspace` cleared -- once the workspace is gone, nothing can attribute
+      further `cost_report` rows back to this project (see `docs/skypilot-integration.md` section 4,
+      "Final spend").
     """
     for project in _active_projects(session):
         allowed_users = _team_emails(session, project)
@@ -100,10 +103,34 @@ def sync_workspaces(session: Session, client: SkyPilotClient) -> None:
         for cluster in client.list_clusters(name):
             client.down_cluster(cluster.name)
         client.cancel_managed_jobs(name)
+
+        final_spend_cents = _workspace_total_cents(client, name)
+        if final_spend_cents != budget.latest_spend_cents(session, project):
+            session.add(
+                SpendSnapshot(
+                    project_id=project.id,
+                    estimated_spend_cents=final_spend_cents,
+                    source=SpendSource.SKYPILOT_COST_REPORT,
+                )
+            )
+            session.flush()
+
         client.delete_workspace(name)
         project.skypilot_workspace = None
-        audit.record(session, None, AUDIT_WORKSPACE_TORN_DOWN, project=project, payload={"workspace": name})
+        audit.record(
+            session,
+            None,
+            AUDIT_WORKSPACE_TORN_DOWN,
+            project=project,
+            payload={"workspace": name, "final_spend_cents": final_spend_cents},
+        )
         session.flush()
+
+
+def _workspace_total_cents(client: SkyPilotClient, workspace: str) -> int:
+    """One `cost_report` call, summed to a single workspace's total -- used for the final-spend figure
+    captured just before a workspace is torn down."""
+    return sum(row.total_cost_cents for row in client.cost_report(days=COST_REPORT_DAYS) if row.workspace == workspace)
 
 
 def sync_spend(session: Session, client: SkyPilotClient) -> None:
@@ -227,7 +254,14 @@ def current_budget_flag(session: Session, project: Project, *, warn_percent: int
 
 
 def reconcile(session: Session, client: SkyPilotClient, *, warn_percent: int) -> None:
-    """Run `sync_workspaces`, `sync_spend` and `enforce_budgets` in order, committing after each step.
+    """Run `sync_spend`, `enforce_budgets` and `sync_workspaces` in order, committing after each step.
+
+    `sync_spend`/`enforce_budgets` before `sync_workspaces`: active projects get measured and their
+    budgets enforced against this pass's numbers before any teardown work happens in the same pass, so
+    a project that just went over budget is caught before, not after, whatever else this reconcile
+    tick does to it. `sync_workspaces` still takes its own final `cost_report` reading for a
+    completed/withdrawn project's teardown, since that project has already dropped out of
+    `sync_spend`'s and `enforce_budgets`' scope (they only cover active statuses).
 
     Committing per step means a SkyPilot outage partway through doesn't lose the other steps' work: if
     one step raises `SkyPilotError`, it's logged and the next step still runs on the next scheduled
@@ -235,9 +269,9 @@ def reconcile(session: Session, client: SkyPilotClient, *, warn_percent: int) ->
     already the retry loop).
     """
     steps = (
-        ("sync_workspaces", lambda: sync_workspaces(session, client)),
         ("sync_spend", lambda: sync_spend(session, client)),
         ("enforce_budgets", lambda: enforce_budgets(session, client, warn_percent=warn_percent)),
+        ("sync_workspaces", lambda: sync_workspaces(session, client)),
     )
     for name, step in steps:
         try:
