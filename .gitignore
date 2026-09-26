@@ -15,6 +15,9 @@ venv/
 .env
 .env.*
 !.env.example
+# Live-Weave e2e fixture (scripts/dev/weave_e2e_setup.py) -- carries a live OAuth client secret
+# and service API key, regenerated on every run. See docs/dev/weave-e2e.md.
+.weave_e2e_fixture.json
 
 # Testing / tooling
 .pytest_cache/
