@@ -84,10 +84,9 @@ services:
   # against -- bump both together and re-check the spike's findings before changing it.
   #
   # The server config (~/.sky/config.yaml) is generated from env at container start, the same way
-  # `storage`'s identities file is, so nothing secret (the policy token) is committed. NOTE: the exact
-  # `sky api start` invocation below is our best reading of SkyPilot's own server docs -- it could not
-  # be exercised against a real container in this environment (no Docker here); verify it against a
-  # real `docker compose --profile skypilot up` before relying on it, per docs/dev/staging.md.
+  # `storage`'s identities file is, so nothing secret (the policy token) is committed. The start command
+  # (`sky api start --deploy --foreground`) matches SkyPilot's official Helm chart; the container itself hasn't been
+  # run end to end yet, so check it on the first `docker compose --profile skypilot up` (docs/dev/staging.md).
   skypilot:
     image: berkeleyskypilot/skypilot:0.13.0
     profiles: ["skypilot"]
