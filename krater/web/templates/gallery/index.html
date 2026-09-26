@@ -11,6 +11,14 @@
     <ul class="gallery-list">
       {% for entry in entries %}
         <li class="gallery-list__item">
+          {% if entry.thumbnail_url %}
+            <img
+              class="gallery-list__thumb"
+              src="{{ entry.thumbnail_url }}"
+              alt="{{ entry.project.title or 'Project' }} screenshot"
+              loading="lazy"
+            >
+          {% endif %}
           <h2><a href="/gallery/{{ entry.project.id }}">{{ entry.project.title or "Untitled project" }}</a></h2>
           {% if entry.revision and entry.revision.tags %}
             <p class="tag-list">

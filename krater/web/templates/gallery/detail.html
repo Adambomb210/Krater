@@ -12,6 +12,14 @@
     </p>
   {% endif %}
 
+  {% if screenshot_urls %}
+    <ul class="gallery-screenshots">
+      {% for url in screenshot_urls %}
+        <li><img src="{{ url }}" alt="{{ project.title or 'Project' }} screenshot" loading="lazy"></li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+
   <div class="action-row">
     {% if revision and revision.demo_url %}
       <a class="button button--primary" href="{{ revision.demo_url }}">View demo</a>
