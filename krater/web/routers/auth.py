@@ -41,9 +41,12 @@ def _safe_next_path(path: str | None) -> str:
     """A local path to send the browser to after sign-in, or `/` if `path` isn't one.
 
     Rejects anything that isn't an absolute path on this host: no scheme, no netloc, no `//` (which
-    browsers treat as protocol-relative) -- otherwise `next` would be an open redirect.
+    browsers treat as protocol-relative) -- otherwise `next` would be an open redirect. Backslashes and control
+    characters are rejected too: browsers normalize `/\\evil.example` to `//evil.example`, and strip tabs/newlines.
     """
     if not path or not path.startswith("/") or path.startswith("//"):
+        return "/"
+    if "\\" in path or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path):
         return "/"
     parsed = urlparse(path)
     if parsed.scheme or parsed.netloc:

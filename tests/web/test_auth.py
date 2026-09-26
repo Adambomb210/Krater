@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlparse
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -114,6 +115,15 @@ def test_login_rejects_an_open_redirect_in_next(client: TestClient) -> None:
 
 def test_login_rejects_a_protocol_relative_next(client: TestClient) -> None:
     state = _start_login(client, next="//evil.example/steal")
+
+    callback = client.get("/auth/callback", params={"code": MEMBER_SUB, "state": state}, follow_redirects=False)
+
+    assert callback.headers["location"] == "/"
+
+
+@pytest.mark.parametrize("next_path", ["/\\evil.example/steal", "/\t/evil.example", "/%0a/ok\n//evil.example"])
+def test_login_rejects_next_paths_browsers_turn_into_other_hosts(client: TestClient, next_path: str) -> None:
+    state = _start_login(client, next=next_path)
 
     callback = client.get("/auth/callback", params={"code": MEMBER_SUB, "state": state}, follow_redirects=False)
 
