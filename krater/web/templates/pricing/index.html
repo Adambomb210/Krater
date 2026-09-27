@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% block title %}GPU pricing{% endblock %}
+
+{% block content %}
+<section class="card">
+  <div class="page-header">
+    <h1>GPU pricing</h1>
+  </div>
+
+  <p class="policy-note">
+    These are <strong>estimates from SkyPilot's Vast catalog</strong>, not live quotes -- the actual
+    machine SkyPilot rents at launch time can differ. Rows above Ganymede's per-machine cap
+    (${{ "%.2f"|format(cap_cents / 100) }}/hr) are marked below. See the
+    <a href="https://github.com/patchworklabs/krater/blob/main/docs/guides/run-when-cheap.md">run-when-cheap guide</a>
+    for spot/interruptible machines, which can
+    cost less than the "lowest spot" figure shown here if you're willing to be interrupted.
+  </p>
+
+  {% if refreshed_at %}
+    <p class="muted">Last updated {{ refreshed_at.strftime("%b %-d, %Y %H:%M UTC") }}.</p>
+  {% else %}
+    <p class="muted">Prices haven't been refreshed yet.</p>
+  {% endif %}
+
+  {% if not rows and not refreshed_at %}
+    <p class="muted">No pricing data yet. Once the daily refresh runs (or a manual one is triggered), GPU types and prices will show up here.</p>
+  {% else %}
+    <form method="get" action="/pricing" class="form form--inline" data-role="pricing-filter-form">
+      <div class="field">
+        <label for="gpu">GPU type</label>
+        <select id="gpu" name="gpu" data-role="auto-submit">
+          <option value="" {% if not selected_gpu %}selected{% endif %}>All</option>
+          {% for name in accelerator_names %}
+            <option value="{{ name }}" {% if selected_gpu == name %}selected{% endif %}>{{ name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="sort">Sort by</label>
+        <select id="sort" name="sort" data-role="auto-submit">
+          {% for key, label in sort_labels.items() %}
+            <option value="{{ key }}" {% if sort == key %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <noscript><button type="submit" class="button">Apply</button></noscript>
+    </form>
+
+    {% if not rows %}
+      <p class="muted">No pricing matches this filter.</p>
+    {% else %}
+      <table class="table">
+        <thead>
+          <tr>
+            <th>GPU</th>
+            <th>Count</th>
+            <th>VRAM</th>
+            <th>Typical on-demand</th>
+            <th>Lowest on-demand</th>
+            <th>Lowest spot</th>
+            <th>Offers</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+            <tr>
+              <td>{{ row.accelerator_name }}</td>
+              <td>{{ row.accelerator_count }}</td>
+              <td>{{ (row.vram_gib ~ " GiB") if row.vram_gib is not none else "–" }}</td>
+              <td>{{ row.on_demand_median_cents|dollars }}/hr</td>
+              <td>{{ row.on_demand_min_cents|dollars }}/hr</td>
+              <td>{{ (row.spot_min_cents|dollars ~ "/hr") if row.spot_min_cents is not none else "–" }}</td>
+              <td>{{ row.offer_count }}</td>
+            </tr>
+            {% if row.on_demand_min_cents > cap_cents %}
+              <tr>
+                <td colspan="7" class="field-hint">
+                  Over Ganymede's per-machine cap (${{ "%.2f"|format(cap_cents / 100) }}/hr) -- a launch
+                  targeting this GPU will have its price capped, which may rule out every offer above.
+                </td>
+              </tr>
+            {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+  <script src="/static/js/pricing-filters.js" defer></script>
+{% endblock %}

@@ -19,7 +19,17 @@ from krater.services.errors import NotAllowed, NotFound
 from krater.web.logging_config import configure_logging
 from krater.web.rate_limit import RateLimitMiddleware
 from krater.web.request_id import RequestIdMiddleware
-from krater.web.routers import admin, auth, gallery, pages, projects, reviews, skypilot_policy, slack_interactions
+from krater.web.routers import (
+    admin,
+    auth,
+    gallery,
+    pages,
+    pricing,
+    projects,
+    reviews,
+    skypilot_policy,
+    slack_interactions,
+)
 from krater.web.security_headers import SecurityHeadersMiddleware, apply_security_headers
 from krater.web.templates import templates
 from krater.worker.app import app as procrastinate_app
@@ -76,6 +86,7 @@ def create_app() -> FastAPI:
     app.include_router(reviews.router)
     app.include_router(admin.router)
     app.include_router(gallery.router)
+    app.include_router(pricing.router)
     app.include_router(skypilot_policy.router)
     app.include_router(slack_interactions.router)
 

@@ -13,6 +13,7 @@
         <nav class="site-nav" aria-label="Primary">
           <a href="/">Home</a>
           <a href="/gallery">Gallery</a>
+          <a href="/pricing">GPU pricing</a>
           {% set signed_in_name = request.session.get('display_name') %}
           {% if signed_in_name %}
             <span class="site-nav__user">{{ signed_in_name }}</span>
