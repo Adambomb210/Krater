@@ -54,6 +54,19 @@ class Settings(BaseSettings):
     skypilot_autodown_idle_minutes: int = 30
     skypilot_max_hourly_cost_cents: int = 500  # per-instance cap forced onto every launch
 
+    # GPU pricing (see docs/dev/pricing.md): fetched straight from SkyPilot's public Vast catalog CSV,
+    # not the SkyPilot API server -- no workspace/auth needed, and it's the exact same data the
+    # optimizer itself reads. `skypilot_mode=fake` uses `FakeSkyPilotClient`'s canned catalog instead.
+    skypilot_catalog_url: str = (
+        "https://raw.githubusercontent.com/skypilot-org/skypilot-catalog/master/catalogs/v8/vast/vms.csv"
+    )
+    skypilot_catalog_fetch_timeout_seconds: float = 15.0
+    pricing_refresh_cron: str = "0 7 * * *"  # daily, off-peak UTC -- see docs/dev/pricing.md
+    budget_estimate_default_margin_percent: int = 20
+    # How far a requested budget can differ from its stored estimate (as a percent of the estimate)
+    # before the project page flags the mismatch to reviewers.
+    budget_estimate_flag_threshold_percent: int = 20
+
     # Slack integration (review happens in Slack; see docs/SPEC.md "Slack integration" and
     # docs/dev/slack-setup.md). `fake` is an in-memory Slack for dev and tests, mirroring `skypilot_mode`.
     slack_mode: Literal["fake", "live"] = "fake"

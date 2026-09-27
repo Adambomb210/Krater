@@ -8,7 +8,20 @@ from __future__ import annotations
 
 import itertools
 
-from krater.skypilot.types import ClusterInfo, CostReportRow, ManagedJobInfo, ServiceInfo
+from krater.skypilot.types import ClusterInfo, CostReportRow, GpuOffer, ManagedJobInfo, ServiceInfo
+
+#: A small, hand-picked stand-in for `docs/dev/pricing.md`'s real Vast catalog CSV -- enough variety
+#: (multiple regions/counts for one GPU, a GPU with no spot price quoted, a multi-GPU count) to exercise
+#: `krater.services.pricing.aggregate_offers` without a network call. Dev/tests only.
+_DEFAULT_GPU_OFFERS: tuple[GpuOffer, ...] = (
+    GpuOffer("A100", 1, 32.0, 128.0, 40.0, 1.10, 0.35, "US, NA"),
+    GpuOffer("A100", 1, 16.0, 64.0, 40.0, 1.35, 0.40, "Germany, DE, EU"),
+    GpuOffer("A100", 1, 32.0, 128.0, 40.0, 1.20, 0.0, "South Korea, KR, AS"),
+    GpuOffer("A100", 2, 32.0, 128.0, 40.0, 2.20, 0.70, "US, NA"),
+    GpuOffer("RTX4090", 1, 16.0, 32.0, 24.0, 0.35, 0.12, "US, NA"),
+    GpuOffer("RTX4090", 1, 16.0, 32.0, 24.0, 0.40, 0.15, "Canada, CA, NA"),
+    GpuOffer("H100", 1, 32.0, 128.0, 80.0, 2.50, 0.0, "US, NA"),
+)
 
 
 class FakeSkyPilotClient:
@@ -33,8 +46,12 @@ class FakeSkyPilotClient:
         # tracking "which clusters have I already seen" (like the budget-teardown re-arm check in
         # `krater.services.skypilot_sync.enforce_budgets`) would wrongly treat it as the same cluster.
         self._cluster_name_seq = itertools.count(1)
+        self._gpu_offers: list[GpuOffer] = list(_DEFAULT_GPU_OFFERS)
 
     # -- SkyPilotClient protocol -----------------------------------------------------------------
+
+    def list_gpu_prices(self) -> list[GpuOffer]:
+        return list(self._gpu_offers)
 
     def create_workspace(self, name: str, *, allowed_users: list[str]) -> None:
         self.workspaces[name] = sorted(allowed_users)
@@ -75,6 +92,11 @@ class FakeSkyPilotClient:
         self._services.pop(name, None)
 
     # -- Test helpers ------------------------------------------------------------------------------
+
+    def set_gpu_offers(self, offers: list[GpuOffer]) -> None:
+        """Replace the catalog `list_gpu_prices` returns, e.g. with a fixture captured from the real
+        source (see `tests/fixtures/skypilot/vast_vms_sample.csv`) or a source-error simulation."""
+        self._gpu_offers = list(offers)
 
     def add_cluster(self, workspace: str, cost_cents: int, *, name: str | None = None, status: str = "UP") -> str:
         """Add a cluster in `workspace` with the given cost estimate, returning its name."""

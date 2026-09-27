@@ -23,6 +23,30 @@ class CostReportRow:
 
 
 @dataclass(frozen=True)
+class GpuOffer:
+    """One row of SkyPilot's Vast GPU catalog (`docs/dev/pricing.md`): one accelerator/count offering
+    in one region, as SkyPilot's own optimizer would see it. Not yet aggregated -- see
+    `krater.services.pricing.aggregate_offers` for turning a list of these into per-(name, count)
+    `GpuPrice` rows.
+
+    `device_memory_gib` is the GPU's own VRAM (parsed out of the catalog's `GpuInfo` column), separate
+    from `memory_gib`, the *host* machine's RAM -- the same distinction the catalog reader itself makes
+    (`sky/catalog/common.py`'s `DeviceMemoryGiB` vs. `MemoryGiB`). Either can be `None` when the source
+    row doesn't carry it. `spot_price_dollars` of `0.0` means "no spot price quoted" (the catalog's own
+    convention), not a real free offer -- callers aggregating this should treat it the same as missing.
+    """
+
+    accelerator_name: str
+    accelerator_count: int
+    vcpus: float | None
+    memory_gib: float | None
+    device_memory_gib: float | None
+    price_dollars: float
+    spot_price_dollars: float
+    region: str
+
+
+@dataclass(frozen=True)
 class ClusterInfo:
     """One cluster, as returned by `POST /status`."""
 

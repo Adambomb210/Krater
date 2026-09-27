@@ -9,11 +9,25 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from krater.skypilot.types import ClusterInfo, CostReportRow, ManagedJobInfo, ServiceInfo
+from krater.skypilot.types import ClusterInfo, CostReportRow, GpuOffer, ManagedJobInfo, ServiceInfo
 
 
 @runtime_checkable
 class SkyPilotClient(Protocol):
+    def list_gpu_prices(self) -> list[GpuOffer]:
+        """Every Vast GPU offer in SkyPilot's public catalog, unaggregated (one row per source row --
+        see `krater.services.pricing.aggregate_offers`).
+
+        See `docs/dev/pricing.md` for why this reads SkyPilot's catalog CSV directly rather than
+        calling a running API server's `/list_accelerators`: it's the exact same data (the REST
+        endpoint reads this same CSV), with no workspace/auth/server-uptime dependency for a page that
+        has none of those otherwise (`/pricing` is public). Raises `SkyPilotUnavailableError` if the
+        source can't be fetched, or `SkyPilotRequestFailedError` if it fetches but can't be parsed --
+        callers (`krater.services.pricing.refresh_prices`) are expected to fail soft: keep whatever
+        prices they already have rather than propagate this into a user-facing error.
+        """
+        ...
+
     def create_workspace(self, name: str, *, allowed_users: list[str]) -> None:
         """Create a new **private** workspace named `name`, restricted to Vast (every other cloud
         `disabled: true`, per the spike -- there's no positive cloud allowlist), with `allowed_users`

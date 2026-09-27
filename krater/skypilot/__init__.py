@@ -14,12 +14,13 @@ from krater.skypilot.client import SkyPilotClient
 from krater.skypilot.errors import SkyPilotError, SkyPilotRequestFailedError, SkyPilotUnavailableError
 from krater.skypilot.fake import FakeSkyPilotClient
 from krater.skypilot.live import LiveSkyPilotClient
-from krater.skypilot.types import ClusterInfo, CostReportRow, ManagedJobInfo
+from krater.skypilot.types import ClusterInfo, CostReportRow, GpuOffer, ManagedJobInfo
 
 __all__ = [
     "ClusterInfo",
     "CostReportRow",
     "FakeSkyPilotClient",
+    "GpuOffer",
     "LiveSkyPilotClient",
     "ManagedJobInfo",
     "SkyPilotClient",

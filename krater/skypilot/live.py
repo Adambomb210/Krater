@@ -16,6 +16,9 @@ both shapes uniformly.
 
 from __future__ import annotations
 
+import ast
+import csv
+import io
 import json
 import time
 from typing import Any
@@ -24,7 +27,7 @@ import httpx
 
 from krater.config import Settings
 from krater.skypilot.errors import SkyPilotRequestFailedError, SkyPilotUnavailableError
-from krater.skypilot.types import ClusterInfo, CostReportRow, ManagedJobInfo, ServiceInfo
+from krater.skypilot.types import ClusterInfo, CostReportRow, GpuOffer, ManagedJobInfo, ServiceInfo
 
 #: How long to keep polling a request id before giving up and treating SkyPilot as unavailable.
 DEFAULT_POLL_TIMEOUT_SECONDS = 30.0
@@ -89,6 +92,79 @@ def _decode_return_value(raw: Any) -> Any:
         return raw
 
 
+def _parse_float(value: str | None, *, default: float = 0.0) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _parse_optional_float(value: str | None) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _parse_device_memory_gib(gpu_info_raw: str) -> float | None:
+    """VRAM in GiB from the catalog's `GpuInfo` column, a Python-dict-repr string (not JSON -- it uses
+    single quotes and Python literals, hence `ast.literal_eval`, the same tool `sky.catalog.common`
+    itself uses for this column). `None` if the column is blank or doesn't parse, matching
+    `list_accelerators_impl`'s own fallback (a whole-column `None` on a parse failure).
+
+    Mirrors `sky.catalog.common.list_accelerators_impl`'s own arithmetic exactly: the first GPU's
+    `MemoryInfo.SizeInMiB`, divided by 1024 (an approximation of GiB, not a precise binary conversion --
+    kept identical to SkyPilot's own so Krater's VRAM figures don't quietly diverge from what `sky
+    show-gpus` would print for the same row).
+    """
+    if not gpu_info_raw:
+        return None
+    try:
+        parsed = ast.literal_eval(gpu_info_raw)
+        size_mib = parsed["Gpus"][0]["MemoryInfo"]["SizeInMiB"]
+    except (ValueError, SyntaxError, KeyError, IndexError, TypeError):
+        return None
+    return float(size_mib) / 1024.0
+
+
+def _parse_vast_catalog_csv(text: str) -> list[GpuOffer]:
+    """Parse SkyPilot's `vast/vms.csv` catalog (schema documented in `docs/dev/pricing.md`) into
+    `GpuOffer` rows. A row missing `AcceleratorName` (a non-GPU instance type, if the catalog ever
+    grows one) or an unparseable `AcceleratorCount`/`Price` is skipped rather than failing the whole
+    fetch -- one malformed row shouldn't blank out the whole pricing page.
+    """
+    offers: list[GpuOffer] = []
+    for row in csv.DictReader(io.StringIO(text)):
+        name = (row.get("AcceleratorName") or "").strip()
+        if not name:
+            continue
+        try:
+            count = int(float(row["AcceleratorCount"]))
+        except (KeyError, ValueError, TypeError):
+            continue
+        try:
+            price = float(row["Price"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        offers.append(
+            GpuOffer(
+                accelerator_name=name,
+                accelerator_count=count,
+                vcpus=_parse_optional_float(row.get("vCPUs")),
+                memory_gib=_parse_optional_float(row.get("MemoryGiB")),
+                device_memory_gib=_parse_device_memory_gib(row.get("GpuInfo") or ""),
+                price_dollars=price,
+                spot_price_dollars=_parse_float(row.get("SpotPrice")),
+                region=(row.get("Region") or "").strip(),
+            )
+        )
+    return offers
+
+
 class LiveSkyPilotClient:
     """A `SkyPilotClient` backed by a real SkyPilot API server over HTTP. `http_client` is injectable
     for tests (`httpx.MockTransport`); production code leaves it out and gets a real `httpx.Client`."""
@@ -106,6 +182,30 @@ class LiveSkyPilotClient:
         self._http = http_client if http_client is not None else httpx.Client(timeout=10.0)
         self._poll_timeout_seconds = poll_timeout_seconds
         self._poll_interval_seconds = poll_interval_seconds
+
+    # -- GPU pricing ---------------------------------------------------------------------------------
+
+    def list_gpu_prices(self) -> list[GpuOffer]:
+        # Deliberately *not* `self._request`/`self._headers`: this fetches a public GitHub file, not
+        # the SkyPilot API server -- no bearer token, no base URL, no async request-id polling. See
+        # `docs/dev/pricing.md` for why pricing is sourced this way.
+        try:
+            response = self._http.get(
+                self._settings.skypilot_catalog_url, timeout=self._settings.skypilot_catalog_fetch_timeout_seconds
+            )
+        except httpx.HTTPError as exc:
+            raise SkyPilotUnavailableError(f"could not fetch the Vast GPU catalog: {exc}") from exc
+        if response.status_code >= 400:
+            raise SkyPilotRequestFailedError(
+                f"fetching the Vast GPU catalog returned HTTP {response.status_code} "
+                f"from {self._settings.skypilot_catalog_url}"
+            )
+        try:
+            return _parse_vast_catalog_csv(response.text)
+        except Exception as exc:
+            # Any parse failure means the source is malformed, not a Krater bug -- surface it as a
+            # request-failed error like a bad HTTP response, so `refresh_prices` fails soft the same way.
+            raise SkyPilotRequestFailedError(f"could not parse the Vast GPU catalog: {exc}") from exc
 
     # -- Workspaces --------------------------------------------------------------------------------
 
