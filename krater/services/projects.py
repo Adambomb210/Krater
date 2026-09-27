@@ -47,6 +47,37 @@ from krater.services.errors import InvalidState, NotAllowed, NotFound, Validatio
 _TERMINAL_STATUSES = (ProjectStatus.COMPLETED, ProjectStatus.WITHDRAWN)
 
 
+def _lock_project(session: Session, project: Project) -> Project:
+    """Take a row lock (`SELECT ... FOR UPDATE`) on `project` for the rest of this transaction, and make
+    sure its in-memory attributes (and anything reachable through a relationship, e.g.
+    `project.current_revision`) reflect the row as of *this* lock, not whatever was loaded before it.
+
+    Every state-changing function in this module calls this first, before any of its own checks. Two
+    concurrent calls acting on the same project -- most importantly, two reviewers both approving the
+    same revision at once -- otherwise both read the project in its pre-approval state, both see the
+    policy as freshly satisfied, and both apply the approval effect (double budget entries, a doubled
+    completion reclaim, ...): the `reviews` unique constraint stops a literal duplicate `Review` row,
+    but nothing stopped two *different* reviewers' concurrent approvals from each independently
+    satisfying the policy and each running `_apply_approve`. Serializing on this lock means the second
+    caller blocks until the first commits, then re-reads the now-updated project/revision and its own
+    validation (e.g. "is the revision still `pending`?") fails the way a strictly-later call always
+    would have.
+
+    Flushes first: `session.expire()` on a *dirty* object discards its unflushed in-memory changes
+    rather than persisting them (that's simply what expiring means), so any pending edit made directly
+    on `project` before this call -- callers do that here and there, e.g. setting `slack_channel_id` --
+    must reach the database before it's safe to expire. `session.expire(project)` then marks every
+    attribute -- columns and relationships alike -- stale; the `with_for_update` refresh that follows
+    reloads the columns under the lock, while relationships (like `current_revision`) stay expired until
+    next accessed, so they lazy-load fresh data keyed off the just-reloaded foreign keys rather than
+    serving a relationship object cached from before the lock.
+    """
+    session.flush()
+    session.expire(project)
+    session.refresh(project, with_for_update=True)
+    return project
+
+
 # --------------------------------------------------------------------------------------------------
 # Create and edit
 # --------------------------------------------------------------------------------------------------
@@ -184,6 +215,7 @@ def submit(session: Session, actor: Actor, *, project: Project) -> Project:
     if actor.user.id != project.submitter_id:
         raise NotAllowed("Only the submitter may submit this project.")
 
+    _lock_project(session, project)
     draft = project.current_revision
     if draft is None or draft.submitted_at is not None:
         raise InvalidState("This project has no draft to submit.")
@@ -260,6 +292,8 @@ def start_amendment(session: Session, actor: Actor, *, project: Project) -> Proj
     """
     if actor.user.id != project.submitter_id:
         raise NotAllowed("Only the submitter may amend this project.")
+
+    _lock_project(session, project)
     if project.status is not ProjectStatus.APPROVED:
         raise InvalidState("Amendments can only be started on an approved project.")
 
@@ -306,6 +340,8 @@ def start_completion(session: Session, actor: Actor, *, project: Project) -> Pro
     """
     if actor.user.id != project.submitter_id:
         raise NotAllowed("Only the submitter may submit this project for completion.")
+
+    _lock_project(session, project)
     if project.status is not ProjectStatus.APPROVED:
         raise InvalidState("Completion can only be started on an approved project.")
 
@@ -341,6 +377,7 @@ def submit_completion(session: Session, actor: Actor, *, project: Project) -> Pr
     if actor.user.id != project.submitter_id:
         raise NotAllowed("Only the submitter may submit this project's completion.")
 
+    _lock_project(session, project)
     draft = project.current_revision
     if draft is None or draft.submitted_at is not None or draft.kind is not RevisionKind.COMPLETION:
         raise InvalidState("This project has no completion draft to submit.")
@@ -437,6 +474,9 @@ def record_review(
         raise NotAllowed("You cannot review your own submission.")
     if actor.user.id in revision.credited_builder_ids:
         raise NotAllowed("You cannot review a project that credits you as a builder.")
+
+    _lock_project(session, project)
+    session.refresh(revision)
 
     if project.current_revision_id != revision.id:
         raise InvalidState("Only the project's current revision can be reviewed.")
@@ -592,6 +632,9 @@ def admin_decide(
         raise ValidationFailed({"reason": "A reason is required."})
 
     project = revision.project
+    _lock_project(session, project)
+    session.refresh(revision)
+
     if project.current_revision_id != revision.id:
         raise InvalidState("Only the project's current revision can be decided.")
     if revision.submitted_at is None:
@@ -635,6 +678,8 @@ def admin_adjust_budget(
         raise NotAllowed("Only an admin may adjust a project's budget.")
     if not (reason and reason.strip()):
         raise ValidationFailed({"reason": "A reason is required."})
+
+    _lock_project(session, project)
     if project.status not in (ProjectStatus.APPROVED, ProjectStatus.PENDING_COMPLETION_REVIEW):
         raise InvalidState("Budget can only be adjusted on an approved or pending-completion project.")
 
@@ -675,6 +720,8 @@ def reclaim_budget(
         raise ValidationFailed({"reason": "A reason is required."})
     if amount_cents <= 0:
         raise ValidationFailed({"amount_cents": "The amount to reclaim must be greater than zero."})
+
+    _lock_project(session, project)
     if budget.ceiling_cents(session, project) - amount_cents < 0:
         raise ValidationFailed({"amount_cents": "Cannot reclaim more than the project's current budget ceiling."})
 
@@ -708,6 +755,8 @@ def withdraw(session: Session, actor: Actor, *, project: Project, reason: str | 
     is_self = actor.user.id == project.submitter_id
     if not is_self and not actor.is_admin:
         raise NotAllowed("Only the submitter or an admin may withdraw this project.")
+
+    _lock_project(session, project)
     if project.status in _TERMINAL_STATUSES:
         raise InvalidState(f"Cannot withdraw a project that is already {project.status.value!r}.")
     if not is_self and not (reason and reason.strip()):
