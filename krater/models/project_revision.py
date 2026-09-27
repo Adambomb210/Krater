@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from krater.db import Base
@@ -30,6 +30,12 @@ class ProjectRevision(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     kind: Mapped[RevisionKind] = mapped_column(pg_enum(RevisionKind, name="revision_kind"), nullable=False)
     write_up: Mapped[str] = mapped_column(sa.Text, nullable=False)
     budget_requested_cents: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+
+    # Set only when the submitter used the budget estimator (`krater.services.pricing`) to fill in
+    # `budget_requested_cents` -- null for a plain hand-typed budget. Always the server's own
+    # recomputed breakdown (see `krater.services.pricing.estimate_cost`), never anything a client sent
+    # directly, so a reviewer can trust the rate/refreshed_at shown next to the requested budget.
+    budget_estimate: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     # Completion-only fields; left empty/null for `proposal` and `amendment` revisions.
     demo_url: Mapped[str | None] = mapped_column(sa.String(2048), nullable=True)

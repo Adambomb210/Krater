@@ -14,6 +14,7 @@ from krater.config import get_settings
 from krater.db import get_sessionmaker
 from krater.models import Project, ProjectRevision
 from krater.services import slack_notify, slack_reviews
+from krater.services.pricing import refresh_prices
 from krater.services.skypilot_sync import reconcile
 from krater.skypilot import SkyPilotError, get_skypilot_client
 from krater.slack import SlackError, get_slack_client
@@ -68,6 +69,31 @@ def skypilot_reconcile(timestamp: int) -> None:
         # `reconcile` already catches per-step SkyPilot errors and logs+continues; this is a last-resort
         # net for anything that still escapes (e.g. a step raising before its own try/except is reached).
         logger.exception("krater.skypilot_reconcile task failed")
+    finally:
+        session.close()
+
+
+# --------------------------------------------------------------------------------------------------
+# GPU pricing: a daily refresh of the aggregated Vast catalog `/pricing` and the budget estimator read.
+# See `krater.services.pricing` and `docs/dev/pricing.md`. Also runnable directly for a manual refresh
+# via `python -m krater.pricing.refresh_once`.
+# --------------------------------------------------------------------------------------------------
+
+
+@app.periodic(cron=get_settings().pricing_refresh_cron)
+@app.task(name="pricing_refresh")
+def pricing_refresh(timestamp: int) -> None:
+    """Fetch, aggregate and atomically replace `GpuPrice`. Fails soft: on a source error, this logs and
+    leaves the last successfully-refreshed prices in place (see `refresh_prices`'s docstring)."""
+    del timestamp
+    session = get_sessionmaker()()
+    try:
+        count = refresh_prices(session, get_skypilot_client())
+        session.commit()
+        logger.info("krater pricing_refresh: %d accelerator/count groups", count)
+    except SkyPilotError:
+        logger.exception("krater.pricing_refresh task failed; keeping last known prices")
+        session.rollback()
     finally:
         session.close()
 

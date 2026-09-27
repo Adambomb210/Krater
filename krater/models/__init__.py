@@ -13,6 +13,7 @@ from krater.models.enums import (
     RevisionOutcome,
     SpendSource,
 )
+from krater.models.gpu_price import GpuPrice
 from krater.models.project import Project
 from krater.models.project_revision import ProjectRevision
 from krater.models.review import Review
@@ -26,6 +27,7 @@ __all__ = [
     "AuditEvent",
     "BudgetEntry",
     "BudgetEntryKind",
+    "GpuPrice",
     "Project",
     "ProjectRevision",
     "ProjectStatus",
