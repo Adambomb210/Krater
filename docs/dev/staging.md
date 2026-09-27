@@ -209,6 +209,10 @@ Copy the returned `token` (starts `sky_...`) into `.env`'s `KRATER_SKYPILOT_SERV
    Record whether a custom bid via `vast.create_instance_kwargs` (`price` / `bid_price`) works in this SkyPilot version,
    and whether the launch gate caps it.
 
+10. **Workspace teardown on completion.** Complete (or withdraw) the test project and confirm its SkyPilot workspace is
+    deleted, with no `sync_workspaces failed` in the worker log. This verifies the serve-status "no services" path,
+    which couldn't be tested in the dev sandbox (see [skypilot-contract.md](skypilot-contract.md)).
+
 ## 7. Comparing spend against Vast billing
 
 SkyPilot's `cost_report` is a **catalog-price × uptime estimate**, not a bill (see

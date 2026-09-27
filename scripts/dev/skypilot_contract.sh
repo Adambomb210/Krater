@@ -314,7 +314,9 @@ echo
 echo "--- Scenario: over budget (expect: rejected, budget message) ---"
 (cd "$REPO_ROOT" && KRATER_DATABASE_URL="$KRATER_DATABASE_URL" uv run python "$SCRIPT_DIR/_skypilot_contract_helper.py" set-overbudget "$PROJECT_ID")
 OUT="$(_launch overbudget -w "$WORKSPACE")"
-_expect "rejected for exhausted budget" "used its full compute budget" "$OUT"
+# The CLI user here is a service account, not the project's submitter, so the gate answers with its generic
+# message (it only shows project details to the project's own team). Both variants mention "compute budget".
+_expect "rejected for exhausted budget" "compute budget" "$OUT"
 (cd "$REPO_ROOT" && KRATER_DATABASE_URL="$KRATER_DATABASE_URL" uv run python "$SCRIPT_DIR/_skypilot_contract_helper.py" clear-spend "$PROJECT_ID")
 
 echo

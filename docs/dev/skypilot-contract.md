@@ -85,3 +85,16 @@ as an HTTP 500 with the usual poll-status dict nested under `detail`) instead of
 and `delete_workspace` wasn't actually idempotent against a real server despite the `SkyPilotClient`
 protocol promising callers it would be. All three now have regression tests against a fake server in
 `tests/skypilot/test_live_client.py` and are exercised against the real thing here.
+
+## Known gap: serve status can't be checked in a sandbox without direct internet
+
+The reconciler's teardown now also lists and downs **SkyPilot Serve services**. In a sandbox without direct internet
+access, SkyPilot's `/serve/status` fails before it reaches the controller, because
+`backend_utils.check_network_connection()` can't reach its probe URLs ("Failed to refresh services status due to network
+error"). The contract run then logs `sync_workspaces failed; continuing`. That is a correct, fail-safe outcome: a
+workspace is never deleted while its services can't be confirmed down, and the next run retries.
+
+On a machine with normal internet, a workspace that never ran `sky serve up` should instead raise `ClusterNotUpError`,
+which `LiveSkyPilotClient` treats as "no services" (from reading the code, not yet observed live). **Check this on the
+staging run:** complete a project and confirm its workspace is deleted with no `sync_workspaces failed` in the worker
+log.
