@@ -582,3 +582,9 @@ a:hover {
     overflow-x: auto;
   }
 }
+
+/* Wide tables (e.g. /pricing) scroll inside their card instead of overflowing it. */
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}

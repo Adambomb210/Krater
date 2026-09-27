@@ -337,3 +337,16 @@ def test_creating_a_project_without_using_the_estimator_stores_no_estimate(
     project_id = response.headers["location"].removeprefix("/projects/")
     revision = db_session.query(ProjectRevision).filter_by(project_id=project_id).one()
     assert revision.budget_estimate is None
+
+
+def test_estimator_offers_the_spot_basis_only_when_some_gpu_has_a_spot_price(
+    client: TestClient, login_as, db_session: Session
+) -> None:
+    login_as(MEMBER_SUB)
+    _seed_price(db_session, name="A100", count=1, median_cents=110, spot_cents=None)
+
+    assert "Lowest spot (interruptible)" not in client.get("/projects/new").text
+
+    _seed_price(db_session, name="H100", count=1, median_cents=200, spot_cents=60)
+
+    assert "Lowest spot (interruptible)" in client.get("/projects/new").text

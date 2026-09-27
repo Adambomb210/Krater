@@ -96,12 +96,24 @@ def test_pricing_page_shows_lowest_spot_when_available(client: TestClient, db_se
     assert "$0.35/hr" in response.text
 
 
-def test_pricing_page_dash_when_no_spot_price(client: TestClient, db_session: Session) -> None:
+def test_pricing_page_dash_when_one_gpu_lacks_a_spot_price(client: TestClient, db_session: Session) -> None:
+    _seed(db_session, name="A100", on_demand_min_cents=100, spot_min_cents=35)
+    _seed(db_session, name="H100", on_demand_min_cents=200, spot_min_cents=None)
+
+    response = client.get("/pricing")
+
+    assert "Lowest spot" in response.text
+    assert "–" in response.text
+
+
+def test_pricing_page_hides_the_spot_column_when_no_gpu_has_one(client: TestClient, db_session: Session) -> None:
+    # SkyPilot's Vast catalog currently has no spot prices at all; an all-dashes column is just noise.
     _seed(db_session, name="A100", on_demand_min_cents=100, spot_min_cents=None)
 
     response = client.get("/pricing")
 
     assert response.status_code == 200
+    assert "Lowest spot" not in response.text
 
 
 def test_pricing_link_is_in_the_nav(client: TestClient) -> None:

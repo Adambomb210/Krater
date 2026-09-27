@@ -47,7 +47,10 @@
       <label for="estimator_basis">Pricing basis</label>
       <select id="estimator_basis" name="estimator_basis">
         <option value="on_demand" {% if estimator_values.estimator_basis == "on_demand" %}selected{% endif %}>Typical on-demand</option>
+        {# SkyPilot's Vast catalog currently carries no spot prices; only offer the basis when some exist. #}
+        {% if gpu_options | selectattr("has_spot") | list %}
         <option value="spot" {% if estimator_values.estimator_basis == "spot" %}selected{% endif %}>Lowest spot (interruptible)</option>
+        {% endif %}
       </select>
       {% if errors.estimator_basis %}<p class="field-error">{{ errors.estimator_basis }}</p>{% endif %}
     </div>

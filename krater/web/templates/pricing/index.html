@@ -12,9 +12,9 @@
     These are <strong>estimates from SkyPilot's Vast catalog</strong>, not live quotes -- the actual
     machine SkyPilot rents at launch time can differ. Rows above Ganymede's per-machine cap
     (${{ "%.2f"|format(cap_cents / 100) }}/hr) are marked below. See the
-    <a href="https://github.com/patchworklabs/krater/blob/main/docs/guides/run-when-cheap.md">run-when-cheap guide</a>
-    for spot/interruptible machines, which can
-    cost less than the "lowest spot" figure shown here if you're willing to be interrupted.
+    <a href="https://github.com/Adambomb210/Krater/blob/main/docs/guides/run-when-cheap.md">run-when-cheap guide</a>
+    for spot/interruptible machines, which can cost less if you're willing to be interrupted
+    (the catalog doesn't list spot prices for every GPU).
   </p>
 
   {% if refreshed_at %}
@@ -50,6 +50,8 @@
     {% if not rows %}
       <p class="muted">No pricing matches this filter.</p>
     {% else %}
+      {% set has_spot = rows | selectattr("spot_min_cents") | list %}
+      <div class="table-scroll">
       <table class="table">
         <thead>
           <tr>
@@ -58,7 +60,7 @@
             <th>VRAM</th>
             <th>Typical on-demand</th>
             <th>Lowest on-demand</th>
-            <th>Lowest spot</th>
+            {% if has_spot %}<th>Lowest spot</th>{% endif %}
             <th>Offers</th>
           </tr>
         </thead>
@@ -70,12 +72,12 @@
               <td>{{ (row.vram_gib ~ " GiB") if row.vram_gib is not none else "–" }}</td>
               <td>{{ row.on_demand_median_cents|dollars }}/hr</td>
               <td>{{ row.on_demand_min_cents|dollars }}/hr</td>
-              <td>{{ (row.spot_min_cents|dollars ~ "/hr") if row.spot_min_cents is not none else "–" }}</td>
+              {% if has_spot %}<td>{{ (row.spot_min_cents|dollars ~ "/hr") if row.spot_min_cents is not none else "–" }}</td>{% endif %}
               <td>{{ row.offer_count }}</td>
             </tr>
             {% if row.on_demand_min_cents > cap_cents %}
               <tr>
-                <td colspan="7" class="field-hint">
+                <td colspan="{{ 7 if has_spot else 6 }}" class="field-hint">
                   Over Ganymede's per-machine cap (${{ "%.2f"|format(cap_cents / 100) }}/hr) -- a launch
                   targeting this GPU will have its price capped, which may rule out every offer above.
                 </td>
@@ -84,6 +86,7 @@
           {% endfor %}
         </tbody>
       </table>
+      </div>
     {% endif %}
   {% endif %}
 </section>

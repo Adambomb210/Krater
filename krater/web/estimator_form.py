@@ -19,12 +19,13 @@ from krater.services.errors import ValidationFailed
 from krater.web.money import format_cents
 
 
-def gpu_options(session: Session) -> list[dict[str, str]]:
-    """`{key, label}` for every currently-priced (accelerator, count), for the estimator's `<select>`."""
+def gpu_options(session: Session) -> list[dict[str, str | bool]]:
+    """`{key, label, has_spot}` for every currently-priced (accelerator, count), for the estimator's `<select>`."""
     return [
         {
             "key": pricing.gpu_key(row.accelerator_name, row.accelerator_count),
             "label": f"{row.accelerator_name} × {row.accelerator_count}",
+            "has_spot": row.spot_min_cents is not None,
         }
         for row in pricing.list_prices(session)
     ]
