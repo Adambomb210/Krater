@@ -329,3 +329,102 @@ def test_reconcile_runs_every_step(db_session: Session, member: Actor, reviewer:
     slack_notify.reconcile(db_session, slack_client, weave_client)
 
     assert slack_client.channels[project.slack_channel_id]["archived"] is True
+
+
+# --------------------------------------------------------------------------------------------------
+# mrkdwn injection: a project title, write-up, reject reason or admin display name containing Slack
+# mrkdwn special characters must render as literal text, not be interpreted (`<!channel>`, a link
+# hijack, etc.).
+# --------------------------------------------------------------------------------------------------
+
+_INJECTION = "<!channel> ignore this <https://phish.example/|Approve>"
+_ESCAPED_INJECTION = "&lt;!channel&gt; ignore this &lt;https://phish.example/|Approve&gt;"
+
+
+def test_review_message_escapes_the_project_title_and_write_up(db_session: Session, member: Actor) -> None:
+    project = projects.create_project(
+        db_session, member, title=_INJECTION, write_up=_INJECTION, budget_requested_cents=5000
+    )
+    project = projects.submit(db_session, member, project=project)
+    revision = project.current_revision
+    slack_client = FakeSlackClient()
+
+    slack_notify.notify_revision_submitted(
+        db_session, slack_client, _ListWeaveClient([]), revision=revision, feed_channel_id=None
+    )
+
+    message = slack_client.messages[(revision.slack_message_channel_id, revision.slack_message_ts)]
+    header_text = message["blocks"][0]["text"]["text"]
+    write_up_text = message["blocks"][2]["text"]["text"]
+    assert "<!channel>" not in header_text
+    assert "<!channel>" not in write_up_text
+    assert _ESCAPED_INJECTION in header_text
+    assert _ESCAPED_INJECTION in write_up_text
+
+
+def test_feed_line_escapes_the_project_title(db_session: Session, member: Actor) -> None:
+    project = projects.create_project(db_session, member, title=_INJECTION, write_up="w", budget_requested_cents=5000)
+    project = projects.submit(db_session, member, project=project)
+    revision = project.current_revision
+    slack_client = FakeSlackClient()
+
+    slack_notify.notify_revision_submitted(
+        db_session, slack_client, _ListWeaveClient([]), revision=revision, feed_channel_id="C_FEED"
+    )
+
+    feed_message = next(msg for (chan, _ts), msg in slack_client.messages.items() if chan == "C_FEED")
+    block_text = feed_message["blocks"][0]["text"]["text"]
+    assert "<!channel>" not in block_text
+    assert _ESCAPED_INJECTION in block_text
+    # The top-level fallback text isn't parsed as mrkdwn, so it's left as the raw title.
+    assert _INJECTION in feed_message["text"]
+
+
+def test_notify_decision_escapes_the_title_and_reject_reason(
+    db_session: Session, member: Actor, reviewer: Actor
+) -> None:
+    project = projects.create_project(db_session, member, title=_INJECTION, write_up="w", budget_requested_cents=5000)
+    project = projects.submit(db_session, member, project=project)
+    revision = project.current_revision
+    slack_client = FakeSlackClient()
+    slack_notify.notify_revision_submitted(
+        db_session, slack_client, _ListWeaveClient([]), revision=revision, feed_channel_id=None
+    )
+
+    projects.record_review(
+        db_session,
+        reviewer,
+        revision=revision,
+        decision=ReviewDecision.REJECT,
+        reason=_INJECTION,
+        source=ReviewSource.WEB,
+    )
+    db_session.refresh(revision)
+
+    slack_notify.notify_decision(db_session, slack_client, revision=revision)
+
+    updated = slack_client.messages[(revision.slack_message_channel_id, revision.slack_message_ts)]
+    all_block_text = " ".join(block["text"]["text"] for block in updated["blocks"] if "text" in block)
+    assert "<!channel>" not in all_block_text
+    assert _ESCAPED_INJECTION in all_block_text
+
+
+def test_post_admin_override_escapes_actor_name_and_reason(db_session: Session, member: Actor) -> None:
+    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    slack_client = FakeSlackClient()
+    project.slack_channel_id = slack_client.create_channel("ganymede-rover-test")
+
+    slack_notify.post_admin_override(
+        db_session,
+        slack_client,
+        project=project,
+        action="admin_withdraw",
+        actor_name=_INJECTION,
+        reason=_INJECTION,
+    )
+
+    posted = next(msg for (chan, _ts), msg in slack_client.messages.items() if chan == project.slack_channel_id)
+    block_text = posted["blocks"][0]["text"]["text"]
+    assert "<!channel>" not in block_text
+    assert _ESCAPED_INJECTION in block_text
+    assert _INJECTION in posted["text"]  # fallback text isn't mrkdwn-parsed, so left raw

@@ -57,6 +57,17 @@ def channel_name_for(project: Project) -> str:
     return f"ganymede-{slug}-{short_id}"
 
 
+def _escape_mrkdwn(text: str) -> str:
+    """Escape the three characters Slack's mrkdwn parser treats specially, so a project title,
+    write-up, reject reason or Weave display name containing `<!channel>`, `<!here>`, a user/channel
+    mention (`<@U…>`/`<#C…>`), or a link-hijack (`<https://phish|Approve>`) renders as inert literal
+    text in a block's `mrkdwn`-typed `text` field instead of being interpreted by Slack. Order matters:
+    `&` must be escaped first, or escaping `<`/`>` afterwards would double-escape the `&` this
+    introduces into `&lt;`/`&gt;`. Only for `mrkdwn` text -- a message's own top-level `text` fallback
+    (used for notifications/previews) isn't parsed as mrkdwn, so it's left as-is."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _format_cents(cents: int) -> str:
     """A tiny, Slack-message-only formatter -- deliberately not importing `krater.web.money` (services
     don't depend on the web layer; see CLAUDE.md)."""
@@ -137,7 +148,9 @@ def _review_message(project: Project, revision: ProjectRevision) -> tuple[list[d
     """The Approve/Reject review message for `revision`. The buttons' `value` carries the revision id,
     per `docs/SPEC.md`, so `/slack/interactions` knows which revision a click is about."""
     stage = _stage_label(revision)
-    header = f"*{stage}: {project.title}* (revision {revision.number})"
+    header = f"*{stage}: {_escape_mrkdwn(project.title)}* (revision {revision.number})"
+    # The message's top-level `text` (notification/preview fallback) isn't parsed as mrkdwn, so the raw
+    # title is fine here -- see `_escape_mrkdwn`'s docstring.
     text = f"{stage}: {project.title} (revision {revision.number})"
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": header}},
@@ -147,7 +160,7 @@ def _review_message(project: Project, revision: ProjectRevision) -> tuple[list[d
                 {"type": "mrkdwn", "text": f"*Requested budget:*\n{_format_cents(revision.budget_requested_cents)}"}
             ],
         },
-        {"type": "section", "text": {"type": "mrkdwn", "text": _write_up_excerpt(revision.write_up)}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": _escape_mrkdwn(_write_up_excerpt(revision.write_up))}},
         {
             "type": "actions",
             "block_id": "review_actions",
@@ -200,9 +213,12 @@ def notify_revision_submitted(
     session.flush()
 
     if feed_channel_id and revision.kind is RevisionKind.PROPOSAL and revision.number == 1:
-        feed_text = f"New Ganymede proposal: *{project.title}*"
+        feed_block_text = f"New Ganymede proposal: *{_escape_mrkdwn(project.title)}*"
+        feed_fallback_text = f"New Ganymede proposal: {project.title}"
         slack_client.post_message(
-            feed_channel_id, blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": feed_text}}], text=feed_text
+            feed_channel_id,
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": feed_block_text}}],
+            text=feed_fallback_text,
         )
 
 
@@ -238,13 +254,17 @@ def notify_decision(session: Session, slack_client: SlackClient, *, revision: Pr
     blocks = [
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*{stage}: {project.title}* (revision {revision.number})"},
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*{stage}: {_escape_mrkdwn(project.title)}* (revision {revision.number})",
+            },
         },
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*Outcome:* {_outcome_label(revision)}"}},
     ]
     reason = _latest_reject_reason(revision)
     if reason:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Reason:* {reason}"}})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Reason:* {_escape_mrkdwn(reason)}"}})
+    # Top-level fallback text isn't parsed as mrkdwn -- the raw title/reason are fine here.
     text = f"{stage} for {project.title}: {_outcome_label(revision)}"
 
     slack_client.update_message(revision.slack_message_channel_id, revision.slack_message_ts, blocks=blocks, text=text)
@@ -267,14 +287,16 @@ def post_admin_override(
     if project.slack_channel_id is None:
         return
 
-    lines = [f":rotating_light: Admin override by *{actor_name}*: `{action}`"]
+    block_lines = [f":rotating_light: Admin override by *{_escape_mrkdwn(actor_name)}*: `{action}`"]
+    fallback_lines = [f"Admin override by {actor_name}: {action}"]
     if extra:
-        lines.append(extra)
+        block_lines.append(_escape_mrkdwn(extra))
+        fallback_lines.append(extra)
     if reason:
-        lines.append(f"*Reason:* {reason}")
-    text = "\n".join(lines)
-    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
-    slack_client.post_message(project.slack_channel_id, blocks=blocks, text=text)
+        block_lines.append(f"*Reason:* {_escape_mrkdwn(reason)}")
+        fallback_lines.append(f"Reason: {reason}")
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(block_lines)}}]
+    slack_client.post_message(project.slack_channel_id, blocks=blocks, text="\n".join(fallback_lines))
 
 
 def archive_project_channel(session: Session, slack_client: SlackClient, *, project: Project) -> None:

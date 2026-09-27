@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import itertools
 
-from krater.skypilot.types import ClusterInfo, CostReportRow, ManagedJobInfo
+from krater.skypilot.types import ClusterInfo, CostReportRow, ManagedJobInfo, ServiceInfo
 
 
 class FakeSkyPilotClient:
@@ -27,6 +27,7 @@ class FakeSkyPilotClient:
         self._cost_history: dict[str, tuple[str, int]] = {}  # name -> (workspace, cost_cents)
         self._jobs: dict[int, ManagedJobInfo] = {}
         self._job_id_seq = itertools.count(1)
+        self._services: dict[str, ServiceInfo] = {}
         # A monotonic counter, not `len(self._clusters)`: a cluster added after an earlier one was
         # torn down (e.g. by `down_cluster`) must get a name that was never used before, or a caller
         # tracking "which clusters have I already seen" (like the budget-teardown re-arm check in
@@ -67,6 +68,12 @@ class FakeSkyPilotClient:
         for job_id in [job.job_id for job in self._jobs.values() if job.workspace == workspace]:
             del self._jobs[job_id]
 
+    def list_services(self, workspace: str) -> list[ServiceInfo]:
+        return [service for service in self._services.values() if service.workspace == workspace]
+
+    def down_service(self, name: str) -> None:
+        self._services.pop(name, None)
+
     # -- Test helpers ------------------------------------------------------------------------------
 
     def add_cluster(self, workspace: str, cost_cents: int, *, name: str | None = None, status: str = "UP") -> str:
@@ -87,6 +94,12 @@ class FakeSkyPilotClient:
         job_id = next(self._job_id_seq)
         self._jobs[job_id] = ManagedJobInfo(job_id=job_id, name=name, workspace=workspace, status=status)
         return job_id
+
+    def add_service(self, workspace: str, *, name: str | None = None, status: str = "READY") -> str:
+        """Add a Serve service in `workspace`, returning its name."""
+        name = name or f"{workspace}-service-{next(self._cluster_name_seq)}"
+        self._services[name] = ServiceInfo(name=name, workspace=workspace, status=status)
+        return name
 
 
 __all__ = ["FakeSkyPilotClient"]

@@ -47,6 +47,37 @@ from krater.services.errors import InvalidState, NotAllowed, NotFound, Validatio
 _TERMINAL_STATUSES = (ProjectStatus.COMPLETED, ProjectStatus.WITHDRAWN)
 
 
+def _lock_project(session: Session, project: Project) -> Project:
+    """Take a row lock (`SELECT ... FOR UPDATE`) on `project` for the rest of this transaction, and make
+    sure its in-memory attributes (and anything reachable through a relationship, e.g.
+    `project.current_revision`) reflect the row as of *this* lock, not whatever was loaded before it.
+
+    Every state-changing function in this module calls this first, before any of its own checks. Two
+    concurrent calls acting on the same project -- most importantly, two reviewers both approving the
+    same revision at once -- otherwise both read the project in its pre-approval state, both see the
+    policy as freshly satisfied, and both apply the approval effect (double budget entries, a doubled
+    completion reclaim, ...): the `reviews` unique constraint stops a literal duplicate `Review` row,
+    but nothing stopped two *different* reviewers' concurrent approvals from each independently
+    satisfying the policy and each running `_apply_approve`. Serializing on this lock means the second
+    caller blocks until the first commits, then re-reads the now-updated project/revision and its own
+    validation (e.g. "is the revision still `pending`?") fails the way a strictly-later call always
+    would have.
+
+    Flushes first: `session.expire()` on a *dirty* object discards its unflushed in-memory changes
+    rather than persisting them (that's simply what expiring means), so any pending edit made directly
+    on `project` before this call -- callers do that here and there, e.g. setting `slack_channel_id` --
+    must reach the database before it's safe to expire. `session.expire(project)` then marks every
+    attribute -- columns and relationships alike -- stale; the `with_for_update` refresh that follows
+    reloads the columns under the lock, while relationships (like `current_revision`) stay expired until
+    next accessed, so they lazy-load fresh data keyed off the just-reloaded foreign keys rather than
+    serving a relationship object cached from before the lock.
+    """
+    session.flush()
+    session.expire(project)
+    session.refresh(project, with_for_update=True)
+    return project
+
+
 # --------------------------------------------------------------------------------------------------
 # Create and edit
 # --------------------------------------------------------------------------------------------------
@@ -184,6 +215,7 @@ def submit(session: Session, actor: Actor, *, project: Project) -> Project:
     if actor.user.id != project.submitter_id:
         raise NotAllowed("Only the submitter may submit this project.")
 
+    _lock_project(session, project)
     draft = project.current_revision
     if draft is None or draft.submitted_at is not None:
         raise InvalidState("This project has no draft to submit.")
@@ -223,11 +255,17 @@ def _supersede_other_pending_revisions(session: Session, project: Project, *, ke
     new one is submitted), but it's the safety net `docs/SPEC.md` calls for: "a new revision marks
     earlier pending ones as superseded", so only the current revision's reviews are ever counted.
     """
+    _supersede_pending_revisions(session, project, exclude=keep.id)
+
+
+def _supersede_pending_revisions(session: Session, project: Project, *, exclude: uuid.UUID | None = None) -> None:
+    """Mark every `pending` revision of `project` (other than `exclude`, if given) as `superseded`."""
     stmt = sa.select(ProjectRevision).where(
         ProjectRevision.project_id == project.id,
-        ProjectRevision.id != keep.id,
         ProjectRevision.outcome == RevisionOutcome.PENDING,
     )
+    if exclude is not None:
+        stmt = stmt.where(ProjectRevision.id != exclude)
     for revision in session.scalars(stmt):
         revision.outcome = RevisionOutcome.SUPERSEDED
     session.flush()
@@ -254,6 +292,8 @@ def start_amendment(session: Session, actor: Actor, *, project: Project) -> Proj
     """
     if actor.user.id != project.submitter_id:
         raise NotAllowed("Only the submitter may amend this project.")
+
+    _lock_project(session, project)
     if project.status is not ProjectStatus.APPROVED:
         raise InvalidState("Amendments can only be started on an approved project.")
 
@@ -300,6 +340,8 @@ def start_completion(session: Session, actor: Actor, *, project: Project) -> Pro
     """
     if actor.user.id != project.submitter_id:
         raise NotAllowed("Only the submitter may submit this project for completion.")
+
+    _lock_project(session, project)
     if project.status is not ProjectStatus.APPROVED:
         raise InvalidState("Completion can only be started on an approved project.")
 
@@ -335,6 +377,7 @@ def submit_completion(session: Session, actor: Actor, *, project: Project) -> Pr
     if actor.user.id != project.submitter_id:
         raise NotAllowed("Only the submitter may submit this project's completion.")
 
+    _lock_project(session, project)
     draft = project.current_revision
     if draft is None or draft.submitted_at is not None or draft.kind is not RevisionKind.COMPLETION:
         raise InvalidState("This project has no completion draft to submit.")
@@ -358,6 +401,36 @@ def submit_completion(session: Session, actor: Actor, *, project: Project) -> Pr
 # --------------------------------------------------------------------------------------------------
 # Reviews
 # --------------------------------------------------------------------------------------------------
+
+
+def _expected_project_status(revision: ProjectRevision) -> ProjectStatus:
+    """The single `ProjectStatus` a `pending`, submitted revision's stage may be decided under.
+
+    A `proposal` is only reviewable while the project is `pending_review`; an `amendment` while it's
+    `approved` (SPEC.md: it stays approved and reviewable while the amendment is pending); a
+    `completion` only while `pending_completion_review`. Anything else -- including the terminal
+    `withdrawn`/`completed` statuses, or a status left behind by some other in-flight revision -- means
+    this revision's outcome no longer matches the project it's attached to, and must not be decided.
+    """
+    stage = approval_policy.stage_for(revision)
+    if stage is ApprovalStage.COMPLETION:
+        return ProjectStatus.PENDING_COMPLETION_REVIEW
+    if revision.kind is RevisionKind.AMENDMENT:
+        return ProjectStatus.APPROVED
+    return ProjectStatus.PENDING_REVIEW
+
+
+def _require_project_matches_revision_stage(project: Project, revision: ProjectRevision) -> None:
+    """Guard against deciding a revision whose project has moved on -- most importantly, a project
+    that's been withdrawn (or completed) out from under a still-`pending` revision (see `withdraw`'s
+    docstring): without this, `record_review`/`admin_decide` only checked the *revision*, never the
+    *project*, so an approval recorded (or replayed, e.g. from Slack) after withdrawal could resurrect
+    it as `approved` and re-grant its budget."""
+    expected = _expected_project_status(revision)
+    if project.status is not expected:
+        raise InvalidState(
+            f"Cannot decide this revision while the project is {project.status.value!r} (expected {expected.value!r})."
+        )
 
 
 def _has_existing_review(session: Session, *, revision_id: uuid.UUID, reviewer_id: uuid.UUID) -> bool:
@@ -402,12 +475,16 @@ def record_review(
     if actor.user.id in revision.credited_builder_ids:
         raise NotAllowed("You cannot review a project that credits you as a builder.")
 
+    _lock_project(session, project)
+    session.refresh(revision)
+
     if project.current_revision_id != revision.id:
         raise InvalidState("Only the project's current revision can be reviewed.")
     if revision.submitted_at is None:
         raise InvalidState("Cannot review a draft revision.")
     if revision.outcome is not RevisionOutcome.PENDING:
         raise InvalidState("This revision has already been decided.")
+    _require_project_matches_revision_stage(project, revision)
 
     if _has_existing_review(session, revision_id=revision.id, reviewer_id=actor.user.id):
         raise InvalidState("You have already reviewed this revision.")
@@ -555,12 +632,16 @@ def admin_decide(
         raise ValidationFailed({"reason": "A reason is required."})
 
     project = revision.project
+    _lock_project(session, project)
+    session.refresh(revision)
+
     if project.current_revision_id != revision.id:
         raise InvalidState("Only the project's current revision can be decided.")
     if revision.submitted_at is None:
         raise InvalidState("Cannot decide a draft revision.")
     if revision.outcome is not RevisionOutcome.PENDING:
         raise InvalidState("This revision has already been decided.")
+    _require_project_matches_revision_stage(project, revision)
 
     if decision is ReviewDecision.REJECT:
         _apply_reject(session, revision)
@@ -597,6 +678,8 @@ def admin_adjust_budget(
         raise NotAllowed("Only an admin may adjust a project's budget.")
     if not (reason and reason.strip()):
         raise ValidationFailed({"reason": "A reason is required."})
+
+    _lock_project(session, project)
     if project.status not in (ProjectStatus.APPROVED, ProjectStatus.PENDING_COMPLETION_REVIEW):
         raise InvalidState("Budget can only be adjusted on an approved or pending-completion project.")
 
@@ -637,6 +720,8 @@ def reclaim_budget(
         raise ValidationFailed({"reason": "A reason is required."})
     if amount_cents <= 0:
         raise ValidationFailed({"amount_cents": "The amount to reclaim must be greater than zero."})
+
+    _lock_project(session, project)
     if budget.ceiling_cents(session, project) - amount_cents < 0:
         raise ValidationFailed({"amount_cents": "Cannot reclaim more than the project's current budget ceiling."})
 
@@ -661,10 +746,17 @@ def withdraw(session: Session, actor: Actor, *, project: Project, reason: str | 
     entry. `reason` is required when an admin withdraws someone else's project (and an `AuditEvent` is
     written in that case); optional for a submitter withdrawing their own project. Raises
     `InvalidState` if the project is already `completed` or `withdrawn`.
+
+    Marks any revision of `project` still `pending` (its current revision, if submitted and awaiting a
+    decision) as `superseded`: once withdrawn, there's nothing left to approve or reject, and a stray
+    `record_review`/`admin_decide` call (a queued Slack action, a reviewer who had the page open) must
+    not be able to bring the project back to `approved`.
     """
     is_self = actor.user.id == project.submitter_id
     if not is_self and not actor.is_admin:
         raise NotAllowed("Only the submitter or an admin may withdraw this project.")
+
+    _lock_project(session, project)
     if project.status in _TERMINAL_STATUSES:
         raise InvalidState(f"Cannot withdraw a project that is already {project.status.value!r}.")
     if not is_self and not (reason and reason.strip()):
@@ -682,6 +774,7 @@ def withdraw(session: Session, actor: Actor, *, project: Project, reason: str | 
         )
 
     project.status = ProjectStatus.WITHDRAWN
+    _supersede_pending_revisions(session, project)
 
     if not is_self:
         audit.record(
@@ -731,6 +824,10 @@ def review_queue(session: Session, actor: Actor) -> list[ProjectRevision]:
         raise NotAllowed("Only reviewers have a review queue.")
 
     already_reviewed = sa.exists().where(Review.revision_id == ProjectRevision.id, Review.reviewer_id == actor.user.id)
+    # Belt-and-suspenders alongside `withdraw` superseding its pending revision: a revision only
+    # belongs in the queue while its *project* is actually in the status that stage is reviewed under
+    # (see `_expected_project_status`) -- e.g. never a withdrawn or completed project's leftover
+    # `pending` revision, whatever superseded it or didn't.
     stmt = (
         sa.select(ProjectRevision)
         .join(Project, Project.current_revision_id == ProjectRevision.id)
@@ -740,6 +837,14 @@ def review_queue(session: Session, actor: Actor) -> list[ProjectRevision]:
             Project.submitter_id != actor.user.id,
             ~(actor.user.id == sa.any_(ProjectRevision.credited_builder_ids)),
             ~already_reviewed,
+            sa.or_(
+                sa.and_(ProjectRevision.kind == RevisionKind.PROPOSAL, Project.status == ProjectStatus.PENDING_REVIEW),
+                sa.and_(ProjectRevision.kind == RevisionKind.AMENDMENT, Project.status == ProjectStatus.APPROVED),
+                sa.and_(
+                    ProjectRevision.kind == RevisionKind.COMPLETION,
+                    Project.status == ProjectStatus.PENDING_COMPLETION_REVIEW,
+                ),
+            ),
         )
         .order_by(ProjectRevision.submitted_at)
     )

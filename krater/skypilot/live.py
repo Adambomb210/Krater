@@ -24,7 +24,7 @@ import httpx
 
 from krater.config import Settings
 from krater.skypilot.errors import SkyPilotRequestFailedError, SkyPilotUnavailableError
-from krater.skypilot.types import ClusterInfo, CostReportRow, ManagedJobInfo
+from krater.skypilot.types import ClusterInfo, CostReportRow, ManagedJobInfo, ServiceInfo
 
 #: How long to keep polling a request id before giving up and treating SkyPilot as unavailable.
 DEFAULT_POLL_TIMEOUT_SECONDS = 30.0
@@ -54,10 +54,23 @@ _CLOUDS_TO_DISABLE = [
 #: an empty managed-jobs queue means, so both methods below treat it as one.
 _NO_JOBS_CONTROLLER_MARKERS = ("ClusterNotUpError", "No in-progress managed jobs")
 
+#: The Serve equivalent: `/serve/status`/`/serve/down` raise the same `ClusterNotUpError` (via
+#: `backend_utils.is_controller_accessible`) when no service has ever been launched in a workspace, so
+#: its own controller cluster doesn't exist yet -- the common case for almost every Ganymede workspace
+#: (most projects never run `sky serve up`). Only the shared marker is checked here (not a
+#: jobs-specific message), since the serve controller's own "non-existent" hint text varies by service
+#: type (`sky.serve` vs. a jobs pool) and isn't worth pinning down further than the exception itself.
+_NO_SERVE_CONTROLLER_MARKERS = ("ClusterNotUpError",)
+
 
 def _is_no_jobs_controller_error(exc: SkyPilotRequestFailedError) -> bool:
     message = str(exc)
     return any(marker in message for marker in _NO_JOBS_CONTROLLER_MARKERS)
+
+
+def _is_no_serve_controller_error(exc: SkyPilotRequestFailedError) -> bool:
+    message = str(exc)
+    return any(marker in message for marker in _NO_SERVE_CONTROLLER_MARKERS)
 
 
 def _decode_return_value(raw: Any) -> Any:
@@ -218,6 +231,34 @@ class LiveSkyPilotClient:
             )
         except SkyPilotRequestFailedError as exc:
             if not _is_no_jobs_controller_error(exc):
+                raise
+
+    # -- Serve services --------------------------------------------------------------------------------
+
+    def list_services(self, workspace: str) -> list[ServiceInfo]:
+        try:
+            rows = (
+                self._post_async(
+                    "/serve/status",
+                    {"service_names": None, "override_skypilot_config": {"active_workspace": workspace}},
+                )
+                or []
+            )
+        except SkyPilotRequestFailedError as exc:
+            if _is_no_serve_controller_error(exc):
+                return []
+            raise
+        return [
+            ServiceInfo(name=row["name"], workspace=row.get("workspace", workspace), status=row.get("status"))
+            for row in rows
+            if row.get("workspace", workspace) == workspace
+        ]
+
+    def down_service(self, name: str) -> None:
+        try:
+            self._post_async("/serve/down", {"service_names": [name], "purge": True})
+        except SkyPilotRequestFailedError as exc:
+            if "does not exist" not in str(exc) and not _is_no_serve_controller_error(exc):
                 raise
 
     # -- Transport: request + async request-id polling ------------------------------------------------

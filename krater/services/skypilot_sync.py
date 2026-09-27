@@ -103,6 +103,11 @@ def sync_workspaces(session: Session, client: SkyPilotClient) -> None:
         for cluster in client.list_clusters(name):
             client.down_cluster(cluster.name)
         client.cancel_managed_jobs(name)
+        # Serve services (and their controller/replica clusters) aren't part of `list_clusters`'
+        # accounting -- a completed/withdrawn project with a live service would otherwise keep it (and
+        # its compute) running forever, orphaned once the workspace itself is deleted below.
+        for service in client.list_services(name):
+            client.down_service(service.name)
 
         final_spend_cents = _workspace_total_cents(client, name)
         if final_spend_cents != budget.latest_spend_cents(session, project):
@@ -174,15 +179,24 @@ def _budget_percent(ceiling_cents: int, spend_cents: int) -> float:
 
 
 def enforce_budgets(session: Session, client: SkyPilotClient, *, warn_percent: int) -> None:
-    """Warn once per project at `warn_percent` of the ceiling, and tear down (repeatably, but only
-    when new clusters have appeared) once spend reaches or passes 100%.
+    """Warn once per project at `warn_percent` of the ceiling, and tear down -- every run, every
+    cluster/job currently up -- once spend reaches or passes 100%.
 
     - **Warning:** written once per project. Re-armed only if the ceiling is later raised (compared
       against the ceiling recorded on the last warning) and the percentage is crossed again.
     - **Teardown:** downs every current cluster and cancels every managed job in the project's
-      workspace, then records which clusters were torn down. A later run only repeats the teardown if
-      it finds a cluster that wasn't in that recorded set (i.e. one launched after the last teardown) --
-      an idle-but-still-over-budget project isn't re-torn-down every tick.
+      workspace, unconditionally, on *every* call while spend is still >= the ceiling -- not just when
+      a cluster name hasn't been seen before. A member can relaunch a cluster under the same name
+      (`sky launch -c train` again) right after it's torn down; gating the teardown on "is this a name
+      I haven't torn down yet" would let that relaunch run forever once the ceiling had ever been
+      raised past a first, already-recorded teardown. Downing an already-down cluster (or cancelling an
+      empty job queue) is a no-op against a real server, so this is safe to repeat every reconcile tick.
+    - **Audit event:** still written (and posted to Slack, via `slack_notify.sync_budget_notifications`)
+      only once per "crossing" -- re-armed on a ceiling change, exactly like the warning above -- so an
+      idle-but-still-over-budget project doesn't spam a new audit row/Slack message every tick even
+      though the teardown calls themselves repeat. Subsequent teardowns within the same crossing update
+      that event's `teardown_count` in place instead of inserting a new row, so the record still shows
+      that enforcement kept firing.
     """
     stmt = sa.select(Project).where(Project.status.in_(_PROVISIONED_STATUSES), Project.skypilot_workspace.is_not(None))
     for project in session.scalars(stmt):
@@ -213,14 +227,30 @@ def enforce_budgets(session: Session, client: SkyPilotClient, *, warn_percent: i
         if percent >= 100.0:
             clusters = client.list_clusters(workspace)
             current_names = sorted(cluster.name for cluster in clusters)
-            last_teardown = _latest_audit_event(session, project, AUDIT_BUDGET_TEARDOWN)
-            previously_torn_down = set(last_teardown.payload.get("cluster_names", [])) if last_teardown else set()
-            new_clusters_appeared = bool(set(current_names) - previously_torn_down)
+            for cluster in clusters:
+                client.down_cluster(cluster.name)
+            client.cancel_managed_jobs(workspace)
+            # Serve services provision their own controller/replica clusters outside `list_clusters`'
+            # view -- an over-budget project's live service must be torn down too, or it keeps running
+            # (and spending) past the point the policy endpoint has already started blocking new launches.
+            for service in client.list_services(workspace):
+                client.down_service(service.name)
 
-            if last_teardown is None or new_clusters_appeared:
-                for cluster in clusters:
-                    client.down_cluster(cluster.name)
-                client.cancel_managed_jobs(workspace)
+            last_teardown = _latest_audit_event(session, project, AUDIT_BUDGET_TEARDOWN)
+            already_armed_at_this_ceiling = last_teardown is not None and ceiling_cents <= last_teardown.payload.get(
+                "ceiling_cents", 0
+            )
+            if already_armed_at_this_ceiling:
+                # Same crossing as last time: the teardown calls above still ran (that's the actual
+                # enforcement), but don't insert another audit row/Slack post for it -- just note that
+                # it fired again.
+                payload = dict(last_teardown.payload)
+                payload["teardown_count"] = int(payload.get("teardown_count", 1)) + 1
+                payload["cluster_names"] = current_names
+                payload["spend_cents"] = spend_cents
+                last_teardown.payload = payload
+                session.flush()
+            else:
                 audit.record(
                     session,
                     None,
@@ -230,6 +260,7 @@ def enforce_budgets(session: Session, client: SkyPilotClient, *, warn_percent: i
                         "cluster_names": current_names,
                         "ceiling_cents": ceiling_cents,
                         "spend_cents": spend_cents,
+                        "teardown_count": 1,
                     },
                 )
                 session.flush()
