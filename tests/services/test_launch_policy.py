@@ -29,8 +29,9 @@ def _request(
     workspace: str | None = "ganymede-test",
     request_name: str = "launch",
     user: PolicyUser | None = None,
+    skypilot_config: dict | None = None,
 ) -> PolicyRequest:
-    skypilot_config: dict = {}
+    skypilot_config = dict(skypilot_config) if skypilot_config is not None else {}
     if workspace is not None:
         skypilot_config["active_workspace"] = workspace
     return PolicyRequest(
@@ -475,3 +476,100 @@ def test_serve_up_is_allowed_and_mutated_for_an_active_project(db_session: Sessi
 
     assert isinstance(decision, launch_policy.Allow)
     assert decision.task["resources"]["max_hourly_cost"] == 5.0
+
+
+# --------------------------------------------------------------------------------------------------
+# A Vast bid (`create_instance_kwargs.price`/`bid_price`) must be capped independently of
+# `max_hourly_cost`, which only filters which instance offer gets picked -- it never touches the bid
+# itself. See `sky/clouds/vast.py` and `sky/provision/vast/utils.py`.
+# --------------------------------------------------------------------------------------------------
+
+
+def test_vast_bid_in_skypilot_config_is_capped(db_session: Session, member: Actor) -> None:
+    _approved_project(db_session, member)
+    config = {"vast": {"create_instance_kwargs": {"price": 99.0}}}
+
+    decision = launch_policy.decide(_request(skypilot_config=config), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Allow)
+    assert decision.skypilot_config["vast"]["create_instance_kwargs"]["price"] == 5.0
+
+
+def test_vast_bid_price_key_is_capped(db_session: Session, member: Actor) -> None:
+    _approved_project(db_session, member)
+    config = {"vast": {"create_instance_kwargs": {"bid_price": 99.0}}}
+
+    decision = launch_policy.decide(_request(skypilot_config=config), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Allow)
+    assert decision.skypilot_config["vast"]["create_instance_kwargs"]["bid_price"] == 5.0
+
+
+def test_vast_bid_below_the_cap_is_kept(db_session: Session, member: Actor) -> None:
+    _approved_project(db_session, member)
+    config = {"vast": {"create_instance_kwargs": {"price": 1.0}}}
+
+    decision = launch_policy.decide(_request(skypilot_config=config), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Allow)
+    assert decision.skypilot_config["vast"]["create_instance_kwargs"]["price"] == 1.0
+
+
+def test_vast_bid_is_capped_for_a_never_rejected_request_name_too(db_session: Session) -> None:
+    """The cap applies to `skypilot_config` on every allowed call, including `validate` (no project or
+    workspace needed at all), matching `max_hourly_cost`'s own "advisory calls still get mutated" rule."""
+    config = {"vast": {"create_instance_kwargs": {"price": 99.0}}}
+
+    decision = launch_policy.decide(
+        _request(workspace=None, request_name="validate", skypilot_config=config), db_session, SETTINGS
+    )
+
+    assert isinstance(decision, launch_policy.Allow)
+    assert decision.skypilot_config["vast"]["create_instance_kwargs"]["price"] == 5.0
+
+
+def test_vast_bid_in_a_task_level_cluster_config_override_is_capped(db_session: Session, member: Actor) -> None:
+    """A task's own `resources: {config_overrides: ...}` (`_cluster_config_overrides` on the wire)
+    carries its own per-candidate config, independent of the request's top-level `skypilot_config`."""
+    _approved_project(db_session, member)
+    task = {
+        "resources": {
+            "infra": "vast",
+            "_cluster_config_overrides": {"vast": {"create_instance_kwargs": {"price": 99.0}}},
+        }
+    }
+
+    decision = launch_policy.decide(_request(task=task), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Allow)
+    overrides = decision.task["resources"]["_cluster_config_overrides"]
+    assert overrides["vast"]["create_instance_kwargs"]["price"] == 5.0
+
+
+def test_vast_bid_in_an_any_of_candidates_override_is_capped(db_session: Session, member: Actor) -> None:
+    _approved_project(db_session, member)
+    task = {
+        "resources": {
+            "any_of": [
+                {"_cluster_config_overrides": {"vast": {"create_instance_kwargs": {"bid_price": 99.0}}}},
+            ]
+        }
+    }
+
+    decision = launch_policy.decide(_request(task=task), db_session, SETTINGS)
+
+    assert isinstance(decision, launch_policy.Allow)
+    candidate = decision.task["resources"]["any_of"][0]
+    assert candidate["_cluster_config_overrides"]["vast"]["create_instance_kwargs"]["bid_price"] == 5.0
+
+
+def test_deciding_does_not_mutate_the_original_request(db_session: Session, member: Actor) -> None:
+    """`decide` must never mutate the caller's `PolicyRequest` in place -- it's shared/reused by the
+    route across a single call, and the fix here added a fresh `skypilot_config` mutation point."""
+    _approved_project(db_session, member)
+    config = {"vast": {"create_instance_kwargs": {"price": 99.0}}}
+    request = _request(skypilot_config=config)
+
+    launch_policy.decide(request, db_session, SETTINGS)
+
+    assert request.skypilot_config["vast"]["create_instance_kwargs"]["price"] == 99.0

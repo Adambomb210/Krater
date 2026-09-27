@@ -129,8 +129,33 @@ def _resource_items(resources: Any) -> list[dict[str, Any]]:
     return items
 
 
+def _clamp_vast_bid(vast_config: Any, cap_dollars: float) -> None:
+    """Clamp `create_instance_kwargs.price`/`bid_price` under a `vast:` cloud-config mapping to at most
+    `cap_dollars`, in place, keeping the caller's own value if it's already lower.
+
+    `sky.provision.vast.utils.create` passes `create_instance_kwargs` straight through to the Vast API
+    as the launch bid (`price`, with `bid_price` normalized to it for SDK compatibility) -- see
+    `sky/clouds/vast.py`/`sky/provision/vast/utils.py`. `resources.max_hourly_cost` (capped above) only
+    ever filters which instance *offer* the optimizer picks; it never touches this bid, so a member
+    could set it arbitrarily high through their own `~/.sky/config.yaml`'s `vast.create_instance_kwargs`
+    (carried in `skypilot_config`) or a task's per-resources `config_overrides.vast` (see
+    `Resources._cluster_config_overrides`) and pay -- or let Krater's budget get charged -- far more
+    than the configured cap per hour.
+    """
+    if not isinstance(vast_config, dict):
+        return
+    kwargs = vast_config.get("create_instance_kwargs")
+    if not isinstance(kwargs, dict):
+        return
+    for key in ("price", "bid_price"):
+        value = kwargs.get(key)
+        if isinstance(value, int | float):
+            kwargs[key] = min(value, cap_dollars)
+
+
 def _apply_mutations(task: dict[str, Any], settings: Settings) -> dict[str, Any]:
-    """Force autodown and cap `max_hourly_cost` on every resource candidate in `task`, in place."""
+    """Force autodown and cap `max_hourly_cost` (and any Vast bid override) on every resource candidate
+    in `task`, in place."""
     cap_dollars = settings.skypilot_max_hourly_cost_cents / 100
     resources = task.setdefault("resources", {})
     for resource in _resource_items(resources):
@@ -148,6 +173,15 @@ def _apply_mutations(task: dict[str, Any], settings: Settings) -> dict[str, Any]
         )
         if not user_is_stricter:
             resource["autostop"] = {"idle_minutes": settings.skypilot_autodown_idle_minutes, "down": True}
+
+        # A task-level, per-resources-candidate config override (`resources: {config_overrides: ...}`
+        # in user YAML, `_cluster_config_overrides` on the wire) validates against the same schema as
+        # the task's top-level `config:`/the global `skypilot_config` -- i.e. it can carry its own
+        # `vast.create_instance_kwargs` bid, independent of (and layered on top of) the request's
+        # top-level `skypilot_config` clamped in `decide()` below.
+        overrides = resource.get("_cluster_config_overrides")
+        if isinstance(overrides, dict):
+            _clamp_vast_bid(overrides.get("vast"), cap_dollars)
     return task
 
 
@@ -177,9 +211,10 @@ def decide(request: PolicyRequest, session: Session, settings: Settings) -> Poli
     Only `request_name`s in `ENFORCED_REQUEST_NAMES` can be rejected -- see that constant's docstring.
     Every request (enforced or not) that isn't rejected gets `task` mutated the same way: autodown
     forced after `settings.skypilot_autodown_idle_minutes` (unless the user's own `autostop` is already
-    stricter), and every resource's `max_hourly_cost` capped at
-    `min(user's value, settings.skypilot_max_hourly_cost_cents / 100)`. `skypilot_config` is returned
-    unchanged: the mutation points here are `resources`-level task fields (see the spike), not config.
+    stricter), every resource's `max_hourly_cost` capped at
+    `min(user's value, settings.skypilot_max_hourly_cost_cents / 100)`, and any Vast `create_instance_kwargs`
+    bid (`price`/`bid_price`, task-level or in `skypilot_config`) clamped to the same cap (see
+    `_clamp_vast_bid`) -- `max_hourly_cost` alone doesn't stop a member from bidding above it directly.
 
     Does at most three simple, indexed reads (the project lookup, plus `budget.remaining_cents`'s two
     selects) and never writes -- this is called on the hot path of every `sky launch`.
@@ -215,7 +250,10 @@ def decide(request: PolicyRequest, session: Session, settings: Settings) -> Poli
             )
 
     task = _apply_mutations(copy.deepcopy(request.task), settings)
-    return Allow(task=task, skypilot_config=request.skypilot_config)
+    skypilot_config = copy.deepcopy(request.skypilot_config)
+    cap_dollars = settings.skypilot_max_hourly_cost_cents / 100
+    _clamp_vast_bid(skypilot_config.get("vast"), cap_dollars)
+    return Allow(task=task, skypilot_config=skypilot_config)
 
 
 __all__ = ["Allow", "ENFORCED_REQUEST_NAMES", "PolicyDecision", "Reject", "decide"]
