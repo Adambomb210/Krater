@@ -29,14 +29,15 @@ from krater.models import (
     RevisionOutcome,
     User,
 )
+from krater.services import pricing, slack_membership
 from krater.services import projects as project_service
 from krater.services import screenshots as screenshot_service
-from krater.services import slack_membership
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
 from krater.services.skypilot_sync import current_budget_flag
 from krater.slack import get_slack_client
 from krater.storage import ObjectStore, get_object_store
+from krater.web import estimator_form
 from krater.web.csrf import verify_csrf_token
 from krater.web.deps import fresh_actor
 from krater.web.flash import flash
@@ -128,10 +129,66 @@ def _new_project_values(*, title: str = "", repo_url: str = "", write_up: str = 
     return {"title": title, "repo_url": repo_url, "write_up": write_up, "budget_requested": budget_requested}
 
 
+def _estimator_context(
+    db_session: Session,
+    *,
+    estimator_gpu: str = "",
+    estimator_hours: str = "",
+    estimator_basis: str = "",
+    estimator_margin_percent: str = "",
+    estimate_summary: str | None = None,
+    estimator_used: str = "",
+) -> dict:
+    """Shared new/edit-form context for the budget estimator fieldset (`_macros.html`'s
+    `budget_estimator`). `estimator_values` echoes back whatever was posted so a validation-failure
+    round trip doesn't lose the submitter's inputs; falls back to blank defaults on a fresh GET."""
+    defaults = estimator_form.default_estimator_values(get_settings())
+    return {
+        "gpu_options": estimator_form.gpu_options(db_session),
+        "estimator_values": {
+            "estimator_gpu": estimator_gpu or defaults["estimator_gpu"],
+            "estimator_hours": estimator_hours or defaults["estimator_hours"],
+            "estimator_basis": estimator_basis or defaults["estimator_basis"],
+            "estimator_margin_percent": estimator_margin_percent or defaults["estimator_margin_percent"],
+        },
+        "estimate_summary": estimate_summary,
+        "estimator_used": estimator_used,
+    }
+
+
+def _run_estimate(db_session: Session, **fields: str) -> tuple[pricing.BudgetEstimate | None, dict]:
+    """`(result, errors)`: exactly one is truthy. `fields` are the four `estimator_*` posted strings."""
+    try:
+        return estimator_form.parse_and_estimate(db_session, **fields), {}
+    except ValidationFailed as exc:
+        return None, exc.errors
+
+
+def _store_estimate_best_effort(
+    db_session: Session, actor: Actor, *, project: Project, estimator_used: str, **fields: str
+) -> None:
+    """If the submitter used the estimator on this save, recompute it (never trusting anything but the
+    choice of GPU/hours/basis/margin -- see `docs/dev/pricing.md`) and store the breakdown. Best-effort:
+    a stale/removed GPU key here shouldn't block saving the rest of the draft, so a failure is silently
+    skipped rather than surfaced as a field error (unlike the dedicated "Estimate" action, where it is)."""
+    if estimator_used != "1":
+        return
+    result, errors = _run_estimate(db_session, **fields)
+    if result is not None:
+        project_service.set_budget_estimate(db_session, actor, project=project, budget_estimate=result.as_dict())
+    else:
+        del errors  # best-effort; see docstring
+
+
 @router.get("/projects/new")
-def new_project_form(request: Request, actor: Annotated[Actor, Depends(fresh_actor)]):
+def new_project_form(
+    request: Request,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+):
     del actor  # membership itself is enforced by `fresh_actor`; the service checks it again
-    return templates.TemplateResponse(request, "projects/new.html", {"errors": {}, "values": _new_project_values()})
+    context = {"errors": {}, "values": _new_project_values(), **_estimator_context(db_session)}
+    return templates.TemplateResponse(request, "projects/new.html", context)
 
 
 @router.post("/projects/new", dependencies=[Depends(verify_csrf_token)])
@@ -143,7 +200,40 @@ def create_project(
     repo_url: Annotated[str, Form()] = "",
     write_up: Annotated[str, Form()] = "",
     budget_requested: Annotated[str, Form()] = "",
+    form_action: Annotated[str, Form()] = "save",
+    estimator_gpu: Annotated[str, Form()] = "",
+    estimator_hours: Annotated[str, Form()] = "",
+    estimator_basis: Annotated[str, Form()] = "on_demand",
+    estimator_margin_percent: Annotated[str, Form()] = "",
+    estimator_used: Annotated[str, Form()] = "",
 ):
+    estimator_fields = dict(
+        estimator_gpu=estimator_gpu,
+        estimator_hours=estimator_hours,
+        estimator_basis=estimator_basis,
+        estimator_margin_percent=estimator_margin_percent,
+    )
+    values = _new_project_values(title=title, repo_url=repo_url, write_up=write_up, budget_requested=budget_requested)
+
+    if form_action == "estimate":
+        # The no-JS degrade path (docs/SPEC.md's estimator requirement): recompute right now and
+        # re-render with the budget field already filled in, without creating anything yet -- there's
+        # no project to attach a draft estimate to before it's created.
+        result, errors = _run_estimate(db_session, **estimator_fields)
+        estimate_summary = None
+        if result is not None:
+            values["budget_requested"] = cents_to_input(result.total_cents)
+            estimate_summary = estimator_form.summary_text(result)
+            estimator_used = "1"
+        context = {
+            "errors": errors,
+            "values": values,
+            **_estimator_context(
+                db_session, estimate_summary=estimate_summary, estimator_used=estimator_used, **estimator_fields
+            ),
+        }
+        return templates.TemplateResponse(request, "projects/new.html", context, status_code=422 if errors else 200)
+
     errors: dict[str, str] = {}
     budget_cents = 0
     raw_budget = budget_requested.strip()
@@ -154,12 +244,12 @@ def create_project(
             errors["budget_requested_cents"] = str(exc)
 
     if errors:
-        values = _new_project_values(
-            title=title, repo_url=repo_url, write_up=write_up, budget_requested=budget_requested
-        )
-        return templates.TemplateResponse(
-            request, "projects/new.html", {"errors": errors, "values": values}, status_code=422
-        )
+        context = {
+            "errors": errors,
+            "values": values,
+            **_estimator_context(db_session, estimator_used=estimator_used, **estimator_fields),
+        }
+        return templates.TemplateResponse(request, "projects/new.html", context, status_code=422)
 
     project = project_service.create_project(
         db_session,
@@ -169,6 +259,7 @@ def create_project(
         budget_requested_cents=budget_cents,
         repo_url=repo_url or None,
     )
+    _store_estimate_best_effort(db_session, actor, project=project, estimator_used=estimator_used, **estimator_fields)
     db_session.commit()
     flash(request, "Draft created.", "success")
     return RedirectResponse(f"/projects/{project.id}", status_code=303)
@@ -218,12 +309,27 @@ def _build_detail_context(
 
     screenshots = _screenshot_entries(get_object_store(), current) if current is not None else []
 
+    # For each revision that used the budget estimator (`budget_estimate` set), whether its actually
+    # -requested budget has drifted far enough from that stored estimate to flag for reviewers -- e.g.
+    # the submitter estimated one thing, then hand-edited the requested amount well past it.
+    threshold_percent = get_settings().budget_estimate_flag_threshold_percent
+    estimate_mismatch_by_revision: dict[uuid.UUID, bool] = {}
+    for revision in revisions:
+        estimate = revision.budget_estimate
+        if not estimate:
+            continue
+        total_cents = estimate.get("total_cents", 0)
+        if total_cents > 0:
+            diff_percent = abs(revision.budget_requested_cents - total_cents) / total_cents * 100
+            estimate_mismatch_by_revision[revision.id] = diff_percent > threshold_percent
+
     return {
         "project": project,
         "summary": summary,
         "skypilot_budget_flag": skypilot_budget_flag,
         "screenshots": screenshots,
         "revisions": revisions,
+        "estimate_mismatch_by_revision": estimate_mismatch_by_revision,
         "users_by_id": users_by_id,
         "is_submitter": is_submitter,
         "is_admin": actor.is_admin,
@@ -292,6 +398,22 @@ def _screenshot_entries(store: ObjectStore, draft: ProjectRevision) -> list[dict
     return [{"key": key, "url": store.presign_download(key)} for key in draft.screenshot_keys]
 
 
+def _estimator_context_from_draft(db_session: Session, draft: ProjectRevision) -> dict:
+    """`_estimator_context`, prefilled from `draft.budget_estimate` if it has one (so reopening the
+    edit page still shows what the estimator last computed for this draft), else blank defaults."""
+    stored = draft.budget_estimate
+    if not stored:
+        return _estimator_context(db_session)
+    return _estimator_context(
+        db_session,
+        estimator_gpu=pricing.gpu_key(stored["accelerator_name"], stored["accelerator_count"]),
+        estimator_hours=str(stored["hours"]),
+        estimator_basis=stored["basis"],
+        estimator_margin_percent=str(stored["margin_percent"]),
+        estimate_summary=estimator_form.summary_text_from_dict(stored),
+    )
+
+
 @router.get("/projects/{project_id}/edit")
 def edit_draft_form(
     request: Request,
@@ -310,7 +432,13 @@ def edit_draft_form(
         return _redirect_to_project(project_id)
 
     values = _edit_form_values(db_session, project, draft)
-    context = {"project": project, "draft": draft, "errors": {}, "values": values}
+    context = {
+        "project": project,
+        "draft": draft,
+        "errors": {},
+        "values": values,
+        **_estimator_context_from_draft(db_session, draft),
+    }
     if draft.kind is RevisionKind.COMPLETION:
         context["screenshots"] = _screenshot_entries(store, draft)
         context["max_screenshots"] = screenshot_service.MAX_SCREENSHOTS
@@ -332,6 +460,12 @@ def update_draft(
     demo_url: Annotated[str, Form()] = "",
     tags: Annotated[str, Form()] = "",
     credited_builder_emails: Annotated[str, Form()] = "",
+    form_action: Annotated[str, Form()] = "save",
+    estimator_gpu: Annotated[str, Form()] = "",
+    estimator_hours: Annotated[str, Form()] = "",
+    estimator_basis: Annotated[str, Form()] = "on_demand",
+    estimator_margin_percent: Annotated[str, Form()] = "",
+    estimator_used: Annotated[str, Form()] = "",
 ):
     project = _get_visible_project(db_session, actor, project_id)
     if actor.user.id != project.submitter_id:
@@ -341,6 +475,44 @@ def update_draft(
     if draft is None:
         flash(request, "This project has no draft to edit right now.", "error")
         return _redirect_to_project(project_id)
+
+    estimator_fields = dict(
+        estimator_gpu=estimator_gpu,
+        estimator_hours=estimator_hours,
+        estimator_basis=estimator_basis,
+        estimator_margin_percent=estimator_margin_percent,
+    )
+    values = {
+        "title": title,
+        "repo_url": repo_url,
+        "write_up": write_up,
+        "budget_requested": budget_requested,
+        "demo_url": demo_url,
+        "tags": tags,
+        "credited_builder_emails": credited_builder_emails,
+    }
+
+    if form_action == "estimate":
+        result, errors = _run_estimate(db_session, **estimator_fields)
+        estimate_summary = None
+        if result is not None:
+            values["budget_requested"] = cents_to_input(result.total_cents)
+            estimate_summary = estimator_form.summary_text(result)
+            estimator_used = "1"
+        context = {
+            "project": project,
+            "draft": draft,
+            "errors": errors,
+            "values": values,
+            **_estimator_context(
+                db_session, estimate_summary=estimate_summary, estimator_used=estimator_used, **estimator_fields
+            ),
+        }
+        if draft.kind is RevisionKind.COMPLETION:
+            context["screenshots"] = _screenshot_entries(store, draft)
+            context["max_screenshots"] = screenshot_service.MAX_SCREENSHOTS
+            context["max_screenshot_bytes"] = screenshot_service.MAX_SCREENSHOT_BYTES
+        return templates.TemplateResponse(request, "projects/edit.html", context, status_code=422 if errors else 200)
 
     errors: dict[str, str] = {}
     budget_cents = draft.budget_requested_cents
@@ -359,16 +531,13 @@ def update_draft(
             errors["credited_builder_emails"] = f"Unknown email(s): {', '.join(exc.emails)}"
 
     if errors:
-        values = {
-            "title": title,
-            "repo_url": repo_url,
-            "write_up": write_up,
-            "budget_requested": budget_requested,
-            "demo_url": demo_url,
-            "tags": tags,
-            "credited_builder_emails": credited_builder_emails,
+        context = {
+            "project": project,
+            "draft": draft,
+            "errors": errors,
+            "values": values,
+            **_estimator_context(db_session, estimator_used=estimator_used, **estimator_fields),
         }
-        context = {"project": project, "draft": draft, "errors": errors, "values": values}
         if draft.kind is RevisionKind.COMPLETION:
             context["screenshots"] = _screenshot_entries(store, draft)
             context["max_screenshots"] = screenshot_service.MAX_SCREENSHOTS
@@ -385,6 +554,7 @@ def update_draft(
         update_kwargs.update(demo_url=demo_url or None, tags=parse_tags(tags), credited_builder_ids=builder_ids)
 
     project_service.update_draft(db_session, actor, project=project, **update_kwargs)
+    _store_estimate_best_effort(db_session, actor, project=project, estimator_used=estimator_used, **estimator_fields)
     db_session.commit()
     flash(request, "Draft saved.", "success")
     return RedirectResponse(f"/projects/{project_id}/edit", status_code=303)

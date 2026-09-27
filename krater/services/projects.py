@@ -195,6 +195,28 @@ def update_draft(
     return project
 
 
+def set_budget_estimate(session: Session, actor: Actor, *, project: Project, budget_estimate: dict | None) -> Project:
+    """Set (or, with `None`, clear) the current draft's stored budget-estimate breakdown. Submitter
+    only. Separate from `update_draft` so that field keeps its own explicit "unset" (`None` really does
+    mean "no estimate", not "leave whatever was there") instead of overloading `update_draft`'s
+    "`None` means don't touch this field" convention.
+
+    Called from `krater.web.routers.projects` right after a create/update-draft call, when the
+    submitter used the budget estimator -- see `krater.services.pricing.estimate_cost`, whose result
+    (already recomputed server-side) is what's passed in here as `budget_estimate.as_dict()`.
+    """
+    if actor.user.id != project.submitter_id:
+        raise NotAllowed("Only the submitter may edit this project.")
+
+    draft = project.current_revision
+    if draft is None or draft.submitted_at is not None:
+        raise InvalidState("This project has no draft to edit right now.")
+
+    draft.budget_estimate = budget_estimate
+    session.flush()
+    return project
+
+
 # --------------------------------------------------------------------------------------------------
 # Submit
 # --------------------------------------------------------------------------------------------------

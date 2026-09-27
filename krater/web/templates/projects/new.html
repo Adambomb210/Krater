@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as macros %}
 
 {% block title %}New proposal{% endblock %}
 
@@ -41,9 +42,15 @@
       {% endif %}
     </div>
 
+    {{ macros.budget_estimator(gpu_options, estimator_values, errors, estimate_summary, estimator_used, csrf_token()) }}
+
     <p class="muted">You can keep editing this as a draft before you submit it for review.</p>
 
-    <button type="submit" class="button button--primary">Save draft</button>
+    <button type="submit" name="form_action" value="save" class="button button--primary">Save draft</button>
   </form>
 </section>
+{% endblock %}
+
+{% block scripts %}
+  <script src="/static/js/budget-estimator.js" defer></script>
 {% endblock %}

@@ -216,6 +216,14 @@
         {% if revision.submitted_at %}Submitted {{ revision.submitted_at.strftime("%Y-%m-%d %H:%M UTC") }}{% else %}Draft, not yet submitted{% endif %}
         &middot; Budget requested: {{ revision.budget_requested_cents | dollars }}
       </p>
+      {% if revision.budget_estimate %}
+        <p class="muted">
+          Estimate: {{ revision.budget_estimate | estimate_summary }}
+          {%- if estimate_mismatch_by_revision.get(revision.id) %}
+            &mdash; <strong class="field-error">requested budget differs a lot from this estimate</strong>
+          {%- endif %}
+        </p>
+      {% endif %}
       {% if revision.reviews %}
         <ul class="review-list">
           {% for review in revision.reviews %}
