@@ -11,6 +11,8 @@ itself a `SlackClientError`, so it's always caught first.
 
 from __future__ import annotations
 
+import logging
+
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError, SlackClientError
 from slack_sdk.webhook import WebhookClient
@@ -19,10 +21,19 @@ from krater.config import Settings
 from krater.slack.errors import SlackRequestFailedError, SlackUnavailableError
 from krater.slack.types import SlackUserInfo
 
+logger = logging.getLogger(__name__)
+
 #: `conversations.invite`/`conversations.archive` error codes that mean "already done" -- treated as
 #: success so a retried job (or a channel someone joined manually in between) doesn't fail.
 _ALREADY_IN_CHANNEL_ERRORS = frozenset({"already_in_channel"})
 _ALREADY_ARCHIVED_ERRORS = frozenset({"already_archived"})
+
+#: Per-user `conversations.invite` failures explained by that one person's account (already in, a
+#: guest Slack won't add here, a deactivated or unknown id), as opposed to the channel or the app
+#: being wrong. Those people are skipped and logged; anything else still fails the call.
+_SKIPPABLE_INVITE_ERRORS = _ALREADY_IN_CHANNEL_ERRORS | frozenset(
+    {"cant_invite", "cant_invite_self", "user_is_restricted", "ura_max_channels", "user_not_found"}
+)
 
 
 def _slack_error_code(exc: SlackApiError) -> str | None:
@@ -38,6 +49,20 @@ def _request_failed(method: str, exc: SlackApiError) -> SlackRequestFailedError:
 
 def _unavailable(method: str, exc: SlackClientError) -> SlackUnavailableError:
     return SlackUnavailableError(f"could not reach Slack for {method}: {exc}")
+
+
+def _per_user_invite_errors(exc: SlackApiError) -> dict[str, str]:
+    """`conversations.invite`'s per-user failures as `{user_id: error_code}`, from the response's
+    `errors` array (`[{"user": ..., "ok": false, "error": ...}]`). A response without one (a single
+    invitee, typically) is attributed to `"?"` with the top-level code, so it's judged the same way."""
+    try:
+        errors = exc.response.get("errors")
+    except AttributeError:
+        errors = None
+    if isinstance(errors, list) and errors:
+        return {str(entry.get("user", "?")): str(entry.get("error")) for entry in errors if isinstance(entry, dict)}
+    code = _slack_error_code(exc)
+    return {"?": code} if code else {}
 
 
 class LiveSlackClient:
@@ -85,14 +110,24 @@ class LiveSlackClient:
                 return None
 
     def invite_users(self, channel_id: str, slack_user_ids: list[str]) -> None:
+        """Invite everyone in `slack_user_ids` who can be invited.
+
+        Without `force`, Slack invites nobody if any one invite fails, and re-inviting a channel's
+        team always includes people already in it (`already_in_channel`), so new reviewers or
+        builders were silently never added. `force=True` makes Slack invite the valid ones anyway;
+        per-user failures in `_SKIPPABLE_INVITE_ERRORS` are then logged and ignored.
+        """
         if not slack_user_ids:
             return
         try:
-            self._client.conversations_invite(channel=channel_id, users=slack_user_ids)
+            self._client.conversations_invite(channel=channel_id, users=slack_user_ids, force=True)
         except SlackApiError as exc:
-            if _slack_error_code(exc) in _ALREADY_IN_CHANNEL_ERRORS:
-                return
-            raise _request_failed("conversations.invite", exc) from exc
+            failures = _per_user_invite_errors(exc)
+            if not failures or not set(failures.values()) <= _SKIPPABLE_INVITE_ERRORS:
+                raise _request_failed("conversations.invite", exc) from exc
+            skipped = {user: code for user, code in failures.items() if code not in _ALREADY_IN_CHANNEL_ERRORS}
+            if skipped:
+                logger.warning("Slack wouldn't invite %s to channel %s; invited everyone else", skipped, channel_id)
         except SlackClientError as exc:
             raise _unavailable("conversations.invite", exc) from exc
 
@@ -164,11 +199,13 @@ class LiveSlackClient:
         except SlackClientError as exc:
             raise _unavailable("users.info", exc) from exc
         user = response["user"]
+        email = (user.get("profile") or {}).get("email")
         return SlackUserInfo(
             slack_id=user["id"],
             deleted=bool(user.get("deleted", False)),
             is_restricted=bool(user.get("is_restricted", False)),
             is_ultra_restricted=bool(user.get("is_ultra_restricted", False)),
+            email=email if isinstance(email, str) and email else None,
         )
 
 

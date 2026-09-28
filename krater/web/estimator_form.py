@@ -100,7 +100,7 @@ def summary_text_from_dict(data: dict) -> str:
     return (
         f"{data['accelerator_count']}× {data['accelerator_name']} × {float(data['hours']):g}h at "
         f"{format_cents(data['rate_cents'])}/hr ({basis_label}) + {data['margin_percent']}% margin = "
-        f"{format_cents(data['total_cents'])} (prices from {refreshed_at:%b %-d})"
+        f"{format_cents(data['total_cents'])} (prices from {refreshed_at:%b} {refreshed_at.day})"
     )
 
 

@@ -11,7 +11,11 @@ import httpx
 import pytest
 
 from krater.config import Settings
-from krater.skypilot.errors import SkyPilotRequestFailedError, SkyPilotUnavailableError
+from krater.skypilot.errors import (
+    SkyPilotRequestFailedError,
+    SkyPilotUnavailableError,
+    SkyPilotWorkspaceNotFoundError,
+)
 from krater.skypilot.live import LiveSkyPilotClient
 
 API_URL = "https://skypilot.test"
@@ -28,6 +32,8 @@ _SCHEDULED_PATHS = {
     "/jobs/queue",
     "/down",
     "/jobs/cancel",
+    "/serve/status",
+    "/serve/down",
 }
 
 
@@ -384,3 +390,120 @@ def test_cancel_managed_jobs_still_raises_for_a_different_5xx_wrapped_failure(
 
     with pytest.raises(SkyPilotRequestFailedError, match="something else broke"):
         client.cancel_managed_jobs("ganymede-abc123")
+
+
+# --------------------------------------------------------------------------------------------------
+# "No serve controller yet" -- confirmed live against a real 0.13.0 server with internet access (the
+# SkyPilot contract run): `/serve/status` raises `ClusterNotUpError("No live services.")`, as a 500-
+# wrapped FAILED poll, in a workspace that never ran `sky serve up`. The message doesn't name the type,
+# so the client must match on the polled error's `type`, or every completed/withdrawn project's
+# teardown fails and its workspace is never deleted.
+# --------------------------------------------------------------------------------------------------
+
+_NO_SERVE_CONTROLLER_POLL_RESPONSE = {
+    "status": "FAILED",
+    "return_value": "null",
+    "error": json.dumps({"type": "ClusterNotUpError", "message": "No live services."}),
+    "_wrap_in_5xx_detail": True,
+}
+
+
+def test_list_services_treats_no_serve_controller_as_empty(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    fake_server.poll_queue["/serve/status"] = [dict(_NO_SERVE_CONTROLLER_POLL_RESPONSE)]
+
+    assert client.list_services("ganymede-abc123") == []
+
+
+def test_down_service_treats_no_serve_controller_as_a_no_op(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    fake_server.poll_queue["/serve/down"] = [dict(_NO_SERVE_CONTROLLER_POLL_RESPONSE)]
+
+    client.down_service("svc")  # must not raise
+
+
+def test_list_services_still_raises_for_a_different_failure(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    fake_server.poll_queue["/serve/status"] = [
+        {
+            "status": "FAILED",
+            "return_value": "null",
+            "error": json.dumps(
+                {"type": "NetworkError", "message": "Failed to refresh services status due to network error"}
+            ),
+            "_wrap_in_5xx_detail": True,
+        }
+    ]
+
+    with pytest.raises(SkyPilotRequestFailedError, match="network error") as excinfo:
+        client.list_services("ganymede-abc123")
+    assert excinfo.value.error_type == "NetworkError"
+
+
+# --------------------------------------------------------------------------------------------------
+# A workspace that doesn't exist -- shapes captured live from a real 0.13.0 server: every call scoped
+# to it is a 500-wrapped FAILED poll with a bare `ValueError`, so both the type and the message count.
+# --------------------------------------------------------------------------------------------------
+
+
+def _failed_poll(error_type: str, message: str) -> dict:
+    return {
+        "status": "FAILED",
+        "return_value": "null",
+        "error": json.dumps({"type": error_type, "message": message}),
+        "_wrap_in_5xx_detail": True,
+    }
+
+
+_SCOPED_MISSING_MESSAGE = (
+    "Workspace ganymede-abc123 does not exist. Use `sky check` to see if it is defined on the API server and try again."
+)
+
+
+@pytest.mark.parametrize(
+    ("path", "call"),
+    [
+        ("/status", lambda c: c.list_clusters("ganymede-abc123")),
+        ("/jobs/queue", lambda c: c.list_managed_jobs("ganymede-abc123")),
+        ("/jobs/cancel", lambda c: c.cancel_managed_jobs("ganymede-abc123")),
+        ("/serve/status", lambda c: c.list_services("ganymede-abc123")),
+    ],
+)
+def test_a_call_scoped_to_a_missing_workspace_raises_workspace_not_found(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient, path: str, call
+) -> None:
+    fake_server.poll_queue[path] = [_failed_poll("ValueError", _SCOPED_MISSING_MESSAGE)]
+
+    with pytest.raises(SkyPilotWorkspaceNotFoundError, match="does not exist") as excinfo:
+        call(client)
+    assert excinfo.value.error_type == "ValueError"
+
+
+def test_delete_workspace_is_a_no_op_for_the_real_missing_workspace_shape(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient
+) -> None:
+    fake_server.poll_queue["/workspaces/delete"] = [
+        _failed_poll("ValueError", "Workspace 'ganymede-abc123' does not exist.")
+    ]
+
+    client.delete_workspace("ganymede-abc123")  # must not raise
+
+
+@pytest.mark.parametrize(
+    ("error_type", "message"),
+    [
+        ("ValueError", "Invalid cluster name: does not exist."),
+        ("RuntimeError", _SCOPED_MISSING_MESSAGE),
+    ],
+)
+def test_other_failures_are_not_mistaken_for_a_missing_workspace(
+    fake_server: FakeSkyPilotServer, client: LiveSkyPilotClient, error_type: str, message: str
+) -> None:
+    fake_server.poll_queue["/status"] = [_failed_poll(error_type, message)]
+
+    with pytest.raises(SkyPilotRequestFailedError) as excinfo:
+        client.list_clusters("ganymede-abc123")
+    assert not isinstance(excinfo.value, SkyPilotWorkspaceNotFoundError)

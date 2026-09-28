@@ -35,15 +35,15 @@ cd Krater
 
 ## 2. A local Weave
 
-Weave provides sign-in for both Krater and the SkyPilot proxy. Run the `Krater-Integration` branch (see
-`docs/weave-integration.md`) -- it's the one with the `groups` claim and the directory API Krater depends on.
+Weave provides sign-in for both Krater and the SkyPilot proxy. Krater needs only standard OIDC, so Weave's `main`
+branch works (see `docs/weave-integration.md`). Applying the handoff's Weave patches `0002`/`0003` first is still
+recommended: they fix a CSP bug that breaks sign-in for returning users in Chrome and Safari.
 
 **WSL2 (bash):**
 
 ```bash
 git clone https://github.com/patchworklabsorg/weave.git ~/weave
 cd ~/weave
-git checkout Krater-Integration
 bin/setup            # installs gems, prepares the dev database, etc. -- see Weave's own README for prerequisites
 bin/rails server -p 3000
 ```
@@ -58,25 +58,24 @@ At `http://localhost:3000/admin/oauth_applications`, create two **confidential**
 
 1. **Krater** itself:
    - Redirect URI: `http://localhost:8000/auth/callback`
-   - Scopes: `openid profile email groups`
+   - Scopes: `openid profile email`
    - Note the client id/secret for `KRATER_WEAVE_CLIENT_ID`/`KRATER_WEAVE_CLIENT_SECRET`.
 
 2. **SkyPilot proxy** (a *separate* app -- never reuse Krater's own credentials here, per
    `docs/skypilot-integration.md` section 0):
-   - Redirect URI: `http://localhost:8080/oauth2/callback` (oauth2-proxy's default callback path, on the port
-     `auth-proxy` publishes -- see `.env`'s `SKYPILOT_AUTH_PROXY_PORT`).
-   - Scopes: `openid profile email groups`
+   - Redirect URI: `http://localhost:46580/oauth2/callback`. This is the SkyPilot API server's port, not
+     `auth-proxy`'s: SkyPilot forwards its own `/oauth2/*` paths to `auth-proxy`, and `docker-compose.yml` builds
+     oauth2-proxy's `redirect_url` from `.env`'s `KRATER_SKYPILOT_PUBLIC_URL` (default `http://localhost:46580`).
+     The two must match exactly.
+   - Scopes: `openid profile email`
    - Note the client id/secret for `KRATER_SKYPILOT_AUTH_CLIENT_ID`/`KRATER_SKYPILOT_AUTH_CLIENT_SECRET`.
 
-### Issue a service key
+### Make yourself a Ganymede admin
 
-Also at `/admin/oauth_applications` (or wherever Weave's `Krater-Integration` branch puts service-key management --
-check that branch's `docs/OAUTH.md` if the path has moved), issue a service key scoped to **`directory:read`** only.
-This is `KRATER_WEAVE_SERVICE_KEY`, used for Krater's directory lookups (`get_user`, group membership) -- it should
-never be able to act as a user, only read the directory.
-
-Give your own Weave user the `ganymede:member` group (and `ganymede:admin` if you want to approve your own test
-project) through whatever admin UI Weave's `Krater-Integration` branch adds for group management.
+Roles live in Krater, not Weave, and no Weave service key is needed. Find your Weave user's `p_id` (the OIDC `sub`,
+e.g. `PWL5A1B2C3D4`; from the Weave checkout, `bin/rails runner 'puts User.find_by!(email: "you@...").p_id'`)
+and put it in `KRATER_BOOTSTRAP_ADMINS` (step 4). Your first sign-in to Krater then makes you `ganymede:admin` and
+`ganymede:member`; grant everyone else their roles at `http://localhost:8000/admin/users`.
 
 ## 3. A separate, small-credit Vast.ai account
 
@@ -102,18 +101,27 @@ long as `docker compose` itself is also run from within WSL2).
 cp .env.example .env
 ```
 
-Then edit `.env` (see the comments in `.env.example` for what each does):
+A `.env` in the repo root leaks into `uv run pytest` (pydantic-settings loads it automatically). If you also run the
+tests from this checkout, keep the file elsewhere instead and point Compose at it; the path in `KRATER_ENV_FILE` is
+relative to the repo root:
+
+```bash
+cp .env.example ../krater-staging.env
+echo 'KRATER_ENV_FILE=../krater-staging.env' >> ../krater-staging.env
+# then add `--env-file ../krater-staging.env` to every `docker compose` command below
+```
+
+Then edit `.env` (or your out-of-repo copy; see the comments in `.env.example` for what each does):
 
 ```ini
 KRATER_WEAVE_MODE=live
 KRATER_WEAVE_ISSUER=http://host.docker.internal:3000
 KRATER_WEAVE_CLIENT_ID=<from step 2>
 KRATER_WEAVE_CLIENT_SECRET=<from step 2>
-KRATER_WEAVE_API_BASE_URL=http://host.docker.internal:3000
-KRATER_WEAVE_SERVICE_KEY=<from step 2>
+KRATER_BOOTSTRAP_ADMINS=<your Weave p_id, from step 2>
 
 KRATER_SKYPILOT_MODE=live
-KRATER_PUBLIC_URL=http://localhost:8000
+KRATER_PUBLIC_URL=http://host.docker.internal:8000
 KRATER_SKYPILOT_POLICY_TOKEN=<openssl rand -hex 32>
 KRATER_SKYPILOT_BASIC_AUTH_USER=admin
 KRATER_SKYPILOT_BASIC_AUTH_PASSWORD=<a real password -- used once, in step 5>
@@ -131,7 +139,15 @@ KRATER_SKYPILOT_MAX_HOURLY_COST_CENTS=50
 ```
 
 `host.docker.internal` is how containers reach Weave running directly on the WSL2/Windows host; Docker Desktop wires
-this up automatically. `KRATER_WEAVE_SERVICE_KEY` must be issued with `directory:read` (step 2).
+this up automatically.
+
+`KRATER_PUBLIC_URL` is the launch gate's base URL, and SkyPilot calls it from two places: the `skypilot` container
+(server side) and your `sky` CLI (client side). `localhost:8000` only works for the second: inside the container it
+is the container itself, so every launch would be rejected with "Failed to call admin policy URL ... Connection
+refused". `host.docker.internal` reaches the published portal port from containers and from Windows (Docker Desktop
+adds it to the Windows hosts file); WSL2 normally copies that entry into its own `/etc/hosts`. If `curl
+http://host.docker.internal:8000/healthz` fails inside WSL2, add `127.0.0.1 host.docker.internal` to WSL2's
+`/etc/hosts`.
 
 ## 5. Bring the stack up
 
@@ -147,10 +163,11 @@ its CORS setup, and what's been verified against it.
 
 ### Bootstrap the SkyPilot service-account token
 
-One-time, once `skypilot` is up (needs `ENABLE_BASIC_AUTH` + `ENABLE_SERVICE_ACCOUNTS`, both already set by
-`docker-compose.yml` -- see `docs/dev/skypilot-spike.md` section 3 for why both are required, and its Surprise #8 for
-why this call must come from *outside* the container, not `docker compose exec`, since loopback requests bypass
-Basic Auth):
+One-time, once `skypilot` is up. It needs `ENABLE_BASIC_AUTH` + `ENABLE_SERVICE_ACCOUNTS`, both on by default in
+`docker-compose.yml` (see `docs/dev/skypilot-spike.md` section 3 for why both are required). The first start creates
+the basic-auth admin from `KRATER_SKYPILOT_BASIC_AUTH_USER`/`_PASSWORD`; changing them later has no effect unless you
+also drop the `krater_skypilot_data` volume. The calls must come from *outside* the container, not
+`docker compose exec`, since loopback requests bypass Basic Auth (the spike's Surprise #8):
 
 ```bash
 curl -u "$KRATER_SKYPILOT_BASIC_AUTH_USER:$KRATER_SKYPILOT_BASIC_AUTH_PASSWORD" \
@@ -159,8 +176,27 @@ curl -u "$KRATER_SKYPILOT_BASIC_AUTH_USER:$KRATER_SKYPILOT_BASIC_AUTH_PASSWORD" 
   -d '{"token_name": "krater-admin"}'
 ```
 
-Copy the returned `token` (starts `sky_...`) into `.env`'s `KRATER_SKYPILOT_SERVICE_TOKEN`, then
-`docker compose --profile skypilot up -d portal worker` to pick it up.
+Copy the returned `token` (starts `sky_...`) into `.env`'s `KRATER_SKYPILOT_SERVICE_TOKEN`. New service accounts
+get `rbac.default_role` (`user`), and Krater's workspace calls then fail with `403 Forbidden`, so promote this one to
+`admin` using the `service_account_user_id` from the same response:
+
+```bash
+curl -u "$KRATER_SKYPILOT_BASIC_AUTH_USER:$KRATER_SKYPILOT_BASIC_AUTH_PASSWORD" \
+  -X POST http://localhost:46580/users/update \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id": "<service_account_user_id>", "role": "admin"}'
+```
+
+Then set `KRATER_SKYPILOT_ENABLE_BASIC_AUTH=false` in `.env`. While basic auth is on, SkyPilot checks it before
+asking `auth-proxy`, so every member request without basic credentials gets a `401` and Weave sign-in can't work.
+The service-account token keeps working without it. Restart everything that reads the changed settings:
+
+```bash
+docker compose --profile skypilot up -d skypilot portal worker
+```
+
+The `/pricing` page stays empty until the worker's daily refresh (07:00 UTC). To fill it now:
+`docker compose exec worker python -m krater.pricing.refresh_once`.
 
 ## 6. Test script
 
@@ -168,16 +204,19 @@ Copy the returned `token` (starts `sky_...`) into `.env`'s `KRATER_SKYPILOT_SERV
    proposal.
 2. **Approve it** (as an admin -- via `/admin` or the review flow). This should provision a private SkyPilot
    workspace named `ganymede-<project id>` and save it on the project.
-3. **Confirm the workspace appears:**
+3. **Confirm the workspace appears** (the reconciler runs every `KRATER_SKYPILOT_RECONCILE_INTERVAL_MINUTES`; run
+   it now with `docker compose exec worker python -m krater.skypilot.reconcile_once`):
    ```bash
-   curl -H "Authorization: Bearer $KRATER_SKYPILOT_SERVICE_TOKEN" \
-     -X POST http://localhost:46580/workspaces -d '{}' -H 'Content-Type: application/json'
-   # poll GET /api/get?request_id=... per docs/dev/skypilot-spike.md section 2 -- the workspace and
-   # your project's Weave email should be in the returned mapping.
+   docker compose exec worker python -c \
+     "from krater.skypilot import get_skypilot_client; print(get_skypilot_client().list_workspaces())"
+   # Or over REST: GET (not POST) /workspaces returns an X-Skypilot-Request-ID header; poll
+   # GET /api/get?request_id=... per docs/dev/skypilot-spike.md section 2 for the mapping, which should
+   # include your project's Weave email.
+   curl -i -H "Authorization: Bearer $KRATER_SKYPILOT_SERVICE_TOKEN" http://localhost:46580/workspaces
    ```
 4. **Sign in the `sky` CLI as a member:**
    ```bash
-   sky api login -e http://localhost:8080     # the auth-proxy port, not 46580 directly
+   sky api login -e http://localhost:46580     # the API server; it forwards /oauth2/* to auth-proxy
    ```
    This opens a browser to Weave sign-in (via oauth2-proxy). Use the same Weave account as your project's submitter.
 5. **Launch a tiny job** targeting your project's workspace explicitly (required -- see

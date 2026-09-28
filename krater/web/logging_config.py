@@ -35,10 +35,10 @@ _REQUEST_ID_HEADER = "X-Request-ID"
 
 #: `key=value` or `key: value` pairs whose value must never reach a log line: OAuth/API tokens, Slack's
 #: request signature, session cookies, and any of the various `*_key`/`*_secret` settings -- including
-#: ones the keyword only appears *inside* of, like `weave_service_key` or `s3_access_key_id`, which is why
+#: ones the keyword only appears *inside* of, like `weave_client_secret` or `s3_access_key_id`, which is why
 #: `name` greedily grabs the whole surrounding identifier rather than just the bare keyword. Matched
 #: case-insensitively; the value is redacted regardless of what it looks like. This is what keeps the
-#: SkyPilot policy URL's `?token=...` (and Slack's `X-Slack-Signature`, `Cookie`, Weave's service key,
+#: SkyPilot policy URL's `?token=...` (and Slack's `X-Slack-Signature`, `Cookie`, Weave's client secret,
 #: S3's access/secret keys, etc.) out of both application logs and uvicorn's access log.
 _SENSITIVE_KEY_PATTERN = re.compile(
     r"""

@@ -26,11 +26,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PROVISION_SCRIPT = Path(__file__).resolve().parent / "weave_e2e_provision.rb"
 
-#: Where the raw provisioning result (client id/secret, service key, user subs) is written.
+#: Where the raw provisioning result (client id/secret, user subs) is written.
 #: Read by tests/live/test_weave_live.py. Never commit this -- it's a live credential.
 FIXTURE_PATH = REPO_ROOT / ".weave_e2e_fixture.json"
 
-#: A ready-to-source env file with the KRATER_WEAVE_* settings that point Krater at that fixture.
+#: A ready-to-source env file with the KRATER_* settings that point Krater at that fixture.
 ENV_PATH = REPO_ROOT / ".env.weave-e2e"
 
 DEFAULT_KRATER_REDIRECT_URI = "http://localhost:8201/auth/callback"
@@ -75,8 +75,8 @@ def write_fixtures(data: dict, *, krater_base_url: str) -> None:
         f"KRATER_WEAVE_ISSUER={data['issuer']}",
         f"KRATER_WEAVE_CLIENT_ID={data['oauth_client_id']}",
         f"KRATER_WEAVE_CLIENT_SECRET={data['oauth_client_secret']}",
-        f"KRATER_WEAVE_API_BASE_URL={data['issuer']}",
-        f"KRATER_WEAVE_SERVICE_KEY={data['service_key']}",
+        # Roles live in Krater's database; this makes the fixture admin one at their first sign-in.
+        f"KRATER_BOOTSTRAP_ADMINS={data['users']['admin']['sub']}",
         "",
     ]
     ENV_PATH.write_text("\n".join(env_lines))

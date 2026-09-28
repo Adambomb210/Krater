@@ -15,8 +15,8 @@ from sqlalchemy.orm import Session
 
 from krater.config import get_settings
 from krater.db import get_session
-from krater.services.actor import GROUP_MEMBER
-from krater.services.users import upsert_user_from_identity
+from krater.services import roles
+from krater.services.users import StubSeed, sign_in
 from krater.weave import WeaveAuthError, WeaveClient, WeaveUnavailableError, get_weave_client
 from krater.weave.stub import StubWeaveClient
 from krater.web.csrf import verify_csrf_token
@@ -100,11 +100,29 @@ def auth_callback(
     except WeaveUnavailableError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Weave is unavailable") from exc
 
-    if GROUP_MEMBER not in identity.groups:
-        return templates.TemplateResponse(request, "auth/not_a_member.html", status_code=status.HTTP_403_FORBIDDEN)
+    settings = get_settings()
+    stub_seed = None
+    if settings.weave_mode == "stub" and isinstance(weave_client, StubWeaveClient):
+        fixture_user = weave_client.stub_user(identity.sub)
+        if fixture_user is not None:
+            stub_seed = StubSeed(groups=fixture_user.groups, slack_id=fixture_user.slack_id)
 
-    user = upsert_user_from_identity(db_session, identity)
+    result = sign_in(
+        db_session,
+        identity,
+        bootstrap_admins=roles.parse_bootstrap_admins(settings.bootstrap_admins),
+        stub_seed=stub_seed,
+    )
+    # Committed whatever the outcome, so a refused user shows up on the admin users page.
     db_session.commit()
+    if result.status != "ok":
+        # Also drops any earlier signed-in session in this browser: a refused sign-in leaves nobody signed in.
+        request.session.clear()
+    if result.status == "disabled":
+        return templates.TemplateResponse(request, "auth/disabled.html", status_code=status.HTTP_403_FORBIDDEN)
+    if result.status == "not_a_member":
+        return templates.TemplateResponse(request, "auth/not_a_member.html", status_code=status.HTTP_403_FORBIDDEN)
+    user = result.user
 
     # Session fixation: throw away everything the pre-login session held (state/nonce/verifier included)
     # before writing an authenticated identity into it.

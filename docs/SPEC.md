@@ -1,6 +1,7 @@
 # Krater — Project Ganymede Approval & Compute Allocation Portal
 
-Revised Sep 26, 2026. Supersedes the Sep 24 draft (drafted with @Adam).
+Revised Sep 26, 2026. Supersedes the Sep 24 draft (drafted with @Adam). Roles moved into Krater's database on Sep 28,
+2026 (maintainer decision; see "Roles & authentication").
 The previous draft was checked against the Weave codebase and the SkyPilot docs and source. This revision fixes the
 places where it assumed capabilities that don't exist. The integration details are in
 [weave-integration.md](weave-integration.md) and [skypilot-integration.md](skypilot-integration.md).
@@ -10,8 +11,8 @@ places where it assumed capabilities that don't exist. The integration details a
 | Area | Sep 24 draft | This revision | Why |
 | --- | --- | --- | --- |
 | Budget enforcement | Handed to "SkyPilot's internal budgeting" | **Krater enforces it**, using a SkyPilot admin policy and a spend reconciler | SkyPilot has no dollar budgets, only per-instance `max_hourly_cost` and estimated `cost-report` |
-| Reviewer role | "A claim Krater reads from Weave" | Same, but it needs **new Weave work**: a `groups` claim, a `slack_id` claim, and a user directory API | Weave's claims today are only name, username, email, phone and `admin` |
-| Slack membership | "Weave users are already Slack members" | **Only full Slack members can submit** (checked by Krater for now) | Weave signup is open, new users are single-channel guests, and some never join Slack ([weave#118](https://github.com/patchworklabsorg/weave/issues/118)) |
+| Reviewer role | "A claim Krater reads from Weave" | **Krater keeps roles in its own database**, managed by Ganymede admins; Weave is used for sign-in only | Weave's claims are only name, username, email, phone and `admin`, and the Weave work to add groups was never merged |
+| Slack membership | "Weave users are already Slack members" | **Only full Slack members can submit**, checked with Slack itself | Weave signup is open, new users are single-channel guests, and some never join Slack |
 | Reviews | Attached to the project | Attached to a **project revision** | Otherwise approvals of an old version count toward a resubmitted one |
 | Amendments | Approved → back through review | Approved project **stays approved** while an amendment revision is reviewed | Otherwise compute is cut off during review |
 | Budget | `budget_approved` column + `BudgetReclaim` table | **Append-only budget ledger** | One place for the ceiling and for the audit trail |
@@ -57,35 +58,66 @@ Three roles:
 
 A "logged in but can't submit" tier and a public/anonymous tier are still deferred. The gallery itself is public.
 
-**Authentication** is OIDC against Weave (Authorization Code + PKCE; Weave enforces PKCE). All Weave access goes through
-one adapter module (`WeaveClient`) so Weave changes don't spread through the app. The contract, including the Weave work
-it depends on, is in [weave-integration.md](weave-integration.md).
+**Authentication** is OIDC against Weave (Authorization Code + PKCE; Weave enforces PKCE), with the standard
+`openid profile email` scopes that Weave's `main` branch supports. All Weave access goes through one adapter module
+(`WeaveClient`) so Weave changes don't spread through the app. The contract is in
+[weave-integration.md](weave-integration.md).
 
-**Role data lives in Weave.** Krater reads membership and roles from a `groups` claim at login, and from Weave's directory
-API when it needs fresh data (Slack button clicks, inviting reviewers). It never stores a role as its own source of truth.
-Proposed groups: `ganymede:member`, `ganymede:reviewer`, `ganymede:admin`, and later `ganymede:reviewer:<tier>`.
+**Role data lives in Krater's database** (maintainer decision, Sep 28, 2026; it replaces the earlier rule that roles
+come only from Weave groups, since the Weave work for a `groups` claim and directory API was never merged). Weave only
+says who someone is; Krater decides what they may do:
 
-**Slack membership gate (interim).** Signing in through Weave doesn't guarantee Slack membership. Weave signup is open,
-new users join Slack as single-channel guests until they accept the code of conduct, and Slack won't add guests to
-another channel. So until [weave#118](https://github.com/patchworklabsorg/weave/issues/118) lands:
+- Roles are rows in `user_roles`: `ganymede:member`, `ganymede:reviewer`, `ganymede:admin` (the same names they had as
+  Weave groups, so review snapshots and approval policies read the same), and later `ganymede:reviewer:<tier>`.
+- Ganymede admins grant and revoke roles at `/admin/users`. For someone who hasn't signed in yet, an admin grants by
+  email: the grant waits in `pending_role_grants` and is applied at that person's next sign-in, **only if Weave says
+  the email is verified**, then deleted.
+- A fresh deployment gets its first admin from `KRATER_BOOTSTRAP_ADMINS` (Weave subs, or emails that only match when
+  verified): at sign-in a match gets `ganymede:admin` and `ganymede:member` if missing.
+- Admins can **disable** an account (with a reason). A disabled user can't sign in, and every authorization check
+  refuses them. This is Krater's own switch: Weave's account lock no longer reaches Krater.
+- Guard rails: an admin can't remove the last admin who can still act, can't disable themselves, and can't remove their
+  own admin or member role.
+- Every grant, revoke, pending grant (and its application or cancellation), disable, enable and Slack-link change
+  writes an `AuditEvent`.
+- **Authorization always reads the database fresh**: web actions through `fresh_actor`, Slack clicks through the same
+  `roles.authorize`. Nothing role-related is cached in the session or asked of Weave.
+- Sign-in refuses a disabled user, and anyone without `ganymede:member` ("ask a Ganymede admin to add you"). Their user
+  row is kept either way, so admins can find them.
 
-- On draft → submit, Krater looks the user up in Slack (`users.lookupByEmail` with the email claim), or by `slack_id`
-  once Weave exposes it.
-- The user must exist, and not be deleted, `is_restricted`, or `is_ultra_restricted`.
+**Slack membership gate.** Signing in through Weave doesn't guarantee Slack membership. Weave signup is open, new users
+join Slack as single-channel guests until they accept the code of conduct, and Slack won't add guests to another
+channel. Krater asks Slack directly:
+
+- On draft → submit, Krater finds the user's Slack account: the stored `users.slack_user_id`, else Slack
+  `users.lookupByEmail` with the user's email, **only if Weave said it's verified** (the id found is cached). Then
+  `users.info`: the account must exist and not be deleted, `is_restricted` or `is_ultra_restricted`. No Slack account
+  means the check fails.
+- An admin can set someone's Slack user id by hand, for someone whose Slack email differs from their Weave one.
+- If Slack can't be reached, the submission fails with an error rather than guessing either way.
 - If the check fails, the user can still save drafts but sees "Join the Patchwork Labs Slack and accept the code of
-  conduct to submit", with a link to Weave.
-- The check runs again right before channel creation, so a submission never fails halfway through.
-
-Known limitation: Weave users can have several email addresses, and the email claim is the primary one. If someone's
-Slack account uses a different address, the lookup misses them until the `slack_id` claim exists.
+  conduct to submit", with a link to Weave and a note to ask an admin to link a Slack account with a different email.
+- Channel invites resolve the submitter, credited builders and reviewers the same way (stored id, else lookup by
+  verified email, cached). Disabled users are left out. Krater doesn't pre-filter guests: invites use Slack's `force`
+  flag, and anyone Slack refuses (a guest, a deactivated or stale id) is skipped and logged, so one person's Slack
+  account never stops the channel, the rest of the team's invites or the review message.
 
 ## Data model
 
 Postgres. All money is stored as **integer cents** (`*_cents`). Names are suggestions; refine during implementation.
 
-**User** (a cache of the Weave identity; no role data)
-- `id`, `weave_sub` (Weave's `p_id`, e.g. `PWL5A1B2C3D4`; unique), `display_name`, `email`, `slack_user_id`
-  (nullable), `groups_cached` (last-seen claim; for display only, never for authorization), `last_login_at`
+**User** (the Weave identity from sign-in, plus Krater's own account state)
+- `id`, `weave_sub` (Weave's `p_id`, e.g. `PWL5A1B2C3D4`; unique), `display_name`, `email`, `email_verified` (as
+  Weave said at the latest sign-in), `slack_user_id` (nullable, unique), `last_login_at`, `disabled_at` (nullable; set
+  by an admin)
+
+**UserRole** (a role a user holds; the source of truth for authorization)
+- `id`, `user_id`, `role` (`ganymede:member` | `ganymede:reviewer` | `ganymede:admin`), `granted_by_id` (nullable:
+  null for bootstrap and migrated grants), `created_at`; unique `(user_id, role)`
+
+**PendingRoleGrant** (a role waiting for someone who hasn't signed in yet)
+- `id`, `email` (lowercased), `role`, `granted_by_id`, `created_at`; unique `(email, role)`. Applied at sign-in only
+  for a verified email, then deleted.
 
 **Project**
 - `id`, `title`, `submitter_id`, `status`, `current_revision_id`, `approved_revision_id`, `repo_url`,
@@ -123,7 +155,8 @@ Postgres. All money is stored as **integer cents** (`*_cents`). Names are sugges
 
 **AuditEvent**
 - `id`, `actor_id`, `action` (e.g. `admin_approve`, `admin_reject`, `budget_adjust`, `policy_change`,
-  `launch_blocked`, `teardown`), `project_id`, `payload` (jsonb), `reason`, `created_at`
+  `launch_blocked`, `teardown`, `role_grant`, `role_revoke`, `pending_role_grant`, `pending_role_apply`,
+  `user_disable`, `user_enable`), `project_id`, `payload` (jsonb), `reason`, `created_at`
 
 **GalleryEntry:** a view over `completed` projects plus their approved completion revision. It isn't a separate table.
 
@@ -132,12 +165,13 @@ Postgres. All money is stored as **integer cents** (`*_cents`). Names are sugges
 1. **Draft.** The submitter fills in a title, requested budget and write-up (repo link optional). They can save and come
    back later.
 2. **Submit.** Krater runs the Slack membership check, freezes the draft into revision N, sets `pending_review`, creates
-   the project's private Slack channel if it doesn't exist yet, invites the submitter and all current reviewers (from
-   Weave's directory API), posts the review message with Approve/Reject buttons, and posts a line in the master feed
-   channel.
+   the project's private Slack channel if it doesn't exist yet, invites the submitter and all current reviewers
+   (everyone holding `ganymede:reviewer` in Krater who isn't disabled), posts the review message with Approve/Reject
+   buttons, and posts a line in the master feed channel.
 3. **Review.** Reviewers discuss freely in the channel. Decisions come in through the buttons, or through the web UI as a
    fallback. For every decision, Krater:
-   - checks with Weave's directory API that the clicker is a reviewer right now (not from a cached claim);
+   - finds the clicker in Krater (by stored Slack id, else by the verified email on their Slack profile) and checks
+     their roles and disabled flag in Krater's database right now (not from anything cached);
    - rejects self-review (submitter or credited builder);
    - records the Review against the current revision;
    - asks `ApprovalPolicyService` whether the policy is now satisfied.
@@ -164,8 +198,8 @@ Slack is where review happens, not just where notifications go. Krater gets **it
 uses the one interactivity URL a Slack app can have, for code-of-conduct acceptance.
 
 **Per-project private channel:** created on first submission and reused for amendments and the completion review.
-Members are the submitter, credited builders (once added), and all reviewers. When a reviewer is added in Weave, they
-get invited to open project channels by a periodic job, or by a Weave webhook once those actually fire. The channel is
+Members are the submitter, credited builders (once added), and all reviewers. When an admin makes someone a reviewer,
+they get invited to open project channels by a periodic job. The channel is
 archived when the project ends up `completed` or `withdrawn`.
 
 **Master feed channel:** one top-level post per new submission, for visibility across Ganymede. It carries no decisions.
@@ -174,14 +208,16 @@ archived when the project ends up `completed` or `withdrawn`.
 mirrored into Krater in v1; the project page links to the channel instead.
 
 **App requirements**
-- Bot scopes: `groups:write`, `groups:write.invites`, `chat:write`, `users:read`, `users:read.email` (for the interim
-  membership check).
+- Bot scopes: `groups:write`, `groups:write.invites`, `chat:write`, `users:read`, `users:read.email` (the membership
+  gate and channel invites find people's Slack accounts by verified email, and Slack clicks from an unlinked account
+  are matched by the email on the Slack profile).
 - An HTTPS interactivity endpoint on the portal, reachable by Slack.
 - Slack signature verification (`X-Slack-Signature` with the signing secret, and a check on how old the timestamp is).
   Weave's `SlackSignatureVerification` concern is a working reference.
 - Slack must get an acknowledgement within 3s. Do the real work in the worker, then update the message.
 - Invites and posts must be safe to retry: `already_in_channel` counts as success, and failures are retried from the
-  worker.
+  worker. Invites use `force`: without it Slack invites nobody if any one invitee fails, including people who are
+  already in the channel.
 
 **Not needed:** a separate completion announcement. The gallery is enough (revisit later).
 
@@ -253,14 +289,15 @@ Networking:
    MinIO was ruled out because its community edition stopped publishing images in 2025. Still to pick a long-term
    provider (e.g. R2/B2/S3, or keep SeaweedFS with backups). A reminder is set to circle back.
 2. **How members use SkyPilot:** decided. One private SkyPilot workspace per project, and members sign in to SkyPilot
-   with Weave (oauth2-proxy, limited to `ganymede:member`). See
+   with Weave (oauth2-proxy). Weave has no `groups` claim, so the proxy can't limit sign-in to members; private
+   workspaces and the launch gate do the limiting. See
    [skypilot-integration.md §0](skypilot-integration.md#0-member-access-one-workspace-per-project-sign-in-with-weave).
    Still to confirm in the spike: the full flow on Docker Compose.
 3. **What happens at the ceiling.** Proposed: warn at 80%, block new launches and tear down at 100%, with no grace
    period. Consider a small admin-configurable grace so a running training job isn't killed at 100.1%.
-4. **Weave changes.** The `groups` claim, `slack_id` claim and directory endpoints are implemented on Weave branch
-   `Krater-Integration` (not merged yet). The Slack membership gate is tracked in
-   [weave#118](https://github.com/patchworklabsorg/weave/issues/118).
+4. **Weave changes.** None needed: Krater runs against Weave's `main` branch with plain OIDC. Weave's own sign-in and
+   security fixes (the handoff's `WEAVE-BUG-REPORT.md`) are still worth merging; see
+   [weave-integration.md](weave-integration.md#no-longer-needed).
 
 ## Parked / future work
 

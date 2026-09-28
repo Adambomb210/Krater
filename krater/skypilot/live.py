@@ -17,16 +17,22 @@ both shapes uniformly.
 from __future__ import annotations
 
 import ast
+import contextlib
 import csv
 import io
 import json
+import re
 import time
 from typing import Any
 
 import httpx
 
 from krater.config import Settings
-from krater.skypilot.errors import SkyPilotRequestFailedError, SkyPilotUnavailableError
+from krater.skypilot.errors import (
+    SkyPilotRequestFailedError,
+    SkyPilotUnavailableError,
+    SkyPilotWorkspaceNotFoundError,
+)
 from krater.skypilot.types import ClusterInfo, CostReportRow, GpuOffer, ManagedJobInfo, ServiceInfo
 
 #: How long to keep polling a request id before giving up and treating SkyPilot as unavailable.
@@ -60,10 +66,26 @@ _NO_JOBS_CONTROLLER_MARKERS = ("ClusterNotUpError", "No in-progress managed jobs
 #: The Serve equivalent: `/serve/status`/`/serve/down` raise the same `ClusterNotUpError` (via
 #: `backend_utils.is_controller_accessible`) when no service has ever been launched in a workspace, so
 #: its own controller cluster doesn't exist yet -- the common case for almost every Ganymede workspace
-#: (most projects never run `sky serve up`). Only the shared marker is checked here (not a
-#: jobs-specific message), since the serve controller's own "non-existent" hint text varies by service
-#: type (`sky.serve` vs. a jobs pool) and isn't worth pinning down further than the exception itself.
-_NO_SERVE_CONTROLLER_MARKERS = ("ClusterNotUpError",)
+#: (most projects never run `sky serve up`). Confirmed live against a real 0.13.0 server with internet
+#: access: the message is "No live services.", so this is matched on the exception's type
+#: (`SkyPilotRequestFailedError.error_type`), not its text; the controller's hint text varies by
+#: service type (`sky.serve` vs. a jobs pool) and isn't worth pinning down.
+_NO_SERVE_CONTROLLER_ERROR_TYPE = "ClusterNotUpError"
+
+
+#: Confirmed live against a real 0.13.0 server: every call scoped to a workspace that doesn't exist
+#: (`/status`, `/jobs/queue`, `/jobs/cancel` and `/serve/status` via `override_skypilot_config`, and
+#: `/workspaces/delete`) is a 500-wrapped FAILED poll whose error `type` is a bare `ValueError`, too
+#: generic to match on alone, so the message has to match too. Two phrasings: "Workspace <name> does not
+#: exist. Use `sky check` ..." and, from `/workspaces/delete`, "Workspace '<name>' does not exist.".
+_WORKSPACE_NOT_FOUND_ERROR_TYPE = "ValueError"
+_WORKSPACE_NOT_FOUND_MESSAGE = re.compile(r"^Workspace '?[^'\s]+'? does not exist\.")
+
+
+def _is_workspace_not_found(message: str, error_type: str | None) -> bool:
+    if error_type not in (None, _WORKSPACE_NOT_FOUND_ERROR_TYPE):
+        return False
+    return _WORKSPACE_NOT_FOUND_MESSAGE.match(message) is not None
 
 
 def _is_no_jobs_controller_error(exc: SkyPilotRequestFailedError) -> bool:
@@ -72,8 +94,7 @@ def _is_no_jobs_controller_error(exc: SkyPilotRequestFailedError) -> bool:
 
 
 def _is_no_serve_controller_error(exc: SkyPilotRequestFailedError) -> bool:
-    message = str(exc)
-    return any(marker in message for marker in _NO_SERVE_CONTROLLER_MARKERS)
+    return exc.error_type == _NO_SERVE_CONTROLLER_ERROR_TYPE or _NO_SERVE_CONTROLLER_ERROR_TYPE in str(exc)
 
 
 def _decode_return_value(raw: Any) -> Any:
@@ -215,6 +236,9 @@ class LiveSkyPilotClient:
         )
 
     def update_workspace(self, name: str, *, allowed_users: list[str]) -> None:
+        # Confirmed live against a real 0.13.0 server: updating a workspace that doesn't exist silently
+        # creates it with this config, so an active project whose workspace was deleted out of band gets
+        # it back on the next `sync_workspaces`.
         self._post_async(
             "/workspaces/update", {"workspace_name": name, "config": self._vast_only_config(allowed_users)}
         )
@@ -226,13 +250,10 @@ class LiveSkyPilotClient:
         # "safe to call on a workspace that's already gone" (`sync_workspaces` leans on that for a
         # reconcile pass that crashes between deleting a workspace and clearing
         # `Project.skypilot_workspace`, which would otherwise retry this same delete, and fail closed
-        # on it, forever), so swallow exactly that one message here instead of every caller re-deriving
+        # on it, forever), so swallow exactly that one error here instead of every caller re-deriving
         # it.
-        try:
+        with contextlib.suppress(SkyPilotWorkspaceNotFoundError):
             self._post_async("/workspaces/delete", {"workspace_name": name})
-        except SkyPilotRequestFailedError as exc:
-            if "does not exist" not in str(exc):
-                raise
 
     def list_workspaces(self) -> list[str]:
         result = self._get_async("/workspaces") or {}
@@ -404,7 +425,11 @@ class LiveSkyPilotClient:
             if status == "SUCCEEDED":
                 return _decode_return_value(data.get("return_value"))
             if status == "FAILED":
-                raise SkyPilotRequestFailedError(self._poll_failure_message(data))
+                message = self._poll_failure_message(data)
+                error_type = self._poll_failure_type(data)
+                if _is_workspace_not_found(message, error_type):
+                    raise SkyPilotWorkspaceNotFoundError(message, error_type=error_type)
+                raise SkyPilotRequestFailedError(message, error_type=error_type)
             if time.monotonic() >= deadline:
                 raise SkyPilotUnavailableError(
                     f"SkyPilot request {request_id} did not complete within {self._poll_timeout_seconds}s "
@@ -454,6 +479,17 @@ class LiveSkyPilotClient:
                 return str(parsed.get("message") or parsed.get("type") or error)
             return error
         return str(error or "SkyPilot request failed")
+
+    @staticmethod
+    def _poll_failure_type(data: dict[str, Any]) -> str | None:
+        """The server-side exception's class name from a FAILED polled request's `error`, if present."""
+        error = data.get("error")
+        try:
+            parsed = json.loads(error) if isinstance(error, str) else None
+        except ValueError:
+            return None
+        error_type = parsed.get("type") if isinstance(parsed, dict) else None
+        return error_type if isinstance(error_type, str) else None
 
     @staticmethod
     def _raise_for_status(response: httpx.Response) -> None:

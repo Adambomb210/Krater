@@ -15,11 +15,23 @@ enforced on SkyPilot/Vast.ai, Slack-based review, a public gallery and a GPU pri
 | Repo | Where | Branch | State |
 | --- | --- | --- | --- |
 | **Krater** | https://github.com/Adambomb210/Krater | `claude/exciting-sagan-7oh2zh` | **Draft PR [#1](https://github.com/Adambomb210/Krater/pull/1)**, CI green, 511 tests |
-| **Weave** (identity provider) | https://github.com/patchworklabsorg/weave | **not on GitHub**: 3 local commits (patches below) | Needs someone with push access |
+| **Weave** (identity provider) | https://github.com/patchworklabsorg/weave | `main` works as is | Krater needs only plain OIDC; recommended sign-in and security fixes are local patches (section 3) |
 
 `main` in Krater is only the initial commit. All the work is on the PR branch.
 
 ## 2. Clone and run Krater locally
+
+### One command
+
+With [uv](https://docs.astral.sh/uv/) installed and Docker running, `scripts/dev/setup.ps1` (Windows) or
+`scripts/dev/setup.sh` (macOS, Linux, WSL, Git Bash) runs steps 2 and 3 below and migrates `krater_dev`. It's safe to
+re-run. Add `-Check` / `--check` to also run step 4.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\dev\setup.ps1 -Check
+```
+
+The manual steps follow.
 
 ### Windows (PowerShell) with Docker Desktop
 
@@ -50,41 +62,47 @@ uv run uvicorn krater.web.app:create_app --factory --reload
 - **Don't create a `.env` in the repo root while running tests.** pydantic-settings auto-loads it, and live settings
   leak into the test suite. Use a separately named file and load it into your shell.
 - Background worker (optional locally): `uv run procrastinate --app=krater.worker.app.app worker`.
-- **Full stack in Docker:** copy `.env.example` to `.env`, then run `docker compose up --build`. Add
-  `--profile skypilot` for the SkyPilot server and sign-in proxy. See `docs/dev/staging.md`.
+- **Full stack in Docker:** copy `.env.example` to an env file outside the repo, then run
+  `docker compose --env-file <that file> up --build` with `KRATER_ENV_FILE` set to the same path (a repo-root `.env`
+  works too, but leaks into pytest). Add `--profile skypilot` for the SkyPilot server and sign-in proxy. See
+  `docs/dev/staging.md` section 4.
 
 ### macOS / Linux / WSL
 The same steps with bash syntax (install uv with `curl -LsSf https://astral.sh/uv/install.sh | sh`).
 
-## 3. Apply the Weave changes (not on GitHub)
+## 3. Weave: Krater runs against Weave `main`
 
-Krater depends on three Weave commits: the `groups` / `slack_id` claims, the `/api/v1/users` directory API, and two
-browser sign-in fixes. They're in the handoff zip as `weave-patches/0001…0003`.
+**Decision (maintainer, 2026-09-28): Krater needs only plain OIDC sign-in from Weave**, as Weave's `main` branch
+already provides it (`openid profile email`: `sub`, `name`, `email`, `email_verified`). Roles, the disabled switch and
+Slack links live in Krater's own database; see `docs/weave-integration.md` and `docs/SPEC.md` "Roles &
+authentication". Nothing from the old `Krater-Integration` branch is required any more:
 
-**If you already applied `0001` on your `Krater-Integration` branch** (you did, from the earlier patch), apply
-only the other two:
+- Patch `0001` (the `groups` / `slack_id` claims and the `/api/v1/users` directory API) and the uncommitted
+  weave#118 `slack_membership` work are **no longer needed** by Krater. Krater doesn't ask for those scopes and has no
+  service key.
+- Patches **`0002`/`0003` are still recommended**: they fix two browser CSP bugs that break OAuth sign-in for
+  returning users in Chrome and Safari, for any external client, Krater included.
+- The **security fixes** in `krater-handoff/weave-patches/WEAVE-BUG-REPORT.md` are worth merging for Weave's own
+  sake: an account takeover through unsigned Slack events (critical), owner takeover from the admin panel, locked
+  users still signing in to OAuth apps with working tokens, and `/admin` engines reachable after sign-out. Until the
+  lockout fix lands, use Krater's own **disable** (`/admin/users`) to shut someone out of Krater; until the
+  Slack-events fix lands, prefer Weave subs over emails in `KRATER_BOOTSTRAP_ADMINS`.
 
-```powershell
-cd C:\Projects\Weave\weave
-git checkout Krater-Integration
-git am "C:\path\to\krater-handoff\weave-patches\0002-*.patch" "C:\path\to\krater-handoff\weave-patches\0003-*.patch"
-```
+**Both are on the Weave branch
+[`fix/security-hardening`](https://github.com/patchworklabsorg/weave/tree/fix/security-hardening)** (pushed
+2026-09-28; no PR opened yet): `0002` and `0003`, then one commit per security fix, all on `origin/main` 54f702a. Open
+a PR from it to merge. The patch files are the same changes. Weave's test suites run on Windows without Ruby via
+`E:\Projects\Krater\weave-testenv\run.sh` (Docker; e.g. `WEAVE_REPO=E:/Projects/Krater/weave-branch ./run.sh bundle
+exec rspec`).
 
-**From a fresh Weave clone**, apply all three:
-
-```powershell
-git clone https://github.com/patchworklabsorg/weave.git; cd weave
-git checkout -b Krater-Integration origin/main
-git am C:\path\to\krater-handoff\weave-patches\*.patch
-```
-
-Then push `Krater-Integration` and open a Weave PR. That needs push access to `patchworklabsorg/weave`; the Claude
-GitHub App isn't installed there. `0002` first widened a CSP rule globally, and `0003` narrows it again. Apply both.
+**First admin on a real deployment:** set `KRATER_BOOTSTRAP_ADMINS` to your Weave sub (e.g. `PWL5A1B2C3D4`) and sign
+in; grant everyone else's roles at `/admin/users` (by email for people who haven't signed in yet).
 
 ## 4. What's done and verified
 
 - **v1 features:**
-  - Weave OIDC sign-in, with live role checks;
+  - Weave OIDC sign-in (plain OIDC, against Weave `main`), with roles kept in Krater's database and checked fresh
+    on every action; an `/admin/users` page for roles, grants by email, disabling accounts and Slack links;
   - the proposal → review → approval workflow, amendments, and completion review;
   - the configurable approval policy and the append-only budget ledger;
   - SkyPilot: the launch gate and the reconcile job (workspaces, spend, 80% warning, 100% teardown);
@@ -95,20 +113,40 @@ GitHub App isn't installed there. `0002` first widened a CSP rule globally, and 
 - **Verified here:** 511 tests pass, CI is green, and pip-audit is clean. A security review found 7 issues and
   all are fixed. Live tests ran against a real Weave, a real SkyPilot 0.13.0 server (`scripts/dev/skypilot_contract.sh`)
   and a real SeaweedFS. Details are in the PR description and `docs/dev/*.md`.
-- **Not verified yet** (steps 1–10 of `docs/dev/staging.md` cover all of it):
-  - the Docker Compose stack actually running;
-  - a real oauth2-proxy sign-in;
+- **Docker Compose stack: verified** on the maintainer's Windows machine (Docker Desktop; stub Weave, fake Slack,
+  empty Vast key): migrations, portal, worker jobs, stub sign-in, SeaweedFS screenshot upload and gallery, and
+  `--profile skypilot` (service-token bootstrap, live reconcile creating workspaces, and a `sky launch --dryrun`
+  through both launch-gate hops). Eight bugs were fixed on the way, among them: the SkyPilot container never
+  started and instead printed every secret to its log; SkyPilot and oauth2-proxy were handed all of Krater's
+  secrets; basic auth could never work and, once on, blocked member sign-in; the server-side launch-gate call
+  pointed at the SkyPilot container itself; restarting the container wiped every project workspace; and the
+  image baked in the host's `.venv`. Details in `docs/dev/staging.md`.
+- **Not verified yet** (`docs/dev/staging.md` covers all of it):
+  - a real Weave sign-in through the Dockerized portal (check Weave's discovery `issuer` matches
+    `KRATER_WEAVE_ISSUER`, e.g. `host.docker.internal` vs `localhost`);
+  - a full oauth2-proxy / `sky api login` round trip, and `host.docker.internal` from WSL2;
   - a real Vast launch, and billing drift;
   - spot machines and their recovery;
-  - the serve-status "no services" path;
-  - real Slack.
+  - real Slack (including the invite changes in section 6).
+- **SkyPilot contract CI.** `.github/workflows/skypilot-contract.yml` runs `scripts/dev/skypilot_contract.sh` (a real
+  SkyPilot API server, a real Krater process, and a `sky launch --dryrun` walk through the launch gate) nightly, on
+  pushes touching the SkyPilot integration or its pin, and manually (Actions, "SkyPilot contract", "Run workflow").
+  The SkyPilot version is pinned only in `scripts/dev/skypilot-requirements.txt`: to upgrade, bump it and the
+  `berkeleyskypilot/skypilot` tag in `docker-compose.yml` together (CI fails if they differ). Not run on GitHub yet;
+  verified in a Linux container that mimics it. Running it with internet found and fixed two reconciler bugs:
+  finished projects' workspaces were never deleted (SkyPilot's "No live services." `ClusterNotUpError` wasn't
+  recognized), and one finished project whose workspace had vanished blocked every project's provisioning. The
+  reconciler now isolates failures per project and records an already-vanished workspace as torn down.
 
 ## 5. Decisions and standing instructions (don't re-litigate)
 
 - **PR #1 stays a draft until the maintainer explicitly approves marking it ready.**
 - Don't push to branches other than `claude/exciting-sagan-7oh2zh` without permission.
 - **Stack:** Python 3.12 / FastAPI / SQLAlchemy 2 / Alembic / Postgres / procrastinate (no Redis). See `CLAUDE.md`
-  for conventions: services own the rules, money is integer cents, roles come only from Weave groups.
+  for conventions: services own the rules, money is integer cents, roles live in Krater's database.
+- **Roles live in Krater, Weave is sign-in only** (maintainer decision, 2026-09-28; this **replaces** the earlier
+  standing rule "roles come only from Weave groups"). Krater must work against Weave's `main` branch: scopes
+  `openid profile email`, no `groups`/`slack_id`/`slack_membership` claims, no directory API, no service key.
 - **SkyPilot is pinned to 0.13.0.** Krater talks to it over plain REST, with no `skypilot` package dependency
   (it's 453 MB and conflicts with Krater's dependencies). One private, Vast-only workspace per project; members
   sign in to SkyPilot with Weave via oauth2-proxy.
@@ -123,22 +161,22 @@ GitHub App isn't installed there. `0002` first widened a CSP rule globally, and 
 ## 6. What to do next
 
 **The maintainer:**
-1. Do the staging run (`docs/dev/staging.md`) and bring any failures back to a session to fix on the PR.
-2. Get the Weave commits pushed and reviewed (section 3).
+1. Do the staging run (`docs/dev/staging.md`) against Weave `main` (or the `fix/security-hardening` branch), with your
+   Weave sub in `KRATER_BOOTSTRAP_ADMINS`, and bring any failures back to a session to fix on the PR.
+2. Open and merge a Weave PR from `fix/security-hardening` (section 3); Krater doesn't depend on it, but Weave needs it.
 3. Create Krater's Slack app (`docs/dev/slack-setup.md`).
 4. Pick a long-term screenshot storage provider.
 5. Approve PR #1 out of draft when ready.
 
 **A Claude session, in suggested order:**
-1. **Local dev setup script.** Make first-time setup one command, e.g. a `scripts/dev/setup` that starts the
-   Postgres container, creates the databases and runs `uv sync`, for Windows and bash.
-2. **Weave follow-ups** (in the Weave repo):
-   - locked/suspended users can still sign in to OAuth apps. Fix `resource_owner_authenticator` in
-     `config/initializers/doorkeeper.rb` to use the same checks as `ApplicationController#load_authenticated_user`,
-     and revoke Doorkeeper tokens on lock or suspend;
-   - weave#118: a Slack-membership claim. Then Krater can drop its email-based Slack check
-     (`krater/services/slack_membership.py`).
-3. **A CI job for the SkyPilot contract test**, run nightly and on SkyPilot upgrades.
+1. ~~**Local dev setup script.**~~ Done: `scripts/dev/setup.ps1` and `scripts/dev/setup.sh` (section 2).
+2. ~~**Weave follow-ups**~~ Superseded: Krater now runs against Weave `main` (section 3). Roles, disabling and Slack
+   links moved into Krater's database (`krater/services/roles.py`, `/admin/users`); the Slack membership gate
+   (`krater/services/slack_membership.py`) asks Slack directly (stored Slack id, else `users.lookupByEmail` with the
+   verified email). Channel invites (`krater/services/slack_notify.py`) resolve people the same way and still invite
+   with Slack's `force` flag: without it, Slack invited nobody whenever any one invitee failed, including people
+   already in the channel. (Found from Slack's documented behavior; not yet seen against real Slack.)
+3. ~~**A CI job for the SkyPilot contract test**~~ Done (section 4).
 4. The remaining items in `docs/FUTURE.md`.
 
 ## 7. Gotchas learned the hard way
@@ -157,6 +195,10 @@ GitHub App isn't installed there. `0002` first widened a CSP rule globally, and 
   so curl-based tests miss breakage.
 - **Earlier patch files are now obsolete.** `secfix-wip.patch` and `weave-krater-integration-fixes.patch` are
   superseded: the security fixes are merged on the PR branch, and the Weave fixes are patches `0002`/`0003` here.
+  Patch `0001` and the `0004` diff (groups, directory API, `slack_membership`) are no longer needed by Krater.
+- **CI is Linux-only, so Windows breakage slips through.** `strftime("%-d")` is glibc-only and raises
+  `ValueError: Invalid format string` on Windows (it broke 13 tests there); use `.day` instead. Shell scripts must
+  stay LF (`.gitattributes` enforces it) or WSL bash rejects them.
 
 ## 8. Prompt to start a fresh local Claude Code session
 

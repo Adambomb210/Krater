@@ -1,4 +1,4 @@
-"""`krater.weave`: the only place that talks to Weave.
+"""`krater.weave`: the only place that talks to Weave. Krater uses Weave for OIDC sign-in only.
 
 Nothing outside this package should import `httpx` for Weave or know its URLs, scopes or claim shapes --
 go through `WeaveClient` (via `get_weave_client`, a FastAPI dependency that tests can override). See
@@ -14,7 +14,7 @@ from krater.weave.client import WeaveClient
 from krater.weave.errors import WeaveAuthError, WeaveError, WeaveUnavailableError
 from krater.weave.live import LiveWeaveClient
 from krater.weave.stub import StubWeaveClient
-from krater.weave.types import WeaveIdentity, WeaveUser
+from krater.weave.types import WeaveIdentity
 
 __all__ = [
     "LiveWeaveClient",
@@ -24,7 +24,6 @@ __all__ = [
     "WeaveError",
     "WeaveIdentity",
     "WeaveUnavailableError",
-    "WeaveUser",
     "get_weave_client",
 ]
 

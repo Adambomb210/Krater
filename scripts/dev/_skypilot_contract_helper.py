@@ -11,6 +11,7 @@ Usage:
     _skypilot_contract_helper.py set-overbudget <project_id>
     _skypilot_contract_helper.py clear-spend <project_id>
     _skypilot_contract_helper.py withdraw-project <project_id>
+    _skypilot_contract_helper.py workspace <project_id>   (prints its SkyPilot workspace; empty once torn down)
 """
 
 from __future__ import annotations
@@ -112,6 +113,17 @@ def withdraw_project(project_id: str) -> None:
         session.close()
 
 
+def print_workspace(project_id: str) -> None:
+    session = get_sessionmaker()()
+    try:
+        project = session.get(Project, uuid.UUID(project_id))
+        if project is None:
+            raise SystemExit(f"no such project: {project_id}")
+        print(project.skypilot_workspace or "")
+    finally:
+        session.close()
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         raise SystemExit(__doc__)
@@ -124,6 +136,8 @@ def main() -> None:
         clear_spend(args[0])
     elif command == "withdraw-project":
         withdraw_project(args[0])
+    elif command == "workspace":
+        print_workspace(args[0])
     else:
         raise SystemExit(f"unknown command: {command}\n\n{__doc__}")
 

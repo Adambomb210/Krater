@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from krater.db import get_session
 from krater.models import User
 from krater.services import projects as project_service
-from krater.services.actor import Actor
+from krater.services import roles
 from krater.web.deps import current_user
 from krater.web.templates import templates
 
@@ -29,8 +29,8 @@ def home(
         return templates.TemplateResponse(request, "home.html", {"signed_in": False})
 
     # Display/navigation only (which links to show, and a rough count) -- every action those links
-    # lead to re-checks live Weave groups via `fresh_actor` before it does anything.
-    actor = Actor(user=user, groups=frozenset(user.groups_cached))
+    # lead to re-checks roles and the disabled flag via `fresh_actor` before it does anything.
+    actor = roles.actor_for(db_session, user)
     my_projects = project_service.list_projects_for_user(db_session, user_id=user.id)
     review_queue_count = len(project_service.review_queue(db_session, actor)) if actor.is_reviewer else 0
 

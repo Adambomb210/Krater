@@ -15,8 +15,12 @@ that setup). Read `docs/SPEC.md` "Slack integration" first; this doc is just the
    - `groups:write` -- create/archive private channels
    - `groups:write.invites` -- invite the submitter, credited builders and reviewers
    - `chat:write` -- post/update the review message and admin-override notices
-   - `users:read` -- look up a user's guest/restricted/deleted status (`users.info`)
-   - `users:read.email` -- the interim Slack membership gate's `users.lookupByEmail` fallback
+   - `users:read` -- look up a user's guest/restricted/deleted status (`users.info`) for the Slack membership
+     gate, and the email on the profile of someone clicking Approve/Reject whom Krater hasn't linked yet
+   - `users:read.email` -- **required**: Krater finds each person's Slack account with `users.lookupByEmail`
+     (using the email Weave verified at sign-in), for the membership gate and for channel invites, and reads
+     the profile email in `users.info` to match an unlinked clicker. Without it the gate fails for everyone
+     whose Slack id an admin hasn't set by hand
 3. **Install App** (or **Install to Workspace**) at the top of that same page. Copy the **Bot User OAuth
    Token** (`xoxb-...`) -> `KRATER_SLACK_BOT_TOKEN`.
 4. **Basic Information** -> **App Credentials** -> copy the **Signing Secret** ->
@@ -84,11 +88,14 @@ the port.
 
 With `KRATER_SLACK_MODE=live` and the tunnel up:
 
-1. Submit a proposal as a member with a real Slack account in the workspace (the interim membership gate
-   in `krater.services.slack_membership` looks them up by `slack_id` if Weave already supplies one, else
-   by email -- see `docs/SPEC.md` "Roles & authentication").
+1. Submit a proposal as a member with a real Slack account in the workspace, under the same email as their
+   Weave account (or with their Slack user id set by an admin at `/admin/users/<id>`). The membership gate in
+   `krater.services.slack_membership` finds the account by stored id or `users.lookupByEmail`, then
+   requires `users.info` to show a non-guest, non-deleted account -- see `docs/SPEC.md` "Roles &
+   authentication".
 2. Krater should create a private `ganymede-<slug>-<id>` channel, invite you and every current
-   `ganymede:reviewer`, and post the review message with Approve/Reject buttons.
+   `ganymede:reviewer` (roles are granted at `/admin/users`), and post the review message with
+   Approve/Reject buttons.
 3. Click **Reject** -> a modal should open asking for a reason (this is the one interaction Krater
    answers synchronously, since the modal's `trigger_id` expires in ~3s -- everything else is a
    deferred `procrastinate` job, so `uv run procrastinate --app=krater.worker.app.app worker` must

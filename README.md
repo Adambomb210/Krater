@@ -7,7 +7,7 @@ gallery of completed projects.
 ## Docs
 
 - [Spec](docs/SPEC.md): product spec, data model, workflow, deployment, open questions
-- [Weave integration](docs/weave-integration.md): sign-in, roles, and the Weave changes Krater depends on
+- [Weave integration](docs/weave-integration.md): sign-in (plain OIDC against Weave `main`; roles live in Krater)
 - [SkyPilot integration](docs/skypilot-integration.md): workspaces, the admin-policy launch gate, and the spend reconciler
 - [Handoff](docs/HANDOFF.md): start here if you are picking this project up (setup, state, decisions, next steps)
 - [Future work](docs/FUTURE.md): what comes after v1, loose ends, and parked ideas
@@ -15,7 +15,18 @@ gallery of completed projects.
 
 ## Development
 
-Stack, layout and conventions are documented in [CLAUDE.md](CLAUDE.md). Quick start:
+Stack, layout and conventions are documented in [CLAUDE.md](CLAUDE.md).
+
+First-time setup is one command, given [uv](https://docs.astral.sh/uv/) and a running Docker. It installs Python
+3.12 and the dependencies, starts a Postgres container, creates `krater_dev` and `krater_test` and migrates
+`krater_dev`. Add `--check` (`-Check` on Windows) to also lint and run the tests.
+
+```bash
+scripts/dev/setup.sh                                               # macOS, Linux, WSL, Git Bash
+powershell -ExecutionPolicy Bypass -File scripts\dev\setup.ps1     # Windows
+```
+
+Or by hand, against your own Postgres:
 
 ```bash
 # Once: install Python 3.12 and the project's dependencies.
@@ -26,8 +37,10 @@ uv sync
 createdb krater_dev
 createdb krater_test
 
-# Copy and adjust environment variables (KRATER_DATABASE_URL etc.).
-cp .env.example .env
+# Environment variables (KRATER_DATABASE_URL etc.) are listed in .env.example. For running outside Docker, don't
+# save them as .env in the repo root: pydantic-settings loads that file automatically and it leaks into the test
+# suite. Use another name (e.g. .env.local) and load it into your shell. (`docker compose` reads a .env too; keep it
+# outside the repo with `--env-file` and `KRATER_ENV_FILE`, see docs/dev/staging.md.)
 
 # Apply migrations, then run the web app and worker (in separate terminals).
 uv run alembic upgrade head
@@ -44,3 +57,12 @@ tests at a separate database; see `tests/conftest.py`.
 
 The full stack (Postgres, a one-shot migration, the portal and the worker) also runs under
 `docker compose up --build`.
+
+Roles (`ganymede:member`, `ganymede:reviewer`, `ganymede:admin`) live in Krater's database and are managed at
+`/admin/users`. In stub mode (the default for development) the fixture users in `krater/weave/stub_users.json` get
+their roles at sign-in. Against a real Weave, set `KRATER_BOOTSTRAP_ADMINS` to your Weave sub (or verified email) so
+your first sign-in makes you an admin; see `.env.example`.
+
+CI also runs a nightly SkyPilot contract check against a real SkyPilot API server
+(`.github/workflows/skypilot-contract.yml`, see `docs/dev/skypilot-contract.md`). The SkyPilot version is pinned in
+`scripts/dev/skypilot-requirements.txt`.

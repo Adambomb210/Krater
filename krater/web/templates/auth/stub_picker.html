@@ -5,14 +5,17 @@
 {% block content %}
 <section class="card">
   <h1>Stub sign-in</h1>
-  <p class="muted">Development only ({{ "KRATER_WEAVE_MODE=stub" }}). Pick a fixture user to sign in as.</p>
+  <p class="muted">
+    Development only ({{ "KRATER_WEAVE_MODE=stub" }}). Pick a fixture user to sign in as. Their fixture roles are
+    added to Krater's database when they sign in.
+  </p>
   <ul class="stub-user-list">
     {% for user in users %}
     <li>
       <a href="/auth/callback?{{ {'code': user.sub, 'state': state} | urlencode }}">{{ user.name }}</a>
       <div class="muted">
-        {{ user.sub }} &middot; groups: {{ user.groups | sort | join(', ') if user.groups else 'none' }}
-        {% if not user.active %} &middot; inactive{% endif %}
+        {{ user.sub }} &middot; roles: {{ user.groups | sort | join(', ') if user.groups else 'none' }}
+        {% if not user.email_verified %} &middot; unverified email{% endif %}
       </div>
     </li>
     {% endfor %}

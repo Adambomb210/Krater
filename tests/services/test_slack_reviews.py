@@ -1,8 +1,10 @@
-"""Processing a Slack Approve/Reject interaction (`krater.services.slack_reviews`)."""
+"""Processing a Slack Approve/Reject interaction (`krater.services.slack_reviews`): the clicker is found
+in Krater's own users (by stored Slack id, else by the verified email on their Slack profile), and their
+roles and disabled flag are read fresh from Krater's database."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
@@ -10,34 +12,6 @@ from krater.models import ProjectStatus, ReviewDecision, ReviewSource, RevisionO
 from krater.services import projects, slack_reviews
 from krater.services.actor import GROUP_MEMBER, GROUP_REVIEWER, Actor
 from krater.slack.fake import FakeSlackClient
-from krater.weave.types import WeaveUser
-
-
-@dataclass
-class _SlackWeaveClient:
-    """A minimal `WeaveClient` double: `get_user_by_slack_id` from a fixed `slack_id -> WeaveUser` map."""
-
-    by_slack_id: dict[str, WeaveUser]
-
-    def get_user(self, sub: str) -> WeaveUser | None:
-        return next((user for user in self.by_slack_id.values() if user.sub == sub), None)
-
-    def get_user_by_slack_id(self, slack_id: str) -> WeaveUser | None:
-        return self.by_slack_id.get(slack_id)
-
-    def list_users_in_group(self, group: str) -> list[WeaveUser]:
-        return [user for user in self.by_slack_id.values() if group in user.groups]
-
-
-def _weave_user(actor: Actor, *, slack_id: str, active: bool = True) -> WeaveUser:
-    return WeaveUser(
-        sub=actor.user.weave_sub,
-        name=actor.user.display_name,
-        email=actor.user.email,
-        slack_id=slack_id,
-        groups=actor.groups,
-        active=active,
-    )
 
 
 def _submitted_revision(db_session: Session, member: Actor):
@@ -49,42 +23,68 @@ def _submitted_revision(db_session: Session, member: Actor):
     return project, project.current_revision
 
 
-def test_approve_by_a_reviewer_records_a_slack_review(db_session: Session, member: Actor, reviewer: Actor) -> None:
-    _project, revision = _submitted_revision(db_session, member)
-    weave_client = _SlackWeaveClient({"U_REVIEWER": _weave_user(reviewer, slack_id="U_REVIEWER")})
-    slack_client = FakeSlackClient()
-
+def _approve(db_session: Session, slack_client: FakeSlackClient, revision, slack_user_id: str) -> None:
     slack_reviews.process_approve(
         db_session,
         slack_client,
-        weave_client,
         revision_id=revision.id,
-        slack_user_id="U_REVIEWER",
+        slack_user_id=slack_user_id,
         response_url="https://hooks.example/1",
     )
+
+
+def test_approve_by_a_linked_reviewer_records_a_slack_review(
+    db_session: Session, member: Actor, reviewer: Actor
+) -> None:
+    reviewer.user.slack_user_id = "U_REVIEWER"
+    _project, revision = _submitted_revision(db_session, member)
+    slack_client = FakeSlackClient()
+
+    _approve(db_session, slack_client, revision, "U_REVIEWER")
 
     db_session.refresh(revision)
     assert revision.outcome is RevisionOutcome.APPROVED
     assert revision.reviews[0].source is ReviewSource.SLACK
+    assert revision.reviews[0].reviewer_id == reviewer.user.id
     assert slack_client.ephemeral_messages == []
+
+
+def test_an_unlinked_clicker_is_matched_by_the_verified_email_on_their_slack_profile(
+    db_session: Session, member: Actor, reviewer: Actor
+) -> None:
+    _project, revision = _submitted_revision(db_session, member)
+    slack_client = FakeSlackClient()
+    slack_client.register_email(reviewer.user.email.upper(), "U_BY_EMAIL")
+
+    _approve(db_session, slack_client, revision, "U_BY_EMAIL")
+
+    db_session.refresh(revision)
+    assert revision.outcome is RevisionOutcome.APPROVED
+    assert reviewer.user.slack_user_id == "U_BY_EMAIL"
+
+
+def test_an_unverified_email_is_not_matched(db_session: Session, member: Actor, make_actor) -> None:
+    unverified = make_actor(groups=frozenset({GROUP_MEMBER, GROUP_REVIEWER}), email_verified=False)
+    _project, revision = _submitted_revision(db_session, member)
+    slack_client = FakeSlackClient()
+    slack_client.register_email(unverified.user.email, "U_UNVERIFIED")
+
+    _approve(db_session, slack_client, revision, "U_UNVERIFIED")
+
+    db_session.refresh(revision)
+    assert revision.outcome is RevisionOutcome.PENDING
+    assert "linked" in slack_client.ephemeral_messages[0][1].lower()
+    assert unverified.user.slack_user_id is None
 
 
 def test_approve_by_the_submitter_gets_an_ephemeral_error(db_session: Session, make_actor) -> None:
     # The submitter also happens to be a reviewer, so `record_review`'s self-review check (rather than
     # its reviewer-only check) is the one that fires.
-    submitter_reviewer = make_actor(groups=frozenset({GROUP_MEMBER, GROUP_REVIEWER}))
+    submitter_reviewer = make_actor(groups=frozenset({GROUP_MEMBER, GROUP_REVIEWER}), slack_user_id="U_MEMBER")
     _project, revision = _submitted_revision(db_session, submitter_reviewer)
-    weave_client = _SlackWeaveClient({"U_MEMBER": _weave_user(submitter_reviewer, slack_id="U_MEMBER")})
     slack_client = FakeSlackClient()
 
-    slack_reviews.process_approve(
-        db_session,
-        slack_client,
-        weave_client,
-        revision_id=revision.id,
-        slack_user_id="U_MEMBER",
-        response_url="https://hooks.example/1",
-    )
+    _approve(db_session, slack_client, revision, "U_MEMBER")
 
     db_session.refresh(revision)
     assert revision.outcome is RevisionOutcome.PENDING
@@ -96,17 +96,9 @@ def test_approve_by_the_submitter_gets_an_ephemeral_error(db_session: Session, m
 
 def test_unknown_slack_user_gets_an_ephemeral_error(db_session: Session, member: Actor) -> None:
     _project, revision = _submitted_revision(db_session, member)
-    weave_client = _SlackWeaveClient({})
     slack_client = FakeSlackClient()
 
-    slack_reviews.process_approve(
-        db_session,
-        slack_client,
-        weave_client,
-        revision_id=revision.id,
-        slack_user_id="U_UNKNOWN",
-        response_url="https://hooks.example/1",
-    )
+    _approve(db_session, slack_client, revision, "U_UNKNOWN")
 
     db_session.refresh(revision)
     assert revision.outcome is RevisionOutcome.PENDING
@@ -114,19 +106,39 @@ def test_unknown_slack_user_gets_an_ephemeral_error(db_session: Session, member:
     assert "linked" in slack_client.ephemeral_messages[0][1].lower()
 
 
-def test_inactive_weave_user_gets_an_ephemeral_error(db_session: Session, member: Actor, reviewer: Actor) -> None:
+def test_a_disabled_reviewer_gets_an_ephemeral_error(db_session: Session, member: Actor, reviewer: Actor) -> None:
+    reviewer.user.slack_user_id = "U_REVIEWER"
+    reviewer.user.disabled_at = datetime.now(UTC)
     _project, revision = _submitted_revision(db_session, member)
-    weave_client = _SlackWeaveClient({"U_REVIEWER": _weave_user(reviewer, slack_id="U_REVIEWER", active=False)})
     slack_client = FakeSlackClient()
 
-    slack_reviews.process_approve(
-        db_session,
-        slack_client,
-        weave_client,
-        revision_id=revision.id,
-        slack_user_id="U_REVIEWER",
-        response_url="https://hooks.example/1",
-    )
+    _approve(db_session, slack_client, revision, "U_REVIEWER")
+
+    db_session.refresh(revision)
+    assert revision.outcome is RevisionOutcome.PENDING
+    assert slack_client.ephemeral_messages[0][1] == "Your Krater account has been disabled."
+
+
+def test_a_linked_non_member_gets_an_ephemeral_error(db_session: Session, member: Actor, make_actor) -> None:
+    make_actor(groups=frozenset({GROUP_REVIEWER}), slack_user_id="U_EX_MEMBER")
+    _project, revision = _submitted_revision(db_session, member)
+    slack_client = FakeSlackClient()
+
+    _approve(db_session, slack_client, revision, "U_EX_MEMBER")
+
+    db_session.refresh(revision)
+    assert revision.outcome is RevisionOutcome.PENDING
+    assert "not a Ganymede member" in slack_client.ephemeral_messages[0][1]
+
+
+def test_a_member_without_the_reviewer_role_is_refused_by_record_review(
+    db_session: Session, member: Actor, make_actor
+) -> None:
+    make_actor(groups=frozenset({GROUP_MEMBER}), slack_user_id="U_PLAIN")
+    _project, revision = _submitted_revision(db_session, member)
+    slack_client = FakeSlackClient()
+
+    _approve(db_session, slack_client, revision, "U_PLAIN")
 
     db_session.refresh(revision)
     assert revision.outcome is RevisionOutcome.PENDING
@@ -134,14 +146,13 @@ def test_inactive_weave_user_gets_an_ephemeral_error(db_session: Session, member
 
 
 def test_reject_records_the_rejection_with_its_reason(db_session: Session, member: Actor, reviewer: Actor) -> None:
+    reviewer.user.slack_user_id = "U_REVIEWER"
     _project, revision = _submitted_revision(db_session, member)
-    weave_client = _SlackWeaveClient({"U_REVIEWER": _weave_user(reviewer, slack_id="U_REVIEWER")})
     slack_client = FakeSlackClient()
 
     slack_reviews.process_reject(
         db_session,
         slack_client,
-        weave_client,
         revision_id=revision.id,
         slack_user_id="U_REVIEWER",
         reason="Needs more detail.",
@@ -157,6 +168,7 @@ def test_reject_records_the_rejection_with_its_reason(db_session: Session, membe
 def test_approve_that_completes_the_project_archives_the_channel(
     db_session: Session, member: Actor, reviewer: Actor
 ) -> None:
+    reviewer.user.slack_user_id = "U_REVIEWER"
     project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     project = projects.submit(db_session, member, project=project)
     projects.record_review(
@@ -175,15 +187,7 @@ def test_approve_that_completes_the_project_archives_the_channel(
     project = projects.submit_completion(db_session, member, project=project)
     completion_revision = project.current_revision
 
-    weave_client = _SlackWeaveClient({"U_REVIEWER": _weave_user(reviewer, slack_id="U_REVIEWER")})
-    slack_reviews.process_approve(
-        db_session,
-        slack_client,
-        weave_client,
-        revision_id=completion_revision.id,
-        slack_user_id="U_REVIEWER",
-        response_url="https://hooks.example/1",
-    )
+    _approve(db_session, slack_client, completion_revision, "U_REVIEWER")
 
     db_session.refresh(project)
     assert project.status is ProjectStatus.COMPLETED

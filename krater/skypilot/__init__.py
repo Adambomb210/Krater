@@ -11,7 +11,12 @@ from functools import lru_cache
 
 from krater.config import get_settings
 from krater.skypilot.client import SkyPilotClient
-from krater.skypilot.errors import SkyPilotError, SkyPilotRequestFailedError, SkyPilotUnavailableError
+from krater.skypilot.errors import (
+    SkyPilotError,
+    SkyPilotRequestFailedError,
+    SkyPilotUnavailableError,
+    SkyPilotWorkspaceNotFoundError,
+)
 from krater.skypilot.fake import FakeSkyPilotClient
 from krater.skypilot.live import LiveSkyPilotClient
 from krater.skypilot.types import ClusterInfo, CostReportRow, GpuOffer, ManagedJobInfo
@@ -27,6 +32,7 @@ __all__ = [
     "SkyPilotError",
     "SkyPilotRequestFailedError",
     "SkyPilotUnavailableError",
+    "SkyPilotWorkspaceNotFoundError",
     "get_skypilot_client",
 ]
 

@@ -48,8 +48,10 @@ Checked against the SkyPilot docs (docs.skypilot.ai) and `skypilot-org/skypilot`
 - **Identity:** members sign in to SkyPilot with their Weave account. oauth2-proxy runs as its own container, with Weave
   as the OIDC issuer. The SkyPilot API server delegates authentication to it through the two env vars above. The CLI
   works too: `sky api login -e https://<skypilot-host>` opens a browser to the Weave sign-in.
-- **Who may sign in:** oauth2-proxy only lets in Ganymede members. It requests the `groups` scope from Weave and
-  requires `ganymede:member`.
+- **Who may sign in:** anyone with a Weave account. Weave's main branch offers only standard OIDC (no `groups`
+  claim), and Ganymede roles live in Krater's own database, so oauth2-proxy can't filter on `ganymede:member`. That's
+  acceptable because signing in grants nothing by itself: every project workspace is private (below), and Krater's
+  launch gate rejects any launch outside an approved project's workspace.
 - **Isolation:** each approved project gets its own **private** workspace. `allowed_users` is set to the project team's
   emails (the same `email` claim oauth2-proxy passes on). A member on two projects can use both workspaces and picks one
   per launch. Everyone else can't see the workspace at all.
@@ -59,7 +61,10 @@ Checked against the SkyPilot docs (docs.skypilot.ai) and `skypilot-org/skypilot`
   `rbac.default_role: user`, which the spike confirmed takes effect on the next new-user login with no server
   restart needed. Only Krater's service account (and SkyPilot operators) get `admin`.
 - **Offboarding:** when a project is completed or withdrawn, Krater removes the team from `allowed_users` before tearing
-  the workspace down. Someone suspended in Weave can't sign in again. Existing SkyPilot sessions last until they expire,
+  the workspace down. Once Weave's lockout fix is merged (bug 3 in the handoff's `WEAVE-BUG-REPORT.md`), someone locked
+  in Weave can't sign in again; Weave's main branch doesn't enforce that yet. Disabling someone in Krater does **not**
+  yet remove them from their projects' `allowed_users` (the reconciler syncs the team by email regardless of that
+  flag); until it does, remove them from the project or withdraw it. Existing SkyPilot sessions last until they expire,
   so keep the oauth2-proxy cookie lifetime short (e.g. 8h).
 
 oauth2-proxy settings (sketch):
@@ -69,18 +74,15 @@ provider = "oidc"
 oidc_issuer_url = "https://weave.patchworklabs.org"
 client_id = "<weave oauth app uid>"            # a separate confidential Weave app, not Krater's
 client_secret = "<secret>"
-scope = "openid email profile groups"
-oidc_groups_claim = "groups"
-allowed_groups = ["ganymede:member"]
+scope = "openid email profile"
 email_domains = ["*"]
 redirect_url = "https://<skypilot-host>/oauth2/callback"
 cookie_expire = "8h"
 code_challenge_method = "S256"                 # Weave requires PKCE
 ```
 
-Depends on Weave's `groups` claim (on Weave branch `Krater-Integration`, not merged yet). Until it lands, drop
-`allowed_groups` and rely on private workspaces alone. Anyone with a Weave account could then sign in, but they'd see
-nothing.
+An earlier design limited sign-in to `ganymede:member` through a Weave `groups` claim. That claim was never merged
+into Weave, and by maintainer decision Krater now keeps roles itself, so the proxy relies on private workspaces alone.
 
 **How the API server actually checks this** (confirmed by spike, `docs/dev/skypilot-spike.md` section 3): it isn't a
 classic reverse-proxy setup where oauth2-proxy sits fully in front and SkyPilot never sees an unauthenticated request.
@@ -116,7 +118,9 @@ When a project's proposal is approved, a worker job:
    pre-provisioning a newly-approved team.
 
 When the project is completed or withdrawn: tear down its clusters and managed jobs, cut off its access, and keep the
-workspace until the cost history has been recorded, then delete it.
+workspace until the cost history has been recorded, then delete it. If the workspace is already gone from SkyPilot
+(deleted by hand, or a SkyPilot state reset), Krater records the teardown anyway instead of retrying forever. The
+reconciler handles each project separately, so one project's SkyPilot failure never blocks the others.
 
 Krater calls the API server with an **admin** service-account token, stored as a secret in the portal and worker.
 

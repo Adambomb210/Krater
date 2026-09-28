@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import itertools
 
+from krater.skypilot.errors import SkyPilotWorkspaceNotFoundError
 from krater.skypilot.types import ClusterInfo, CostReportRow, GpuOffer, ManagedJobInfo, ServiceInfo
 
 #: A small, hand-picked stand-in for `docs/dev/pricing.md`'s real Vast catalog CSV -- enough variety
@@ -47,6 +48,9 @@ class FakeSkyPilotClient:
         # `krater.services.skypilot_sync.enforce_budgets`) would wrongly treat it as the same cluster.
         self._cluster_name_seq = itertools.count(1)
         self._gpu_offers: list[GpuOffer] = list(_DEFAULT_GPU_OFFERS)
+        # Workspaces removed behind Krater's back (`remove_workspace_out_of_band`). Only these raise
+        # on workspace-scoped calls, so tests that never create a workspace keep working.
+        self._missing_workspaces: set[str] = set()
 
     # -- SkyPilotClient protocol -----------------------------------------------------------------
 
@@ -54,9 +58,12 @@ class FakeSkyPilotClient:
         return list(self._gpu_offers)
 
     def create_workspace(self, name: str, *, allowed_users: list[str]) -> None:
+        self._missing_workspaces.discard(name)
         self.workspaces[name] = sorted(allowed_users)
 
     def update_workspace(self, name: str, *, allowed_users: list[str]) -> None:
+        # A real server upserts: updating a missing workspace recreates it.
+        self._missing_workspaces.discard(name)
         self.workspaces[name] = sorted(allowed_users)
 
     def delete_workspace(self, name: str) -> None:
@@ -73,25 +80,50 @@ class FakeSkyPilotClient:
         ]
 
     def list_clusters(self, workspace: str) -> list[ClusterInfo]:
+        self._require_workspace(workspace)
         return [cluster for cluster in self._clusters.values() if cluster.workspace == workspace]
 
     def list_managed_jobs(self, workspace: str) -> list[ManagedJobInfo]:
+        self._require_workspace(workspace)
         return [job for job in self._jobs.values() if job.workspace == workspace]
 
     def down_cluster(self, name: str) -> None:
         self._clusters.pop(name, None)
 
     def cancel_managed_jobs(self, workspace: str) -> None:
+        self._require_workspace(workspace)
         for job_id in [job.job_id for job in self._jobs.values() if job.workspace == workspace]:
             del self._jobs[job_id]
 
     def list_services(self, workspace: str) -> list[ServiceInfo]:
+        self._require_workspace(workspace)
         return [service for service in self._services.values() if service.workspace == workspace]
 
     def down_service(self, name: str) -> None:
         self._services.pop(name, None)
 
     # -- Test helpers ------------------------------------------------------------------------------
+
+    def remove_workspace_out_of_band(self, name: str, *, keep_cost_history: bool = True) -> None:
+        """Delete a workspace behind Krater's back (by hand, or a SkyPilot state reset). Afterwards,
+        workspace-scoped calls for it raise `SkyPilotWorkspaceNotFoundError` like a real server does,
+        until it's created or updated again. `keep_cost_history=False` simulates a state reset, which
+        also wipes `cost_report`'s history for it."""
+        self.workspaces.pop(name, None)
+        self._missing_workspaces.add(name)
+        for cluster_name in [c.name for c in self._clusters.values() if c.workspace == name]:
+            del self._clusters[cluster_name]
+        if not keep_cost_history:
+            for cluster_name in [n for n, (ws, _) in self._cost_history.items() if ws == name]:
+                del self._cost_history[cluster_name]
+
+    def _require_workspace(self, workspace: str) -> None:
+        if workspace in self._missing_workspaces:
+            raise SkyPilotWorkspaceNotFoundError(
+                f"Workspace {workspace} does not exist. Use `sky check` to see if it is defined on the API "
+                "server and try again.",
+                error_type="ValueError",
+            )
 
     def set_gpu_offers(self, offers: list[GpuOffer]) -> None:
         """Replace the catalog `list_gpu_prices` returns, e.g. with a fixture captured from the real

@@ -1,32 +1,30 @@
-"""`fresh_actor` must re-check Weave rather than trust the session's cached groups, and `require_user`
-must actually redirect signed-out requests to `/login`.
+"""`fresh_actor` must read roles and the disabled flag from Krater's database on every call, and
+`require_user` must actually redirect signed-out requests to `/login`.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated
 
 import pytest
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from krater.db import get_session
-from krater.models import User
+from krater.models import User, UserRole
 from krater.services.actor import GROUP_ADMIN, GROUP_MEMBER, GROUP_REVIEWER, Actor
-from krater.weave.types import WeaveUser
 from krater.web.app import create_app
-from krater.web.deps import current_user, fresh_actor, require_admin, require_reviewer, require_user
-
-
-class _FakeWeaveClient:
-    """Answers `get_user` with whatever `WeaveUser` (or `None`) the test hands it."""
-
-    def __init__(self, user: WeaveUser | None) -> None:
-        self._user = user
-
-    def get_user(self, sub: str) -> WeaveUser | None:
-        return self._user
+from krater.web.deps import (
+    current_user,
+    fresh_actor,
+    require_admin,
+    require_reviewer,
+    require_user,
+    session_actor,
+)
 
 
 def _make_request(session_data: dict) -> object:
@@ -36,14 +34,12 @@ def _make_request(session_data: dict) -> object:
     return _FakeRequest()
 
 
-def _make_user(db_session: Session, *, groups_cached: list[str]) -> User:
-    user = User(
-        weave_sub="PWLDEPSTEST",
-        display_name="Dep Test",
-        email="dep@example.com",
-        groups_cached=groups_cached,
-    )
+def _make_user(db_session: Session, *, roles: list[str]) -> User:
+    user = User(weave_sub="PWLDEPSTEST", display_name="Dep Test", email="dep@example.com", email_verified=True)
     db_session.add(user)
+    db_session.flush()
+    for role in roles:
+        db_session.add(UserRole(user_id=user.id, role=role))
     db_session.flush()
     return user
 
@@ -53,7 +49,7 @@ def test_current_user_is_none_without_a_session(db_session: Session) -> None:
 
 
 def test_current_user_looks_up_the_session_user_id(db_session: Session) -> None:
-    user = _make_user(db_session, groups_cached=[GROUP_MEMBER])
+    user = _make_user(db_session, roles=[GROUP_MEMBER])
 
     found = current_user(_make_request({"user_id": str(user.id)}), db_session)
 
@@ -65,19 +61,12 @@ def test_current_user_ignores_a_corrupt_session_value(db_session: Session) -> No
     assert current_user(_make_request({"user_id": "not-a-uuid"}), db_session) is None
 
 
-def test_fresh_actor_uses_live_groups_not_the_session_cache(db_session: Session) -> None:
-    # Signed in as a reviewer, but Weave now says the reviewer group was removed.
-    user = _make_user(db_session, groups_cached=[GROUP_MEMBER, GROUP_REVIEWER])
-    live_user = WeaveUser(
-        sub=user.weave_sub,
-        name=user.display_name,
-        email=user.email,
-        slack_id=None,
-        groups=frozenset({GROUP_MEMBER}),
-        active=True,
-    )
+def test_fresh_actor_sees_a_role_removed_after_sign_in(db_session: Session) -> None:
+    user = _make_user(db_session, roles=[GROUP_MEMBER, GROUP_REVIEWER])
+    assert fresh_actor(user, db_session).is_reviewer
 
-    actor = fresh_actor(user, _FakeWeaveClient(live_user))
+    db_session.execute(delete(UserRole).where(UserRole.user_id == user.id, UserRole.role == GROUP_REVIEWER))
+    actor = fresh_actor(user, db_session)
 
     assert isinstance(actor, Actor)
     assert actor.is_member
@@ -87,69 +76,43 @@ def test_fresh_actor_uses_live_groups_not_the_session_cache(db_session: Session)
     assert exc_info.value.status_code == 403
 
 
-def test_fresh_actor_rejects_an_inactive_user(db_session: Session) -> None:
-    user = _make_user(db_session, groups_cached=[GROUP_MEMBER])
-    live_user = WeaveUser(
-        sub=user.weave_sub,
-        name=user.display_name,
-        email=user.email,
-        slack_id=None,
-        groups=frozenset({GROUP_MEMBER}),
-        active=False,
-    )
+def test_fresh_actor_rejects_a_disabled_user(db_session: Session) -> None:
+    user = _make_user(db_session, roles=[GROUP_MEMBER, GROUP_ADMIN])
+    user.disabled_at = datetime.now(UTC)
 
     with pytest.raises(HTTPException) as exc_info:
-        fresh_actor(user, _FakeWeaveClient(live_user))
+        fresh_actor(user, db_session)
+    assert exc_info.value.status_code == 403
+    assert "disabled" in exc_info.value.detail
+
+
+def test_fresh_actor_rejects_a_user_who_is_not_a_member(db_session: Session) -> None:
+    user = _make_user(db_session, roles=[GROUP_REVIEWER])
+
+    with pytest.raises(HTTPException) as exc_info:
+        fresh_actor(user, db_session)
     assert exc_info.value.status_code == 403
 
 
-def test_fresh_actor_rejects_a_user_no_longer_a_member(db_session: Session) -> None:
-    user = _make_user(db_session, groups_cached=[GROUP_MEMBER])
-    live_user = WeaveUser(
-        sub=user.weave_sub,
-        name=user.display_name,
-        email=user.email,
-        slack_id=None,
-        groups=frozenset(),
-        active=True,
-    )
+def test_session_actor_reports_roles_without_refusing(db_session: Session) -> None:
+    user = _make_user(db_session, roles=[GROUP_REVIEWER])
+    user.disabled_at = datetime.now(UTC)
 
-    with pytest.raises(HTTPException):
-        fresh_actor(user, _FakeWeaveClient(live_user))
+    actor = session_actor(user, db_session)
+
+    assert actor.groups == frozenset({GROUP_REVIEWER})
 
 
-def test_fresh_actor_rejects_a_user_unknown_to_weave(db_session: Session) -> None:
-    user = _make_user(db_session, groups_cached=[GROUP_MEMBER])
-
-    with pytest.raises(HTTPException):
-        fresh_actor(user, _FakeWeaveClient(None))
-
-
-def test_require_admin_needs_the_admin_group(db_session: Session) -> None:
-    user = _make_user(db_session, groups_cached=[GROUP_MEMBER, GROUP_REVIEWER])
-    live_user = WeaveUser(
-        sub=user.weave_sub,
-        name=user.display_name,
-        email=user.email,
-        slack_id=None,
-        groups=frozenset({GROUP_MEMBER, GROUP_REVIEWER}),
-        active=True,
-    )
-    actor = fresh_actor(user, _FakeWeaveClient(live_user))
+def test_require_admin_needs_the_admin_role(db_session: Session) -> None:
+    user = _make_user(db_session, roles=[GROUP_MEMBER, GROUP_REVIEWER])
 
     with pytest.raises(HTTPException) as exc_info:
-        require_admin(actor)
+        require_admin(fresh_actor(user, db_session))
     assert exc_info.value.status_code == 403
 
-    admin_live_user = WeaveUser(
-        sub=user.weave_sub,
-        name=user.display_name,
-        email=user.email,
-        slack_id=None,
-        groups=frozenset({GROUP_MEMBER, GROUP_REVIEWER, GROUP_ADMIN}),
-        active=True,
-    )
-    admin_actor = fresh_actor(user, _FakeWeaveClient(admin_live_user))
+    db_session.add(UserRole(user_id=user.id, role=GROUP_ADMIN))
+    db_session.flush()
+    admin_actor = fresh_actor(user, db_session)
     assert require_admin(admin_actor) is admin_actor
 
 

@@ -1,7 +1,9 @@
-"""Who is performing an action, and what Weave says they may do.
+"""Who is performing an action, and which Krater roles they hold.
 
-Built by the web layer (or Slack handlers) from a fresh WeaveClient lookup, then passed explicitly into services.
-Services authorize against `groups` here and never read `User.groups_cached`.
+Built by the web layer (or Slack handlers) from a fresh read of Krater's `user_roles` table (see
+`krater.services.roles.authorize`), then passed explicitly into services. Services authorize against
+`groups` here. The role identifiers keep the `ganymede:*` names they had as Weave groups, so review
+snapshots (`Review.reviewer_groups`) and approval policies (`ApprovalPolicy.required_group`) read the same.
 """
 
 from __future__ import annotations

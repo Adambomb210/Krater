@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy.orm import Session
 
 from krater.models import BudgetEntryKind, Project, ProjectStatus, SpendSnapshot, SpendSource
@@ -42,9 +44,14 @@ def test_latest_spend_cents_is_zero_with_no_snapshots(db_session: Session, membe
 
 def test_latest_spend_cents_returns_the_most_recent_snapshot(db_session: Session, member: Actor) -> None:
     project = _make_project(db_session, member)
+    # Explicit times: Python 3.12's clock on Windows ticks every ~15ms, so two snapshots stamped
+    # back to back can tie there and come back in either order.
+    earlier = datetime.now(UTC) - timedelta(minutes=5)
 
     db_session.add(
-        SpendSnapshot(project_id=project.id, estimated_spend_cents=100, source=SpendSource.SKYPILOT_COST_REPORT)
+        SpendSnapshot(
+            project_id=project.id, estimated_spend_cents=100, source=SpendSource.SKYPILOT_COST_REPORT, taken_at=earlier
+        )
     )
     db_session.flush()
     db_session.add(

@@ -5,8 +5,7 @@
     "email": "mia@example.com",
     "email_verified": true,
     "slack_id": "U0001MEMBER",
-    "groups": ["ganymede:member"],
-    "active": true
+    "groups": ["ganymede:member"]
   },
   {
     "sub": "PWLMEMBERTWO",
@@ -14,8 +13,7 @@
     "email": "max@example.com",
     "email_verified": true,
     "slack_id": null,
-    "groups": ["ganymede:member"],
-    "active": true
+    "groups": ["ganymede:member"]
   },
   {
     "sub": "PWLREVIEWERONE",
@@ -23,8 +21,7 @@
     "email": "rae@example.com",
     "email_verified": true,
     "slack_id": "U0002REVIEW",
-    "groups": ["ganymede:member", "ganymede:reviewer"],
-    "active": true
+    "groups": ["ganymede:member", "ganymede:reviewer"]
   },
   {
     "sub": "PWLREVIEWERTWO",
@@ -32,8 +29,7 @@
     "email": "remy@example.com",
     "email_verified": true,
     "slack_id": "U0003REVIEW",
-    "groups": ["ganymede:member", "ganymede:reviewer"],
-    "active": true
+    "groups": ["ganymede:member", "ganymede:reviewer"]
   },
   {
     "sub": "PWLADMINONE",
@@ -41,8 +37,7 @@
     "email": "ana@example.com",
     "email_verified": true,
     "slack_id": "U0004ADMIN",
-    "groups": ["ganymede:member", "ganymede:reviewer", "ganymede:admin"],
-    "active": true
+    "groups": ["ganymede:member", "ganymede:reviewer", "ganymede:admin"]
   },
   {
     "sub": "PWLNONMEMBER",
@@ -50,16 +45,22 @@
     "email": "nico@example.com",
     "email_verified": true,
     "slack_id": null,
-    "groups": [],
-    "active": true
+    "groups": []
   },
   {
-    "sub": "PWLINACTIVEONE",
-    "name": "Ivy Inactive",
-    "email": "ivy@example.com",
-    "email_verified": true,
+    "sub": "PWLUNVERIFIED",
+    "name": "Uma Unverified",
+    "email": "uma@example.com",
+    "email_verified": false,
     "slack_id": null,
-    "groups": ["ganymede:member"],
-    "active": false
+    "groups": []
+  },
+  {
+    "sub": "PWLSLACKGUEST",
+    "name": "Gus Guest",
+    "email": "gus@example.com",
+    "email_verified": true,
+    "slack_id": "U0005GUEST",
+    "groups": ["ganymede:member"]
   }
 ]

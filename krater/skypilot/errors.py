@@ -20,4 +20,15 @@ class SkyPilotUnavailableError(SkyPilotError):
 
 class SkyPilotRequestFailedError(SkyPilotError):
     """SkyPilot was reached and understood the request, but it failed. Carries the server's own
-    message (from the polled request's `error`, or the HTTP response body) so callers can show it."""
+    message (from the polled request's `error`, or the HTTP response body) so callers can show it,
+    plus, for a failed polled request, the server-side exception's class name (`error_type`, e.g.
+    `"ClusterNotUpError"`), which the message alone doesn't include."""
+
+    def __init__(self, message: str, *, error_type: str | None = None) -> None:
+        super().__init__(message)
+        self.error_type = error_type
+
+
+class SkyPilotWorkspaceNotFoundError(SkyPilotRequestFailedError):
+    """The request was scoped to a workspace that doesn't exist on the SkyPilot server (deleted out of
+    band, or SkyPilot's state was reset)."""

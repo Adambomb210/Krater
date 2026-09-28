@@ -3,7 +3,8 @@
 HTTP-level tests exercise routing, auth wiring, CSRF and error-mapping -- the service layer's own
 rules already have thorough unit tests in tests/services. So these fixtures skip the HTTP round trip
 for *setup* (e.g. getting a project into `pending_review`) and call the service directly, using an
-`Actor` built the same way `fresh_actor` would from the signed-in `User`'s real stub groups.
+`Actor` built the same way `fresh_actor` would, from the signed-in `User`'s Krater roles (which stub
+sign-in seeds from the fixture's `groups`).
 """
 
 from __future__ import annotations
@@ -11,22 +12,23 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy.orm import Session
+from sqlalchemy import delete
+from sqlalchemy.orm import Session, object_session
 
-from krater.models import Project, ReviewDecision, ReviewSource, User
+from krater.models import Project, ReviewDecision, ReviewSource, User, UserRole
 from krater.services import projects as project_service
-from krater.services.actor import Actor
-from krater.weave import get_weave_client
-from krater.weave.types import WeaveUser
+from krater.services import roles
+from krater.services.actor import GROUP_MEMBER, Actor
 
 #: A real PNG magic-byte header, for tests that need `confirm_screenshot`'s signature check to pass.
 PNG_SIGNATURE = bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)) + b"\x00" * 8
 
 
 def actor_for(user: User) -> Actor:
-    """An `Actor` for `user`, using their real (stub) groups -- not the session's cached copy."""
-    return Actor(user=user, groups=frozenset(user.groups_cached))
+    """An `Actor` for `user`, with their current Krater roles."""
+    session = object_session(user)
+    assert session is not None
+    return roles.actor_for(session, user)
 
 
 @pytest.fixture
@@ -72,30 +74,13 @@ def approved_project(db_session: Session, submitted_project: Callable[..., Proje
     return _approve
 
 
-class _FakeWeaveClient:
-    """A `WeaveClient` that answers `get_user` with a fixed `WeaveUser`, regardless of `sub`."""
-
-    def __init__(self, user: WeaveUser) -> None:
-        self._user = user
-
-    def get_user(self, sub: str) -> WeaveUser:
-        del sub
-        return self._user
-
-
 @pytest.fixture
-def revoke_membership(client: TestClient) -> Callable[[User], None]:
-    """Make `fresh_actor` see `user` as no longer a Ganymede member on their *next* request, by
-    overriding `get_weave_client` -- simulates their Weave groups changing after they signed in
-    (Krater's own `/login` already refuses a non-member outright, so this is the only way an
-    already-signed-in session can end up "not a member" for `fresh_actor` to catch).
-    """
+def revoke_membership(db_session: Session) -> Callable[[User], None]:
+    """Take `ganymede:member` away from an already-signed-in `user`, straight in the database, so
+    `fresh_actor` sees the change on their *next* request (sign-in itself already refuses non-members)."""
 
     def _revoke(user: User) -> None:
-        revoked = WeaveUser(
-            sub=user.weave_sub, name=user.display_name, email=user.email, slack_id=None, groups=frozenset(), active=True
-        )
-        client.app.dependency_overrides[get_weave_client] = lambda: _FakeWeaveClient(revoked)
+        db_session.execute(delete(UserRole).where(UserRole.user_id == user.id, UserRole.role == GROUP_MEMBER))
+        db_session.flush()
 
-    yield _revoke
-    client.app.dependency_overrides.pop(get_weave_client, None)
+    return _revoke

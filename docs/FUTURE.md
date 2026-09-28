@@ -5,16 +5,19 @@ this list covers what comes after, plus loose ends from building v1.
 
 ## Before v1 goes live
 
-- **Staging run on the maintainer's machine** ([dev/staging.md](dev/staging.md)). This is the first time anything runs
-  in Docker, so check:
-  - the SkyPilot server and oauth2-proxy containers start;
-  - real Weave sign-in through the proxy;
+- **Staging run on the maintainer's machine** ([dev/staging.md](dev/staging.md)). The Compose stack itself has now
+  been run with stub credentials (HANDOFF section 4), so what's left needs real accounts:
+  - the SkyPilot server and oauth2-proxy with a real Weave sign-in;
   - a real Vast launch;
   - the 80% warning and 100% teardown with real spend;
   - how far `cost_report` drifts from the Vast bill. That sets the safety margin, if any, to take off the ceiling.
-- **Get the Weave changes onto GitHub.** The `groups` / `slack_id` claims and `/api/v1/users` directory API, plus the
-  two browser sign-in fixes, are on the maintainer's local Weave branch `Krater-Integration`. Someone with push access to
-  `patchworklabsorg/weave` needs to push them and open a PR.
+- **Merge Weave's sign-in and security fixes upstream** (for Weave's own sake; Krater no longer needs any other Weave
+  change). Patches `0002`/`0003` fix OAuth sign-in for returning users in Chrome and Safari, for any external client;
+  the rest (the handoff's `weave-patches/WEAVE-BUG-REPORT.md`) close an account takeover through unsigned Slack
+  events, owner takeover from the admin panel, locked users still signing in to OAuth apps, and signed-out `/admin`
+  access. Someone with push access to `patchworklabsorg/weave` needs to open the PR.
+- **Bootstrap the first Ganymede admin** on each real deployment with `KRATER_BOOTSTRAP_ADMINS` (a Weave sub is safer
+  than an email until Weave's Slack-events fix is merged), then grant everyone else's roles at `/admin/users`.
 - **Create Krater's Slack app** in the Patchwork workspace ([dev/slack-setup.md](dev/slack-setup.md)), and a tunnel
   for local testing.
 - **Pick a long-term screenshot storage provider.** Today it's a temporary self-hosted SeaweedFS container. The options
@@ -22,17 +25,22 @@ this list covers what comes after, plus loose ends from building v1.
 - **Decide what happens exactly at the ceiling.** Today warnings go out at 80% and teardown happens at 100% with no
   grace period, which can kill a long training run just past the limit. Consider a small admin-configurable grace margin.
 
+## Roles and accounts
+
+- **Reviewers who never sign in aren't invited.** Channel invites now go to Krater users holding
+  `ganymede:reviewer`, so a reviewer granted by email is invited only after their first sign-in. If that's a problem,
+  a pending reviewer grant could be resolved to a Slack id by email and invited directly.
+- **Cache Slack email-lookup misses.** Krater calls `users.lookupByEmail` for anyone without a stored Slack id each
+  time it builds a channel's invite list (misses aren't cached). Fine at Ganymede's size; cache misses for a while if
+  Slack rate limits show up.
+
 ## Weave follow-ups
 
-- **[weave#118](https://github.com/patchworklabsorg/weave/issues/118): require joining Slack as part of membership,
-  and expose it as a claim.** Once it exists, drop Krater's interim email-based Slack membership check, which misses
-  people whose Slack account uses a different email than their primary Weave address.
-- **Locked/suspended users can still sign in to OAuth apps.** Weave's `resource_owner_authenticator` only checks email
-  verification, not lock, status or session validity, and locking a user doesn't revoke their OAuth tokens. Krater
-  re-checks `active` through the directory API before actions, but Weave should fix it at the source. (Found during the
-  Weave review; the details are in the task suggestion from that session.)
-- **Weave's outbound service webhooks never fire.** The event types are defined, but nothing dispatches them. If they
-  get built, Krater could react to group changes immediately instead of on its reconcile interval.
+- **[weave#118](https://github.com/patchworklabsorg/weave/issues/118): require joining Slack as part of membership.**
+  Krater no longer needs Weave's `slack_membership` claim: its gate asks Slack directly. *Requiring* Slack as part of
+  signing up is still a Weave product decision.
+- **Weave admin loose ends** (found while fixing the `/admin/users` privilege bug, see HANDOFF section 3): there's no
+  `admin/users/new` view, so creating a user from the admin panel errors.
 
 ## Product features parked in the spec
 
@@ -47,8 +55,8 @@ this list covers what comes after, plus loose ends from building v1.
 - **Untested with 0.13.0's CLI:** `sky exec`, `sky jobs launch` and `sky serve up` going through the launch gate for
   real. They have no `--dryrun`, so they need a real Vast key. Resource labels on Vast are also untested. See
   [dev/skypilot-spike.md](dev/skypilot-spike.md).
-- **A CI job for the SkyPilot contract test** ([dev/skypilot-contract.md](dev/skypilot-contract.md)), run nightly and
-  on SkyPilot upgrades, pinned to the deployed version.
+- **Watch the first GitHub runs of the SkyPilot contract job** (`.github/workflows/skypilot-contract.yml`, see
+  [dev/skypilot-contract.md](dev/skypilot-contract.md)). It was verified only in a Linux container that mimics it.
 - **Image allowlist in the launch gate,** to stop crypto mining or other abuse. It becomes more important if donated
   compute happens (below).
 - **Shared rate limiting.** The limiter is per-process in memory, so limits multiply with the number of web workers. Move

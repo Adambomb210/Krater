@@ -1,18 +1,18 @@
-"""Live Krater <-> Weave integration check.
+"""Live Krater <-> Weave integration check: OIDC sign-in only.
 
 Unlike the rest of the suite, this drives a **real** Weave (OIDC discovery/JWKS, the magic-link sign-in
-flow, the `/oauth/authorize` consent screen, and the `/api/v1/users` directory API) and a **real**
-running Krater in `KRATER_WEAVE_MODE=live`, over plain HTTP -- no mocks. See `docs/dev/weave-e2e.md` for
-how to bring both up and provision the fixture users this file reads.
+flow and the `/oauth/authorize` consent screen) and a **real** running Krater in `KRATER_WEAVE_MODE=live`,
+over plain HTTP -- no mocks. Weave's main branch is enough: Krater asks only for `openid profile email`
+and keeps roles in its own database, so the role checks below read and seed Krater's Postgres directly.
+See `docs/dev/weave-e2e.md` for how to bring both up and provision the fixture users this file reads.
 
 It does the same OAuth Authorization Code + PKCE round trip a browser does (confirm a magic link, submit
 the consent form, land back on Krater's `/auth/callback`), but drives it directly with `httpx` rather
 than a browser: same redirects, same cookies, same real signed id_token, without a browser dependency in
-the Python test suite. The interactive proof with an actual browser (Playwright/Chromium) that this asset
-is derived from is described in that doc, alongside the exact bugs it caught that `httpx` alone could not
-(Turbo intercepting the sign-in form, and `form-action` CSP blocking the OAuth redirect) -- both are
-Weave view/CSP issues invisible to a plain HTTP client, which is why that manual pass still matters even
-with this file in place.
+the Python test suite. The interactive proof with an actual browser (Playwright/Chromium) is described in
+that doc, alongside the exact bugs it caught that `httpx` alone could not (Turbo intercepting the sign-in
+form, and `form-action` CSP blocking the OAuth redirect) -- both are Weave view/CSP issues invisible to a
+plain HTTP client, which is why that manual pass still matters even with this file in place.
 
 Every test here is marked `live` (deselected by default -- see `pyproject.toml`) and skips, individually
 or at module scope, with a clear reason when what it needs isn't configured. Nothing here is required for
@@ -29,6 +29,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import psycopg
@@ -53,7 +54,6 @@ FIXTURE_PATH = _env_path("WEAVE_E2E_FIXTURE", REPO_ROOT / ".weave_e2e_fixture.js
 KRATER_BASE_URL = os.environ.get("KRATER_LIVE_BASE_URL", "http://localhost:8201")
 KRATER_DATABASE_URL = os.environ.get("KRATER_LIVE_DATABASE_URL") or os.environ.get("KRATER_DATABASE_URL")
 WEAVE_REPO_DIR = _env_path("WEAVE_REPO_DIR", REPO_ROOT.parent / "weave")
-WEAVE_DATABASE_URL = os.environ.get("WEAVE_DATABASE_URL")
 RBENV_SHIMS_DIR = os.environ.get("RBENV_SHIMS_DIR", "/opt/rbenv/shims")
 
 
@@ -86,43 +86,75 @@ def weave_settings(fixture: dict[str, Any]) -> Settings:
         weave_issuer=fixture["issuer"],
         weave_client_id=fixture["oauth_client_id"],
         weave_client_secret=fixture["oauth_client_secret"],
-        weave_api_base_url=fixture["issuer"],
-        weave_service_key=fixture["service_key"],
     )
 
 
-@pytest.fixture
-def weave_client(weave_settings: Settings) -> Iterator[LiveWeaveClient]:
-    client = LiveWeaveClient(weave_settings)
-    yield client
+# --------------------------------------------------------------------------------------------------
+# Krater's database: roles, pending grants and the disabled flag live here, not in Weave.
+# --------------------------------------------------------------------------------------------------
 
 
-def _require_krater_db() -> str:
+def _krater_dsn() -> str:
     if not KRATER_DATABASE_URL:
         pytest.skip("KRATER_LIVE_DATABASE_URL (or KRATER_DATABASE_URL) is not set")
-    return KRATER_DATABASE_URL
+    return KRATER_DATABASE_URL.replace("postgresql+psycopg://", "postgresql://")
 
 
-def _krater_user_row(email: str) -> dict[str, Any] | None:
-    dsn = _require_krater_db().replace("postgresql+psycopg://", "postgresql://")
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+def _krater_user(email: str) -> dict[str, Any] | None:
+    with psycopg.connect(_krater_dsn()) as conn, conn.cursor() as cur:
         cur.execute(
-            "select weave_sub, display_name, groups_cached, slack_user_id from users where email = %s",
-            (email,),
+            "select id, weave_sub, email_verified, last_login_at, disabled_at from users where email = %s", (email,)
         )
         row = cur.fetchone()
         if row is None:
             return None
+        cur.execute("select role from user_roles where user_id = %s", (row[0],))
+        roles = {r[0] for r in cur.fetchall()}
         return {
-            "weave_sub": row[0],
-            "display_name": row[1],
-            "groups_cached": row[2],
-            "slack_user_id": row[3],
+            "id": row[0],
+            "weave_sub": row[1],
+            "email_verified": row[2],
+            "last_login_at": row[3],
+            "disabled_at": row[4],
+            "roles": roles,
         }
 
 
+def _reset_krater_user(email: str, *, pending_roles: tuple[str, ...] = ()) -> None:
+    """Start a test from a known state: no roles, not disabled, and exactly `pending_roles` waiting
+    for `email`. Audit events are left alone (append-only)."""
+    with psycopg.connect(_krater_dsn()) as conn, conn.cursor() as cur:
+        cur.execute(
+            "delete from user_roles where user_id in (select id from users where lower(email) = lower(%s))", (email,)
+        )
+        cur.execute("update users set disabled_at = null where lower(email) = lower(%s)", (email,))
+        cur.execute("delete from pending_role_grants where email = lower(%s)", (email,))
+        for role in pending_roles:
+            cur.execute(
+                "insert into pending_role_grants (id, email, role, created_at) "
+                "values (gen_random_uuid(), lower(%s), %s, now())",
+                (email, role),
+            )
+        conn.commit()
+
+
+def _pending_roles(email: str) -> set[str]:
+    with psycopg.connect(_krater_dsn()) as conn, conn.cursor() as cur:
+        cur.execute("select role from pending_role_grants where email = lower(%s)", (email,))
+        return {r[0] for r in cur.fetchall()}
+
+
+def _set_disabled(email: str, disabled: bool) -> None:
+    with psycopg.connect(_krater_dsn()) as conn, conn.cursor() as cur:
+        cur.execute(
+            "update users set disabled_at = case when %s then now() else null end where lower(email) = lower(%s)",
+            (disabled, email),
+        )
+        conn.commit()
+
+
 # --------------------------------------------------------------------------------------------------
-# Directory API, via a real LiveWeaveClient against the real running Weave.
+# Weave's OIDC surface, via the real running Weave.
 # --------------------------------------------------------------------------------------------------
 
 
@@ -132,47 +164,23 @@ def test_discovery_and_jwks_are_reachable(fixture: dict[str, Any]) -> None:
     doc = resp.json()
     assert doc["issuer"] == fixture["issuer"]
     assert "RS256" in doc["id_token_signing_alg_values_supported"]
+    if "scopes_supported" in doc:
+        assert {"openid", "profile", "email"} <= set(doc["scopes_supported"])
 
     jwks = httpx.get(doc["jwks_uri"], timeout=10)
     jwks.raise_for_status()
     assert jwks.json()["keys"]
 
 
-def test_get_user_matches_fixture_for_each_role(fixture: dict[str, Any], weave_client: LiveWeaveClient) -> None:
-    member = weave_client.get_user(fixture["users"]["member"]["sub"])
-    assert member is not None
-    assert member.active
-    assert member.groups == frozenset({"ganymede:member"})
+def test_authorization_url_asks_only_for_standard_scopes(weave_settings: Settings, fixture: dict[str, Any]) -> None:
+    client = LiveWeaveClient(weave_settings)
 
-    reviewer = weave_client.get_user(fixture["users"]["reviewer"]["sub"])
-    assert reviewer is not None
-    assert "ganymede:reviewer" in reviewer.groups
-    assert reviewer.slack_id == fixture["users"]["reviewer"]["slack_id"]
+    url = client.authorization_url(
+        state="s", nonce="n", code_verifier="v" * 64, redirect_uri=fixture.get("redirect_uri", "")
+    )
 
-    admin = weave_client.get_user(fixture["users"]["admin"]["sub"])
-    assert admin is not None
-    assert "ganymede:admin" in admin.groups
-
-    non_member = weave_client.get_user(fixture["users"]["non_member"]["sub"])
-    assert non_member is not None
-    assert "ganymede:member" not in non_member.groups
-
-
-def test_get_user_unknown_sub_returns_none(weave_client: LiveWeaveClient) -> None:
-    assert weave_client.get_user("PWL0000000000000-does-not-exist") is None
-
-
-def test_list_users_in_group_reviewer(fixture: dict[str, Any], weave_client: LiveWeaveClient) -> None:
-    reviewers = weave_client.list_users_in_group("ganymede:reviewer")
-    subs = {u.sub for u in reviewers}
-    assert fixture["users"]["reviewer"]["sub"] in subs
-    assert fixture["users"]["member"]["sub"] not in subs
-
-
-def test_get_user_by_slack_id(fixture: dict[str, Any], weave_client: LiveWeaveClient) -> None:
-    user = weave_client.get_user_by_slack_id(fixture["users"]["reviewer"]["slack_id"])
-    assert user is not None
-    assert user.sub == fixture["users"]["reviewer"]["sub"]
+    assert url.startswith(fixture["issuer"])
+    assert parse_qs(urlparse(url).query)["scope"] == ["openid profile email"]
 
 
 # --------------------------------------------------------------------------------------------------
@@ -229,7 +237,7 @@ def _sign_in(client: httpx.Client, fixture: dict[str, Any], email: str) -> SignI
     confirmation (using a freshly minted token in place of "the user clicked the emailed link") ->
     the OAuth consent screen (submitted for real, when Weave shows one) -> back to Krater's
     `/auth/callback`. Returns the final response Krater gave (a redirect on success, a 403 page for
-    a non-member).
+    a non-member or a disabled account).
     """
     weave_base = fixture["issuer"]
 
@@ -278,75 +286,58 @@ def http_client() -> Iterator[httpx.Client]:
         yield client
 
 
-def test_full_oidc_signin_persists_member(fixture: dict[str, Any], http_client: httpx.Client) -> None:
-    _require_krater_db()
+def test_signin_applies_a_pending_member_grant(fixture: dict[str, Any], http_client: httpx.Client) -> None:
     email = fixture["users"]["member"]["email"]
-    result = _sign_in(http_client, fixture, email)
-    assert result.final_response.status_code == 302, "sign-in should end with Krater redirecting home"
+    _reset_krater_user(email, pending_roles=("ganymede:member",))
 
-    row = _krater_user_row(email)
+    result = _sign_in(http_client, fixture, email)
+
+    assert result.final_response.status_code == 302, "sign-in should end with Krater redirecting home"
+    row = _krater_user(email)
     assert row is not None, "Krater never created/updated the user row"
     assert row["weave_sub"] == fixture["users"]["member"]["sub"]
-    assert "ganymede:member" in row["groups_cached"]
+    assert row["email_verified"] is True, "Weave's id_token should carry email_verified=true"
+    assert row["roles"] == {"ganymede:member"}
+    assert row["last_login_at"] is not None
+    assert _pending_roles(email) == set(), "an applied pending grant should be deleted"
 
 
-def test_full_oidc_signin_persists_reviewer_slack_id(fixture: dict[str, Any], http_client: httpx.Client) -> None:
-    _require_krater_db()
-    email = fixture["users"]["reviewer"]["email"]
-    result = _sign_in(http_client, fixture, email)
+def test_signin_makes_the_bootstrap_admin_an_admin(fixture: dict[str, Any], http_client: httpx.Client) -> None:
+    admin = fixture["users"]["admin"]
+    if admin["sub"] not in os.environ.get("KRATER_BOOTSTRAP_ADMINS", ""):
+        pytest.skip("KRATER_BOOTSTRAP_ADMINS in this shell doesn't name the fixture admin (source .env.weave-e2e)")
+    _reset_krater_user(admin["email"])
+
+    result = _sign_in(http_client, fixture, admin["email"])
+
     assert result.final_response.status_code == 302
-
-    row = _krater_user_row(email)
+    row = _krater_user(admin["email"])
     assert row is not None
-    assert row["slack_user_id"] == fixture["users"]["reviewer"]["slack_id"]
-    assert "ganymede:reviewer" in row["groups_cached"]
+    assert row["roles"] == {"ganymede:member", "ganymede:admin"}
 
 
-def test_oidc_signin_rejects_non_member(fixture: dict[str, Any], http_client: httpx.Client) -> None:
+def test_signin_refuses_a_non_member_but_keeps_their_row(fixture: dict[str, Any], http_client: httpx.Client) -> None:
     email = fixture["users"]["non_member"]["email"]
+    _reset_krater_user(email)
+
     result = _sign_in(http_client, fixture, email)
+
     assert result.final_response.status_code == 403
+    assert "Ask a Ganymede admin" in result.final_response.text
+    row = _krater_user(email)
+    assert row is not None
+    assert row["roles"] == set()
 
 
-# --------------------------------------------------------------------------------------------------
-# Group removal takes effect without a new sign-in (docs/weave-integration.md: "Authorization uses
-# fresh data"). LiveWeaveClient caches directory responses for ~60s per docs/dev/weave-e2e.md to
-# absorb bursts of lookups; rather than sleeping past that TTL, this constructs its own fresh
-# `LiveWeaveClient` (an empty cache, same as Krater's process would have after the TTL, or after a
-# restart) and asserts *that* reflects the change immediately, straight from Weave's Postgres.
-# --------------------------------------------------------------------------------------------------
-
-
-def test_group_removal_is_reflected_by_a_fresh_client(fixture: dict[str, Any], weave_settings: Settings) -> None:
-    if not WEAVE_DATABASE_URL:
-        pytest.skip("WEAVE_DATABASE_URL is not set -- can't manipulate Weave's group_memberships directly")
-
-    reviewer_sub = fixture["users"]["reviewer"]["sub"]
-    with psycopg.connect(WEAVE_DATABASE_URL) as conn, conn.cursor() as cur:
-        cur.execute("select id from users where p_id = %s", (reviewer_sub,))
-        (user_id,) = cur.fetchone()
-        cur.execute("select id from groups where name = 'ganymede:reviewer'")
-        (group_id,) = cur.fetchone()
-
-        cur.execute(
-            "delete from group_memberships where user_id = %s and group_id = %s returning id",
-            (user_id, group_id),
-        )
-        deleted = cur.fetchall()
-        conn.commit()
-
-        try:
-            fresh_client = LiveWeaveClient(weave_settings)  # empty directory cache
-            user = fresh_client.get_user(reviewer_sub)
-            assert user is not None
-            assert "ganymede:reviewer" not in user.groups, "fresh lookup still shows the removed group"
-        finally:
-            # Restore it (granted_by NULL is fine for this fixture) so re-running the suite, or the
-            # interactive proof, without re-provisioning still has a working reviewer.
-            if deleted:
-                cur.execute(
-                    "insert into group_memberships (user_id, group_id, created_at, updated_at) "
-                    "values (%s, %s, now(), now()) on conflict do nothing",
-                    (user_id, group_id),
-                )
-                conn.commit()
+def test_signin_refuses_a_disabled_user(fixture: dict[str, Any], http_client: httpx.Client) -> None:
+    email = fixture["users"]["member"]["email"]
+    _reset_krater_user(email, pending_roles=("ganymede:member",))
+    assert _sign_in(http_client, fixture, email).final_response.status_code == 302
+    _set_disabled(email, True)
+    try:
+        with httpx.Client(follow_redirects=False, timeout=15) as fresh_client:
+            result = _sign_in(fresh_client, fixture, email)
+        assert result.final_response.status_code == 403
+        assert "disabled" in result.final_response.text
+    finally:
+        _set_disabled(email, False)

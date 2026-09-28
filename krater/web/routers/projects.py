@@ -55,19 +55,21 @@ router = APIRouter()
 
 _TERMINAL_STATUSES = (ProjectStatus.COMPLETED, ProjectStatus.WITHDRAWN)
 
-#: `docs/SPEC.md` "Roles & authentication" -- shown when the interim Slack membership gate blocks a
+#: `docs/SPEC.md` "Roles & authentication" -- shown when the Slack membership gate blocks a
 #: submission. Plain text (flash messages aren't rendered as HTML), with the Weave URL spelled out so
 #: it still reads as a link.
 _SLACK_MEMBERSHIP_REQUIRED_MESSAGE = (
     "Join the Patchwork Labs Slack and accept the code of conduct before you can submit. "
-    "Manage your account at {weave_url}, then try again."
+    "Manage your account at {weave_url}, then try again. If your Slack account uses a different email "
+    "from your Weave one, ask a Ganymede admin to link it."
 )
 
 
 def _enforce_slack_membership(db_session: Session, actor: Actor) -> str | None:
-    """`None` if `actor` passes the interim Slack membership gate (`docs/SPEC.md` "Roles &
-    authentication"), else a user-facing error message to flash. Drafts are always allowed; this is
-    only called from the submit routes, right before handing off to `project_service`."""
+    """`None` if `actor` passes the Slack membership gate (`docs/SPEC.md` "Roles & authentication"),
+    else a user-facing error message to flash. Drafts are always allowed; this is only called from the
+    submit routes, right before handing off to `project_service`. A Slack outage raises rather than
+    guessing either way."""
     if slack_membership.is_full_slack_member(db_session, get_slack_client(), actor.user):
         return None
     weave_url = get_settings().weave_issuer or "your Weave profile"

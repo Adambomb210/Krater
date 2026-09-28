@@ -18,7 +18,7 @@
   </p>
 
   {% if refreshed_at %}
-    <p class="muted">Last updated {{ refreshed_at.strftime("%b %-d, %Y %H:%M UTC") }}.</p>
+    <p class="muted">Last updated {{ refreshed_at.strftime("%b") }} {{ refreshed_at.day }}, {{ refreshed_at.strftime("%Y %H:%M UTC") }}.</p>
   {% else %}
     <p class="muted">Prices haven't been refreshed yet.</p>
   {% endif %}

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stand up a real, local SkyPilot 0.13.0 API server (no Docker, dry runs only) plus a real Krater
+# Stand up a real, local SkyPilot API server (no Docker, dry runs only) plus a real Krater
 # process, wire them to each other exactly as docs/skypilot-integration.md describes, and run the
 # contract check: `tests/live/test_skypilot_live.py` plus (unless --skip-launch-gate is passed) a live
 # `sky launch --dryrun` walk through every launch-gate scenario from docs/skypilot-integration.md
@@ -13,7 +13,8 @@
 #   scripts/dev/skypilot_contract.sh [--skip-launch-gate]
 #
 # Required env:
-#   SKYPILOT_VENV   Path to a venv with `skypilot[vast]==0.13.0` installed (`sky` on its bin/).
+#   SKYPILOT_VENV   Path to a venv with the SkyPilot pinned in scripts/dev/skypilot-requirements.txt
+#                   installed (`sky` on its bin/).
 #
 # Optional env (defaults shown):
 #   KRATER_DATABASE_URL   postgresql+psycopg://root:root@localhost:5432/krater_dev
@@ -21,6 +22,7 @@
 #   KRATER_PORT           8202
 #   WORKDIR               a fresh `mktemp -d` (isolated HOME/config dirs live here; deleted on exit
 #                          unless KEEP_WORKDIR=1)
+#   SKYPILOT_STRICT_VERSION  0  (1 turns the installed-vs-pinned version mismatch warning into an error)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,7 +31,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SKY_API_PORT="${SKY_API_PORT:-46580}"
 KRATER_PORT="${KRATER_PORT:-8202}"
 KRATER_DATABASE_URL="${KRATER_DATABASE_URL:-postgresql+psycopg://root:root@localhost:5432/krater_dev}"
-WORKDIR="${WORKDIR:-$(mktemp -d -t skypilot-contract-XXXXXX)}"
 SKIP_LAUNCH_GATE=0
 for arg in "$@"; do
   case "$arg" in
@@ -38,11 +39,30 @@ for arg in "$@"; do
   esac
 done
 
-if [[ -z "${SKYPILOT_VENV:-}" ]]; then
-  echo "SKYPILOT_VENV must point at a venv with skypilot[vast]==0.13.0 installed." >&2
-  echo "  uv venv \"\$SKYPILOT_VENV\" && uv pip install --python \"\$SKYPILOT_VENV/bin/python\" 'skypilot[vast]==0.13.0'" >&2
+SKYPILOT_REQUIREMENTS="$SCRIPT_DIR/skypilot-requirements.txt"
+# CRs stripped: a Windows checkout (core.autocrlf) gives .txt files CRLF endings.
+SKYPILOT_REQUIREMENT="$(tr -d '\r' <"$SKYPILOT_REQUIREMENTS" | grep -Ev '^[[:space:]]*(#|$)' | head -1 | tr -d '[:space:]' || true)"
+SKYPILOT_PINNED_VERSION="${SKYPILOT_REQUIREMENT##*==}"
+if [[ "$SKYPILOT_REQUIREMENT" != skypilot*==* || -z "$SKYPILOT_PINNED_VERSION" ]]; then
+  echo "Could not read a 'skypilot[...]==<version>' pin from $SKYPILOT_REQUIREMENTS (got: '$SKYPILOT_REQUIREMENT')." >&2
   exit 2
 fi
+
+if [[ -z "${SKYPILOT_VENV:-}" ]]; then
+  echo "SKYPILOT_VENV must point at a venv with $SKYPILOT_REQUIREMENT installed." >&2
+  echo "  uv venv \"\$SKYPILOT_VENV\" && uv pip install --python \"\$SKYPILOT_VENV/bin/python\" -r scripts/dev/skypilot-requirements.txt" >&2
+  exit 2
+fi
+# rsync: `sky launch` refuses to run without it, even with --dryrun.
+MISSING_TOOLS=""
+for tool in uv python3 curl setsid hostname rsync; do
+  command -v "$tool" >/dev/null 2>&1 || MISSING_TOOLS="$MISSING_TOOLS $tool"
+done
+if [[ -n "$MISSING_TOOLS" ]]; then
+  echo "Missing required tools on PATH:$MISSING_TOOLS" >&2
+  exit 2
+fi
+
 SKY_BIN="$SKYPILOT_VENV/bin/sky"
 if [[ ! -x "$SKY_BIN" ]]; then
   echo "No 'sky' executable at $SKY_BIN -- is SKYPILOT_VENV set up? (see the message above)" >&2
@@ -50,11 +70,17 @@ if [[ ! -x "$SKY_BIN" ]]; then
 fi
 SKY_VERSION="$("$SKY_BIN" --version 2>&1 | head -1)"
 echo "Using $SKY_BIN ($SKY_VERSION)"
-case "$SKY_VERSION" in
-  *0.13.0*) ;;
-  *) echo "WARNING: expected skypilot==0.13.0, got: $SKY_VERSION -- this contract was written and verified against 0.13.0 only." >&2 ;;
-esac
+# -w so a pin of 0.13.1 doesn't match an installed 0.13.10.
+if ! grep -qwF "$SKYPILOT_PINNED_VERSION" <<<"$SKY_VERSION"; then
+  if [[ "${SKYPILOT_STRICT_VERSION:-0}" == "1" ]]; then
+    echo "ERROR: expected skypilot==$SKYPILOT_PINNED_VERSION (scripts/dev/skypilot-requirements.txt), got: $SKY_VERSION" >&2
+    exit 2
+  fi
+  echo "WARNING: expected skypilot==$SKYPILOT_PINNED_VERSION, got: $SKY_VERSION -- this contract is pinned to $SKYPILOT_PINNED_VERSION (scripts/dev/skypilot-requirements.txt)." >&2
+fi
 
+# Only created once the argument/venv checks above pass, so a usage error doesn't leak a temp dir.
+WORKDIR="${WORKDIR:-$(mktemp -d -t skypilot-contract-XXXXXX)}"
 echo "Working directory: $WORKDIR"
 ADMIN_HOME="$WORKDIR/admin_home"
 MEMBER_HOME="$WORKDIR/member_home"
@@ -330,11 +356,24 @@ _expect "failed closed on a wrong policy token" "RestfulPolicyError" "$OUT"
 echo
 echo "--- Withdrawing the project (expect: workspace torn down and deleted) ---"
 (cd "$REPO_ROOT" && KRATER_DATABASE_URL="$KRATER_DATABASE_URL" uv run python "$SCRIPT_DIR/_skypilot_contract_helper.py" withdraw-project "$PROJECT_ID")
+TEARDOWN_LOG="$WORKDIR/teardown_reconcile.log"
 (cd "$REPO_ROOT" && \
   KRATER_ENV=development KRATER_WEAVE_MODE=stub KRATER_DATABASE_URL="$KRATER_DATABASE_URL" \
   KRATER_SKYPILOT_MODE=live KRATER_SKYPILOT_API_URL="http://127.0.0.1:${SKY_API_PORT}" \
   KRATER_SKYPILOT_SERVICE_TOKEN="$ADMIN_TOKEN" KRATER_SKYPILOT_POLICY_TOKEN="$POLICY_TOKEN" \
-  uv run python -m krater.skypilot.reconcile_once)
+  uv run python -m krater.skypilot.reconcile_once) 2>&1 | tee "$TEARDOWN_LOG"
+# The reconciler logs a failed step and carries on, so success has to be checked, not assumed. Krater
+# clears the project's workspace only after SkyPilot confirmed the delete.
+REMAINING_WORKSPACE="$(cd "$REPO_ROOT" && KRATER_DATABASE_URL="$KRATER_DATABASE_URL" uv run python "$SCRIPT_DIR/_skypilot_contract_helper.py" workspace "$PROJECT_ID")"
+if [[ -z "$REMAINING_WORKSPACE" ]]; then
+  echo "OK: workspace $WORKSPACE torn down and deleted"
+elif grep -q "network error" "$TEARDOWN_LOG"; then
+  # docs/dev/skypilot-contract.md "Known gap": serve status needs direct internet.
+  echo "WARNING: workspace $WORKSPACE was not torn down because SkyPilot's serve-status check had no direct internet access; not a Krater bug, but teardown is unverified on this machine." >&2
+else
+  echo "FAIL: workspace $WORKSPACE was not torn down after withdrawal; see the reconcile output above ($TEARDOWN_LOG)." >&2
+  exit 1
+fi
 
 echo
 echo "All launch-gate scenarios passed."

@@ -15,7 +15,7 @@ services:
 
   migrate:
     build: .
-    env_file: .env
+    env_file: ${KRATER_ENV_FILE:-.env}
     command: ["alembic", "upgrade", "head"]
     depends_on:
       db:
@@ -23,7 +23,7 @@ services:
 
   portal:
     build: .
-    env_file: .env
+    env_file: ${KRATER_ENV_FILE:-.env}
     ports:
       - "${PORT:-8000}:8000"
     depends_on:
@@ -32,7 +32,7 @@ services:
 
   worker:
     build: .
-    env_file: .env
+    env_file: ${KRATER_ENV_FILE:-.env}
     command: ["procrastinate", "--app=krater.worker.app.app", "worker"]
     depends_on:
       migrate:
@@ -90,14 +90,15 @@ services:
   #
   # The server config (~/.sky/config.yaml) is generated from env at container start, the same way
   # `storage`'s identities file is, so nothing secret (the policy token) is committed. The start command
-  # (`sky api start --deploy --foreground`) matches SkyPilot's official Helm chart; the container itself hasn't been
-  # run end to end yet, so check it on the first `docker compose --profile skypilot up` (docs/dev/staging.md).
+  # (`sky api start --deploy --foreground`) matches SkyPilot's official Helm chart. Verified starting under
+  # Docker Desktop, with Krater's reconcile and a `sky launch --dryrun` through the launch gate against it.
   skypilot:
     image: berkeleyskypilot/skypilot:0.13.0
     profiles: ["skypilot"]
-    env_file: .env
+    # No env_file here (nor on auth-proxy): it would hand every Krater secret (session key, DB and S3
+    # credentials) to a server members submit work to. Only what's listed below is passed in.
     environment:
-      KRATER_PUBLIC_URL: ${KRATER_PUBLIC_URL:-http://localhost:8000}
+      KRATER_PUBLIC_URL: ${KRATER_PUBLIC_URL:-http://host.docker.internal:8000}
       KRATER_SKYPILOT_POLICY_TOKEN: ${KRATER_SKYPILOT_POLICY_TOKEN}
       # Member SSO: the API server delegates auth decisions to `auth-proxy` over the internal network.
       # See docs/dev/skypilot-spike.md section 3 for the GET {base_url}/oauth2/auth contract this uses.
@@ -105,59 +106,90 @@ services:
       SKYPILOT_AUTH_OAUTH2_PROXY_BASE_URL: "http://auth-proxy:4180"
       # Krater's admin REST calls use a service-account bearer token instead (see
       # KRATER_SKYPILOT_SERVICE_TOKEN); both flags are required to mint and accept one (spike Surprise
-      # and section 3). ENABLE_BASIC_AUTH is only needed for the one-time bootstrap that creates that
-      # token (docs/dev/staging.md) -- it doesn't affect member sign-in, which goes through auth-proxy.
-      ENABLE_BASIC_AUTH: "true"
+      # and section 3). Basic auth is only for the one-time bootstrap that mints that token
+      # (docs/dev/staging.md); set KRATER_SKYPILOT_ENABLE_BASIC_AUTH=false afterwards. While it's on,
+      # SkyPilot checks it before asking auth-proxy, so every member request without basic credentials
+      # gets a 401 and member sign-in can't work.
+      ENABLE_BASIC_AUTH: ${KRATER_SKYPILOT_ENABLE_BASIC_AUTH:-true}
       ENABLE_SERVICE_ACCOUNTS: "true"
+      # SkyPilot only reads SKYPILOT_INITIAL_BASIC_AUTH (`user:<bcrypt hash>`, the admin it creates on
+      # its first start with an empty volume); the command below builds it from these two. No default
+      # password on purpose: with basic auth on, the command refuses to start without one.
       SKYPILOT_BASIC_AUTH_USER: ${KRATER_SKYPILOT_BASIC_AUTH_USER:-admin}
-      # No safe default here on purpose -- set a real value in .env before using --profile skypilot.
-      SKYPILOT_BASIC_AUTH_PASSWORD: ${KRATER_SKYPILOT_BASIC_AUTH_PASSWORD:-changeme-set-in-dot-env}
+      SKYPILOT_BASIC_AUTH_PASSWORD: ${KRATER_SKYPILOT_BASIC_AUTH_PASSWORD:-}
     entrypoint: ["/bin/sh", "-c"]
-    command: |
-      set -eu
-      mkdir -p /root/.sky /root/.config/vastai
-      cat > /root/.sky/config.yaml <<CFG
-      # Generated at container start by docker-compose.yml's "skypilot" service -- do not edit by hand.
+    # A one-item list, not a bare string: Compose splits a string `command` into words, so `sh -c` would
+    # only run `set` (dumping the whole environment, secrets included, to the log) and exit.
+    # `$$` defers expansion to the container's shell, so the defaults under `environment:` apply.
+    command:
+      - |
+        set -eu
+        if [ "$$ENABLE_BASIC_AUTH" = "true" ]; then
+          : "$${SKYPILOT_BASIC_AUTH_PASSWORD:?set KRATER_SKYPILOT_BASIC_AUTH_PASSWORD}"
+          SKYPILOT_INITIAL_BASIC_AUTH="$$SKYPILOT_BASIC_AUTH_USER:$$(python -c 'import bcrypt, os; print(bcrypt.hashpw(os.environ["SKYPILOT_BASIC_AUTH_PASSWORD"].encode(), bcrypt.gensalt()).decode())')"
+          export SKYPILOT_INITIAL_BASIC_AUTH
+        fi
+        unset SKYPILOT_BASIC_AUTH_PASSWORD
+        mkdir -p /root/.sky /root/.config/vastai
+        cat > /tmp/krater-sky-config.yaml <<CFG
+        # Generated at container start by docker-compose.yml's "skypilot" service -- do not edit by hand.
 
-      # docs/dev/skypilot-spike.md Surprise #1: this URL is also called from members' own machines
-      # (client-side, before the request ever reaches this server), so it must be publicly reachable,
-      # not an internal Docker hostname like http://portal:8000.
-      admin_policy: ${KRATER_PUBLIC_URL}/internal/skypilot/policy?token=${KRATER_SKYPILOT_POLICY_TOKEN}
+        # docs/dev/skypilot-spike.md Surprise #1: this URL is called both from members' own machines
+        # (client-side) and from this container (server-side), so it must be reachable from both: not an
+        # internal Docker hostname like http://portal:8000, and not localhost (this container's own).
+        admin_policy: $${KRATER_PUBLIC_URL}/internal/skypilot/policy?token=$${KRATER_SKYPILOT_POLICY_TOKEN}
 
-      # Spike Surprise #5: without this, every new SSO login defaults to SkyPilot role admin.
-      rbac:
-        default_role: user
+        # Spike Surprise #5: without this, every new SSO login defaults to SkyPilot role admin.
+        rbac:
+          default_role: user
 
-      # The "default" workspace isn't tied to any Ganymede project -- disable every cloud in it so
-      # nothing can be launched outside a project's own (per-project) workspace. There is no
-      # workspace-level cloud allowlist (spike section 2): each cloud has to be deny-listed individually.
-      workspaces:
-        default:
-          aws: {disabled: true}
-          azure: {disabled: true}
-          cudo: {disabled: true}
-          do: {disabled: true}
-          fluidstack: {disabled: true}
-          gcp: {disabled: true}
-          hyperbolic: {disabled: true}
-          ibm: {disabled: true}
-          kubernetes: {disabled: true}
-          lambda: {disabled: true}
-          mithril: {disabled: true}
-          nebius: {disabled: true}
-          oci: {disabled: true}
-          paperspace: {disabled: true}
-          primeintellect: {disabled: true}
-          runpod: {disabled: true}
-          scp: {disabled: true}
-          seeweb: {disabled: true}
-          shadeform: {disabled: true}
-          ssh: {disabled: true}
-          vast: {disabled: true}
-          vsphere: {disabled: true}
-          yotta: {disabled: true}
-      CFG
-      exec sky api start --deploy --foreground
+        # The "default" workspace isn't tied to any Ganymede project -- disable every cloud in it so
+        # nothing can be launched outside a project's own (per-project) workspace. There is no
+        # workspace-level cloud allowlist (spike section 2): each cloud has to be deny-listed individually.
+        workspaces:
+          default:
+            aws: {disabled: true}
+            azure: {disabled: true}
+            cudo: {disabled: true}
+            do: {disabled: true}
+            fluidstack: {disabled: true}
+            gcp: {disabled: true}
+            hyperbolic: {disabled: true}
+            ibm: {disabled: true}
+            kubernetes: {disabled: true}
+            lambda: {disabled: true}
+            mithril: {disabled: true}
+            nebius: {disabled: true}
+            oci: {disabled: true}
+            paperspace: {disabled: true}
+            primeintellect: {disabled: true}
+            runpod: {disabled: true}
+            scp: {disabled: true}
+            seeweb: {disabled: true}
+            shadeform: {disabled: true}
+            ssh: {disabled: true}
+            vast: {disabled: true}
+            vsphere: {disabled: true}
+            yotta: {disabled: true}
+        CFG
+        # SkyPilot saves the workspaces Krater creates into this same file, so keep those rather than
+        # overwriting it; everything else is regenerated from env on every start.
+        python - <<'PY'
+        import os, yaml
+        path = "/root/.sky/config.yaml"
+        with open("/tmp/krater-sky-config.yaml") as f:
+            config = yaml.safe_load(f)
+        current = {}
+        if os.path.exists(path):
+            with open(path) as f:
+                current = yaml.safe_load(f) or {}
+        workspaces = current.get("workspaces") or {}
+        workspaces.update(config["workspaces"])
+        config["workspaces"] = workspaces
+        with open(path, "w") as f:
+            yaml.safe_dump(config, f, sort_keys=False)
+        PY
+        exec sky api start --deploy --foreground
     ports:
       - "${SKYPILOT_PORT:-46580}:46580"
     volumes:
@@ -166,6 +198,9 @@ services:
       # always-present file) so plain `docker compose up` (this service isn't in its default profile)
       # never fails to parse just because this isn't set.
       - ${KRATER_SKYPILOT_VAST_KEY_FILE:-/dev/null}:/root/.config/vastai/vast_api_key:ro
+    extra_hosts:
+      # Lets the default KRATER_PUBLIC_URL resolve on a plain Linux Docker engine too, not only Docker Desktop.
+      - "host.docker.internal:host-gateway"
     depends_on:
       - auth-proxy
 
@@ -174,7 +209,6 @@ services:
   auth-proxy:
     image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
     profiles: ["skypilot"]
-    env_file: .env
     environment:
       OAUTH2_PROXY_HTTP_ADDRESS: "0.0.0.0:4180"
       OAUTH2_PROXY_UPSTREAMS: "http://skypilot:46580"
@@ -185,12 +219,11 @@ services:
       OAUTH2_PROXY_CLIENT_SECRET: ${KRATER_SKYPILOT_AUTH_CLIENT_SECRET}
       OAUTH2_PROXY_COOKIE_SECRET: ${KRATER_SKYPILOT_AUTH_COOKIE_SECRET}
       OAUTH2_PROXY_REDIRECT_URL: "${KRATER_SKYPILOT_PUBLIC_URL:-http://localhost:46580}/oauth2/callback"
-      OAUTH2_PROXY_SCOPE: "openid email profile groups"
-      OAUTH2_PROXY_OIDC_GROUPS_CLAIM: "groups"
-      # Depends on Weave's `groups` claim (branch Krater-Integration, not yet merged) -- see
-      # docs/skypilot-integration.md section 0 for the fallback (drop this, rely on private workspaces
-      # alone) if it isn't available yet.
-      OAUTH2_PROXY_ALLOWED_GROUPS: "ganymede:member"
+      # Standard scopes only: Weave's main branch has no `groups` claim (Ganymede roles live in Krater's
+      # database), so any Weave user can sign in here. They still see nothing: every project workspace
+      # is private to its team, and Krater's launch gate rejects anything outside one. See
+      # docs/skypilot-integration.md section 0.
+      OAUTH2_PROXY_SCOPE: "openid email profile"
       OAUTH2_PROXY_EMAIL_DOMAINS: "*"
       OAUTH2_PROXY_CODE_CHALLENGE_METHOD: "S256"
       OAUTH2_PROXY_COOKIE_EXPIRE: "8h"

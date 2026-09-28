@@ -19,7 +19,6 @@ _PRODUCTION_READY: dict = {
     "base_url": "https://ganymede.patchworklabs.example",
     "weave_mode": "live",
     "weave_client_secret": "weave-client-secret",
-    "weave_service_key": "weave-service-key",
     "skypilot_mode": "live",
     "skypilot_policy_token": "x" * 32,
     "slack_mode": "live",
@@ -87,7 +86,6 @@ def test_production_accepts_an_https_base_url() -> None:
     "field,env_name",
     [
         ("weave_client_secret", "WEAVE_CLIENT_SECRET"),
-        ("weave_service_key", "WEAVE_SERVICE_KEY"),
         ("slack_signing_secret", "SLACK_SIGNING_SECRET"),
         ("s3_access_key_id", "S3_ACCESS_KEY_ID"),
         ("s3_secret_access_key", "S3_SECRET_ACCESS_KEY"),
@@ -103,3 +101,15 @@ def test_development_and_test_envs_are_unconstrained() -> None:
     # and the default secret key, which is exactly what most of this test suite already relies on.
     Settings(env="development")
     Settings(env="test")
+
+
+def test_weave_needs_no_service_key_or_directory_url() -> None:
+    # Krater uses Weave for OIDC sign-in only; the old directory settings are gone.
+    assert "weave_service_key" not in Settings.model_fields
+    assert "weave_api_base_url" not in Settings.model_fields
+
+
+def test_bootstrap_admins_reads_from_the_environment(monkeypatch) -> None:
+    monkeypatch.setenv("KRATER_BOOTSTRAP_ADMINS", "PWL5A1B2C3D4,ada@example.com")
+
+    assert Settings().bootstrap_admins == "PWL5A1B2C3D4,ada@example.com"

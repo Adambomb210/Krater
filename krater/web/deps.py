@@ -1,16 +1,18 @@
-"""Auth dependencies for HTML routes: who's signed in, and what Weave currently says they may do.
+"""Auth dependencies for HTML routes: who's signed in, and which Krater roles they hold right now.
 
 - `current_user`: the signed-in `User`, or `None`. For pages that render differently either way (e.g. the
   header's "sign in" link vs. the user's name) without requiring sign-in.
 - `require_user`: the signed-in `User`, or a redirect to `/login?next=<this page>`. For any page that
-  needs *a* signed-in user but doesn't itself gate on group membership.
-- `session_actor`: an `Actor` built from the session's cached `groups_cached`. **Display and navigation
-  only** -- e.g. deciding whether to show a "Review" link. Never use it to authorize an action: it can be
-  stale by up to a session's lifetime.
-- `fresh_actor`: an `Actor` built from a live `WeaveClient.get_user()` call. Refuses (403) if the user is
-  inactive or no longer `ganymede:member`. **Every state-changing action must use this, or one of the two
-  below, instead of `session_actor`.**
+  needs *a* signed-in user but doesn't itself gate on roles.
+- `session_actor`: an `Actor` with the user's current roles, refusing nobody. **Display and navigation
+  only** -- e.g. deciding whether to show a "Review" link. Never use it to authorize an action.
+- `fresh_actor`: an `Actor` from `krater.services.roles.authorize`. Refuses (403) if the account is
+  disabled or no longer holds `ganymede:member`. **Every state-changing action must use this, or one of
+  the two below, instead of `session_actor`.**
 - `require_reviewer` / `require_admin`: `fresh_actor`, plus a 403 unless the actor is a reviewer/admin.
+
+Roles and the disabled flag live in Krater's database (`krater.services.roles`), so both actors read them
+on every request; there's no Weave call involved.
 """
 
 from __future__ import annotations
@@ -24,8 +26,9 @@ from sqlalchemy.orm import Session
 
 from krater.db import get_session
 from krater.models import User
-from krater.services.actor import GROUP_MEMBER, Actor
-from krater.weave import WeaveClient, get_weave_client
+from krater.services import roles
+from krater.services.actor import Actor
+from krater.services.errors import NotAllowed
 
 SESSION_USER_ID_KEY = "user_id"
 
@@ -56,25 +59,22 @@ def require_user(request: Request, user: Annotated[User | None, Depends(current_
     )
 
 
-def session_actor(user: Annotated[User, Depends(require_user)]) -> Actor:
-    """An `Actor` from the session's cached groups. Display/navigation only -- see the module docstring."""
-    return Actor(user=user, groups=frozenset(user.groups_cached))
+def session_actor(
+    user: Annotated[User, Depends(require_user)], db_session: Annotated[Session, Depends(get_session)]
+) -> Actor:
+    """An `Actor` with the user's current roles. Display/navigation only -- see the module docstring."""
+    return roles.actor_for(db_session, user)
 
 
 def fresh_actor(
-    user: Annotated[User, Depends(require_user)],
-    weave_client: Annotated[WeaveClient, Depends(get_weave_client)],
+    user: Annotated[User, Depends(require_user)], db_session: Annotated[Session, Depends(get_session)]
 ) -> Actor:
-    """An `Actor` built from a live Weave lookup. Refuses (403) if Weave no longer lists the user as an
-    active Ganymede member. Use this (or `require_reviewer`/`require_admin`) for state-changing actions.
-    """
-    weave_user = weave_client.get_user(user.weave_sub)
-    if weave_user is None or not weave_user.active or GROUP_MEMBER not in weave_user.groups:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Weave no longer lists you as an active Ganymede member",
-        )
-    return Actor(user=user, groups=weave_user.groups)
+    """An `Actor` for authorizing an action. Refuses (403) a disabled account or a non-member. Use this
+    (or `require_reviewer`/`require_admin`) for state-changing actions."""
+    try:
+        return roles.authorize(db_session, user)
+    except NotAllowed as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
 
 
 def require_reviewer(actor: Annotated[Actor, Depends(fresh_actor)]) -> Actor:

@@ -32,14 +32,17 @@ class Settings(BaseSettings):
     # 0 (the default) means: don't trust `X-Forwarded-For` at all, use the socket peer address.
     trusted_proxy_count: int = 0
 
-    # Weave (Patchwork Labs identity provider) integration. See docs/weave-integration.md.
+    # Weave (Patchwork Labs identity provider): OIDC sign-in only. See docs/weave-integration.md.
     weave_mode: Literal["stub", "live"] = "stub"
     weave_issuer: str = ""
     weave_client_id: str = ""
     weave_client_secret: str = ""
-    weave_api_base_url: str = ""
-    weave_service_key: str = ""
     weave_stub_users_file: str = ""
+
+    # Comma-separated Weave subs (e.g. PWL5A1B2C3D4) and/or email addresses. At sign-in, a match gets
+    # ganymede:admin and ganymede:member if missing; emails only match when Weave says they're verified.
+    # How a fresh deployment gets its first admin, since roles now live in Krater's database.
+    bootstrap_admins: str = ""
 
     # SkyPilot integration. See docs/skypilot-integration.md and docs/dev/skypilot-spike.md.
     # `fake` uses an in-memory SkyPilot for dev and tests; `live` talks to a real API server over REST.
@@ -116,8 +119,6 @@ class Settings(BaseSettings):
             # (an unauthenticated Weave/Slack/S3 client, or one Weave rejects) instead of at startup.
             if not self.weave_client_secret:
                 raise ValueError("KRATER_WEAVE_CLIENT_SECRET must be set when KRATER_ENV=production")
-            if not self.weave_service_key:
-                raise ValueError("KRATER_WEAVE_SERVICE_KEY must be set when KRATER_ENV=production")
             if not self.slack_signing_secret:
                 raise ValueError("KRATER_SLACK_SIGNING_SECRET must be set when KRATER_ENV=production")
             if not self.s3_access_key_id:

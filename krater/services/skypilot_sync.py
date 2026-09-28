@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
@@ -24,7 +25,7 @@ from sqlalchemy.orm import Session
 from krater.models import AuditEvent, Project, ProjectStatus, SpendSnapshot, SpendSource, User
 from krater.services import audit, budget
 from krater.skypilot.client import SkyPilotClient
-from krater.skypilot.errors import SkyPilotError
+from krater.skypilot.errors import SkyPilotError, SkyPilotWorkspaceNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -60,17 +61,35 @@ def workspace_name_for(project_id: uuid.UUID) -> str:
 
 def _team_emails(session: Session, project: Project) -> list[str]:
     """The submitter's email plus the emails of the credited builders on the project's latest revision
-    (`current_revision`: the newest revision, draft or submitted -- see `krater.services.projects`)."""
-    emails = {project.submitter.email}
+    (`current_revision`: the newest revision, draft or submitted -- see `krater.services.projects`).
+
+    Disabled users are left out, so disabling someone in Krater also takes them out of every project
+    workspace on the next reconcile (Weave's own lock doesn't reach SkyPilot)."""
+    people = [project.submitter]
     revision = project.current_revision
     if revision is not None and revision.credited_builder_ids:
-        builders = session.scalars(sa.select(User).where(User.id.in_(revision.credited_builder_ids)))
-        emails.update(user.email for user in builders)
-    return sorted(emails)
+        people.extend(session.scalars(sa.select(User).where(User.id.in_(revision.credited_builder_ids))))
+    return sorted({person.email for person in people if person.disabled_at is None})
 
 
 def _active_projects(session: Session) -> list[Project]:
     return list(session.scalars(sa.select(Project).where(Project.status.in_(_PROVISIONED_STATUSES))))
+
+
+def _per_project(session: Session, step: str, project: Project, work: Callable[[], None]) -> None:
+    """Run one project's share of a reconcile step on its own SAVEPOINT.
+
+    A `SkyPilotError` is logged with the project's id, that project's partial writes are rolled back,
+    and the caller moves on to the next project: the same log-and-carry-on `reconcile` applies per
+    step, one level down, so one broken project can't block every other project's provisioning,
+    teardown or budget enforcement. Anything else still propagates.
+    """
+    project_id = project.id
+    try:
+        with session.begin_nested():
+            work()
+    except SkyPilotError:
+        logger.exception("krater.skypilot reconcile step %s failed for project %s; continuing", step, project_id)
 
 
 def sync_workspaces(session: Session, client: SkyPilotClient) -> None:
@@ -86,20 +105,36 @@ def sync_workspaces(session: Session, client: SkyPilotClient) -> None:
       is deleted and `skypilot_workspace` cleared -- once the workspace is gone, nothing can attribute
       further `cost_report` rows back to this project (see `docs/skypilot-integration.md` section 4,
       "Final spend").
+    - A finished project whose workspace no longer exists on SkyPilot (deleted by hand, or a SkyPilot
+      state reset) is recorded as torn down the same way, with the larger of `cost_report`'s total and
+      its last recorded spend as the final figure. An active project's missing workspace needs nothing
+      special: SkyPilot's workspace update recreates it.
+
+    Each project is handled separately (`_per_project`): a failure for one is logged and skipped.
     """
     for project in _active_projects(session):
-        allowed_users = _team_emails(session, project)
-        if project.skypilot_workspace is None:
-            name = workspace_name_for(project.id)
-            client.create_workspace(name, allowed_users=allowed_users)
-            project.skypilot_workspace = name
-        else:
-            client.update_workspace(project.skypilot_workspace, allowed_users=allowed_users)
-        session.flush()
+        _per_project(session, "sync_workspaces", project, lambda p=project: _provision_workspace(session, client, p))
 
     stmt = sa.select(Project).where(Project.status.in_(_TERMINAL_STATUSES), Project.skypilot_workspace.is_not(None))
-    for project in session.scalars(stmt):
-        name = project.skypilot_workspace
+    for project in list(session.scalars(stmt)):
+        _per_project(session, "sync_workspaces", project, lambda p=project: _tear_down_workspace(session, client, p))
+
+
+def _provision_workspace(session: Session, client: SkyPilotClient, project: Project) -> None:
+    allowed_users = _team_emails(session, project)
+    if project.skypilot_workspace is None:
+        name = workspace_name_for(project.id)
+        client.create_workspace(name, allowed_users=allowed_users)
+        project.skypilot_workspace = name
+    else:
+        client.update_workspace(project.skypilot_workspace, allowed_users=allowed_users)
+    session.flush()
+
+
+def _tear_down_workspace(session: Session, client: SkyPilotClient, project: Project) -> None:
+    name = project.skypilot_workspace
+    already_gone = False
+    try:
         for cluster in client.list_clusters(name):
             client.down_cluster(cluster.name)
         client.cancel_managed_jobs(name)
@@ -108,28 +143,42 @@ def sync_workspaces(session: Session, client: SkyPilotClient) -> None:
         # its compute) running forever, orphaned once the workspace itself is deleted below.
         for service in client.list_services(name):
             client.down_service(service.name)
+    except SkyPilotWorkspaceNotFoundError:
+        # Deleted out of band (by hand, or a SkyPilot state reset): nothing is left in it to down, and
+        # retrying would fail the same way on every reconcile.
+        logger.warning(
+            "krater.skypilot workspace %s of project %s no longer exists on SkyPilot; recording it as torn down",
+            name,
+            project.id,
+        )
+        already_gone = True
 
-        final_spend_cents = _workspace_total_cents(client, name)
-        if final_spend_cents != budget.latest_spend_cents(session, project):
-            session.add(
-                SpendSnapshot(
-                    project_id=project.id,
-                    estimated_spend_cents=final_spend_cents,
-                    source=SpendSource.SKYPILOT_COST_REPORT,
-                )
+    final_spend_cents = _workspace_total_cents(client, name)
+    if already_gone:
+        # A state reset also wipes `cost_report`'s history, which would read as zero spend. Spend only
+        # ever grows, so never let that erase what was already recorded.
+        final_spend_cents = max(final_spend_cents, budget.latest_spend_cents(session, project))
+    if final_spend_cents != budget.latest_spend_cents(session, project):
+        session.add(
+            SpendSnapshot(
+                project_id=project.id,
+                estimated_spend_cents=final_spend_cents,
+                source=SpendSource.SKYPILOT_COST_REPORT,
             )
-            session.flush()
-
-        client.delete_workspace(name)
-        project.skypilot_workspace = None
-        audit.record(
-            session,
-            None,
-            AUDIT_WORKSPACE_TORN_DOWN,
-            project=project,
-            payload={"workspace": name, "final_spend_cents": final_spend_cents},
         )
         session.flush()
+
+    if not already_gone:
+        client.delete_workspace(name)
+    project.skypilot_workspace = None
+    audit.record(
+        session,
+        None,
+        AUDIT_WORKSPACE_TORN_DOWN,
+        project=project,
+        payload={"workspace": name, "final_spend_cents": final_spend_cents},
+    )
+    session.flush()
 
 
 def _workspace_total_cents(client: SkyPilotClient, workspace: str) -> int:
@@ -197,73 +246,84 @@ def enforce_budgets(session: Session, client: SkyPilotClient, *, warn_percent: i
       though the teardown calls themselves repeat. Subsequent teardowns within the same crossing update
       that event's `teardown_count` in place instead of inserting a new row, so the record still shows
       that enforcement kept firing.
+
+    Each project is handled separately (`_per_project`): a failure for one is logged and skipped.
     """
     stmt = sa.select(Project).where(Project.status.in_(_PROVISIONED_STATUSES), Project.skypilot_workspace.is_not(None))
-    for project in session.scalars(stmt):
-        workspace = project.skypilot_workspace
-        ceiling_cents = budget.ceiling_cents(session, project)
-        spend_cents = budget.latest_spend_cents(session, project)
-        percent = _budget_percent(ceiling_cents, spend_cents)
+    for project in list(session.scalars(stmt)):
+        _per_project(
+            session,
+            "enforce_budgets",
+            project,
+            lambda p=project: _enforce_budget(session, client, p, warn_percent=warn_percent),
+        )
 
-        if percent >= warn_percent:
-            last_warning = _latest_audit_event(session, project, AUDIT_BUDGET_WARNING)
-            already_warned_at_this_ceiling = last_warning is not None and ceiling_cents <= last_warning.payload.get(
-                "ceiling_cents", 0
+
+def _enforce_budget(session: Session, client: SkyPilotClient, project: Project, *, warn_percent: int) -> None:
+    workspace = project.skypilot_workspace
+    ceiling_cents = budget.ceiling_cents(session, project)
+    spend_cents = budget.latest_spend_cents(session, project)
+    percent = _budget_percent(ceiling_cents, spend_cents)
+
+    if percent >= warn_percent:
+        last_warning = _latest_audit_event(session, project, AUDIT_BUDGET_WARNING)
+        already_warned_at_this_ceiling = last_warning is not None and ceiling_cents <= last_warning.payload.get(
+            "ceiling_cents", 0
+        )
+        if not already_warned_at_this_ceiling:
+            audit.record(
+                session,
+                None,
+                AUDIT_BUDGET_WARNING,
+                project=project,
+                payload={
+                    "ceiling_cents": ceiling_cents,
+                    "spend_cents": spend_cents,
+                    "percent": round(percent, 1),
+                },
             )
-            if not already_warned_at_this_ceiling:
-                audit.record(
-                    session,
-                    None,
-                    AUDIT_BUDGET_WARNING,
-                    project=project,
-                    payload={
-                        "ceiling_cents": ceiling_cents,
-                        "spend_cents": spend_cents,
-                        "percent": round(percent, 1),
-                    },
-                )
-                session.flush()
+            session.flush()
 
-        if percent >= 100.0:
-            clusters = client.list_clusters(workspace)
-            current_names = sorted(cluster.name for cluster in clusters)
-            for cluster in clusters:
-                client.down_cluster(cluster.name)
-            client.cancel_managed_jobs(workspace)
-            # Serve services provision their own controller/replica clusters outside `list_clusters`'
-            # view -- an over-budget project's live service must be torn down too, or it keeps running
-            # (and spending) past the point the policy endpoint has already started blocking new launches.
-            for service in client.list_services(workspace):
-                client.down_service(service.name)
+    if percent >= 100.0:
+        clusters = client.list_clusters(workspace)
+        current_names = sorted(cluster.name for cluster in clusters)
+        for cluster in clusters:
+            client.down_cluster(cluster.name)
+        client.cancel_managed_jobs(workspace)
+        # Serve services provision their own controller/replica clusters outside `list_clusters`'
+        # view -- an over-budget project's live service must be torn down too, or it keeps running
+        # (and spending) past the point the policy endpoint has already started blocking new launches.
+        for service in client.list_services(workspace):
+            client.down_service(service.name)
 
-            last_teardown = _latest_audit_event(session, project, AUDIT_BUDGET_TEARDOWN)
-            already_armed_at_this_ceiling = last_teardown is not None and ceiling_cents <= last_teardown.payload.get(
-                "ceiling_cents", 0
+        last_teardown = _latest_audit_event(session, project, AUDIT_BUDGET_TEARDOWN)
+        already_armed_at_this_ceiling = last_teardown is not None and ceiling_cents <= last_teardown.payload.get(
+            "ceiling_cents", 0
+        )
+        if already_armed_at_this_ceiling:
+            # Same crossing as last time: the teardown calls above still ran (that's the actual
+            # enforcement), but don't insert another audit row/Slack post for it -- just note that
+            # it fired again.
+            payload = dict(last_teardown.payload)
+            payload["teardown_count"] = int(payload.get("teardown_count", 1)) + 1
+            payload["cluster_names"] = current_names
+            payload["spend_cents"] = spend_cents
+            last_teardown.payload = payload
+            session.flush()
+        else:
+            audit.record(
+                session,
+                None,
+                AUDIT_BUDGET_TEARDOWN,
+                project=project,
+                payload={
+                    "cluster_names": current_names,
+                    "ceiling_cents": ceiling_cents,
+                    "spend_cents": spend_cents,
+                    "teardown_count": 1,
+                },
             )
-            if already_armed_at_this_ceiling:
-                # Same crossing as last time: the teardown calls above still ran (that's the actual
-                # enforcement), but don't insert another audit row/Slack post for it -- just note that
-                # it fired again.
-                payload = dict(last_teardown.payload)
-                payload["teardown_count"] = int(payload.get("teardown_count", 1)) + 1
-                payload["cluster_names"] = current_names
-                payload["spend_cents"] = spend_cents
-                last_teardown.payload = payload
-                session.flush()
-            else:
-                audit.record(
-                    session,
-                    None,
-                    AUDIT_BUDGET_TEARDOWN,
-                    project=project,
-                    payload={
-                        "cluster_names": current_names,
-                        "ceiling_cents": ceiling_cents,
-                        "spend_cents": spend_cents,
-                        "teardown_count": 1,
-                    },
-                )
-                session.flush()
+            session.flush()
 
 
 def current_budget_flag(session: Session, project: Project, *, warn_percent: int) -> str | None:
@@ -297,7 +357,9 @@ def reconcile(session: Session, client: SkyPilotClient, *, warn_percent: int) ->
     Committing per step means a SkyPilot outage partway through doesn't lose the other steps' work: if
     one step raises `SkyPilotError`, it's logged and the next step still runs on the next scheduled
     reconcile (this function itself doesn't retry within a single call, since the periodic task is
-    already the retry loop).
+    already the retry loop). Within `enforce_budgets` and `sync_workspaces`, the same applies per
+    project (`_per_project`), so a step only fails as a whole on a call that isn't per project (e.g.
+    `sync_spend`'s single `cost_report`).
     """
     steps = (
         ("sync_spend", lambda: sync_spend(session, client)),

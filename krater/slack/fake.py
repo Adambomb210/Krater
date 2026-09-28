@@ -1,16 +1,21 @@
 """`FakeSlackClient`: an in-memory `SlackClient` for `KRATER_SLACK_MODE=fake` (development and tests).
 
 Makes no network calls. Every mutating call is recorded (`self.posts`, `self.updates`, ...) so tests
-can assert on what happened, and every `stub_users.json` dev fixture user (which already carries a
-`slack_id`) is treated as a full, active Slack member by default -- see `get_user_info` -- so the
-Slack membership gate doesn't block ordinary dev/test flows without deliberately configuring otherwise.
+can assert on what happened. Any Slack id answers `get_user_info` as a full, active member by default,
+so the Slack membership gate doesn't block ordinary dev/test flows for the `stub_users.json` fixture
+users (whose `slack_id` stub sign-in stores). The one exception is the fixture's guest,
+`DEV_GUEST_SLACK_ID`, which answers as a single-channel guest so the gate can be seen working in dev.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 
 from krater.slack.types import SlackUserInfo
+
+#: `PWLSLACKGUEST`'s `slack_id` in `krater/weave/stub_users.json`.
+DEV_GUEST_SLACK_ID = "U0005GUEST"
 
 
 class FakeSlackClient:
@@ -27,9 +32,14 @@ class FakeSlackClient:
         self.ephemeral_messages: list[tuple[str, str]] = []  # (response_url, text)
         self._emails_to_slack_id: dict[str, str] = {}
         # slack_id -> SlackUserInfo override; any id not listed here answers as a full active member.
-        self._user_info: dict[str, SlackUserInfo] = {}
+        self._user_info: dict[str, SlackUserInfo] = {
+            DEV_GUEST_SLACK_ID: SlackUserInfo(
+                slack_id=DEV_GUEST_SLACK_ID, deleted=False, is_restricted=False, is_ultra_restricted=True
+            )
+        }
         # ids that should answer `None` from `get_user_info`, as for an unknown/deleted-from-Slack id.
         self._missing_user_ids: set[str] = set()
+        self.email_lookups: list[str] = []
 
     # -- SlackClient protocol ------------------------------------------------------------------------
 
@@ -64,21 +74,34 @@ class FakeSlackClient:
         self.ephemeral_messages.append((response_url, text))
 
     def lookup_user_by_email(self, email: str) -> str | None:
+        self.email_lookups.append(email)
         return self._emails_to_slack_id.get(email.lower())
 
     def get_user_info(self, slack_user_id: str) -> SlackUserInfo | None:
         if slack_user_id in self._missing_user_ids:
             return None
+        email = self._email_for(slack_user_id)
         if slack_user_id in self._user_info:
-            return self._user_info[slack_user_id]
+            info = self._user_info[slack_user_id]
+            return info if info.email is not None or email is None else dataclasses.replace(info, email=email)
         # Unknown ids answer as a full, active member -- see module docstring.
-        return SlackUserInfo(slack_id=slack_user_id, deleted=False, is_restricted=False, is_ultra_restricted=False)
+        return SlackUserInfo(
+            slack_id=slack_user_id, deleted=False, is_restricted=False, is_ultra_restricted=False, email=email
+        )
+
+    def _email_for(self, slack_user_id: str) -> str | None:
+        return next((email for email, sid in self._emails_to_slack_id.items() if sid == slack_user_id), None)
 
     # -- Test helpers ----------------------------------------------------------------------------------
 
     def register_email(self, email: str, slack_user_id: str) -> None:
-        """Make `lookup_user_by_email(email)` resolve to `slack_user_id`."""
+        """Make `lookup_user_by_email(email)` resolve to `slack_user_id`, and `get_user_info` report
+        that email for it."""
         self._emails_to_slack_id[email.lower()] = slack_user_id
+
+    def unregister_email(self, email: str) -> None:
+        """Undo `register_email`."""
+        self._emails_to_slack_id.pop(email.lower(), None)
 
     def set_user_info(
         self,
@@ -87,6 +110,7 @@ class FakeSlackClient:
         deleted: bool = False,
         is_restricted: bool = False,
         is_ultra_restricted: bool = False,
+        email: str | None = None,
     ) -> None:
         """Override what `get_user_info(slack_user_id)` answers, e.g. to simulate a guest or a
         deactivated account. `unset_user_info` (or a missing id) restores the "full member" default."""
@@ -95,6 +119,7 @@ class FakeSlackClient:
             deleted=deleted,
             is_restricted=is_restricted,
             is_ultra_restricted=is_ultra_restricted,
+            email=email,
         )
 
     def unset_user_info(self, slack_user_id: str) -> None:
@@ -107,4 +132,4 @@ class FakeSlackClient:
         self._missing_user_ids.add(slack_user_id)
 
 
-__all__ = ["FakeSlackClient"]
+__all__ = ["DEV_GUEST_SLACK_ID", "FakeSlackClient"]

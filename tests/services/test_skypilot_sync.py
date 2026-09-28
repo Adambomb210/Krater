@@ -5,6 +5,7 @@ spend snapshots, and budget warning/teardown enforcement.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
@@ -25,7 +26,7 @@ from krater.services.skypilot_sync import (
     sync_workspaces,
     workspace_name_for,
 )
-from krater.skypilot.errors import SkyPilotUnavailableError
+from krater.skypilot.errors import SkyPilotRequestFailedError, SkyPilotUnavailableError
 from krater.skypilot.fake import FakeSkyPilotClient
 
 WARN_PERCENT = 80
@@ -78,6 +79,24 @@ def test_a_team_change_updates_allowed_users(
     sync_workspaces(db_session, client)
 
     assert client.workspaces[name] == sorted([member.user.email, builder.email])
+
+
+def test_a_disabled_builder_is_removed_from_the_workspace(
+    db_session: Session, member: Actor, reviewer: Actor, client, make_user
+) -> None:
+    project = _approve(db_session, member, reviewer)
+    builder = make_user(email="builder@example.com")
+    projects.start_amendment(db_session, member, project=project)
+    projects.update_draft(db_session, member, project=project, credited_builder_ids=[builder.id])
+    sync_workspaces(db_session, client)
+    name = project.skypilot_workspace
+    assert builder.email in client.workspaces[name]
+
+    builder.disabled_at = datetime.now(UTC)
+    db_session.flush()
+    sync_workspaces(db_session, client)
+
+    assert client.workspaces[name] == [member.user.email]
 
 
 def test_a_completed_project_gets_torn_down(db_session: Session, member: Actor, reviewer: Actor, client) -> None:
@@ -176,6 +195,130 @@ def test_a_completed_projects_serve_service_is_torn_down_too(
 
     assert client.list_services(name) == []
     assert service_name  # sanity: a real name was generated and torn down, not a no-op on nothing
+
+
+def _torn_down_events(session: Session, project) -> list[AuditEvent]:
+    return list(
+        session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.action == AUDIT_WORKSPACE_TORN_DOWN, AuditEvent.project_id == project.id
+            )
+        )
+    )
+
+
+def test_a_finished_project_whose_workspace_vanished_is_recorded_as_torn_down(
+    db_session: Session, member: Actor, reviewer: Actor, client
+) -> None:
+    """Deleted by hand behind Krater's back: a real server fails every call scoped to it, which used to
+    fail the teardown (and, before per-project isolation, the whole step) on every reconcile."""
+    project = _approve(db_session, member, reviewer)
+    sync_workspaces(db_session, client)
+    name = project.skypilot_workspace
+    client.add_cluster(name, cost_cents=500)
+    projects.withdraw(db_session, member, project=project)
+    client.remove_workspace_out_of_band(name)
+
+    sync_workspaces(db_session, client)
+
+    assert project.skypilot_workspace is None
+    [event] = _torn_down_events(db_session, project)
+    assert event.actor_id is None
+    assert event.payload == {"workspace": name, "final_spend_cents": 500}
+    assert budget.latest_spend_cents(db_session, project) == 500
+
+
+def test_a_vanished_workspace_after_a_state_reset_keeps_the_last_recorded_spend(
+    db_session: Session, member: Actor, reviewer: Actor, client
+) -> None:
+    """A SkyPilot state reset also wipes `cost_report`'s history, which reads as zero spend; that must
+    not overwrite the spend Krater already recorded."""
+    project = _approve(db_session, member, reviewer)
+    sync_workspaces(db_session, client)
+    name = project.skypilot_workspace
+    client.add_cluster(name, cost_cents=700)
+    sync_spend(db_session, client)
+    projects.withdraw(db_session, member, project=project)
+    client.remove_workspace_out_of_band(name, keep_cost_history=False)
+
+    sync_workspaces(db_session, client)
+
+    assert project.skypilot_workspace is None
+    [event] = _torn_down_events(db_session, project)
+    assert event.payload["final_spend_cents"] == 700
+    assert budget.latest_spend_cents(db_session, project) == 700
+
+
+def test_an_active_projects_vanished_workspace_is_recreated(
+    db_session: Session, member: Actor, reviewer: Actor, client
+) -> None:
+    project = _approve(db_session, member, reviewer)
+    sync_workspaces(db_session, client)
+    name = project.skypilot_workspace
+    client.remove_workspace_out_of_band(name)
+
+    sync_workspaces(db_session, client)
+
+    assert project.skypilot_workspace == name
+    assert client.workspaces[name] == [member.user.email]
+    assert client.list_clusters(name) == []
+
+
+class _FailingForClient(FakeSkyPilotClient):
+    """Fails `method` for one workspace only, to test that one project's failure is isolated."""
+
+    def __init__(self, method: str) -> None:
+        super().__init__()
+        self.method = method
+        self.failing_workspace: str | None = None
+
+    def _maybe_fail(self, method: str, workspace: str) -> None:
+        if method == self.method and workspace == self.failing_workspace:
+            raise SkyPilotRequestFailedError(f"simulated {method} failure")
+
+    def list_clusters(self, workspace: str):
+        self._maybe_fail("list_clusters", workspace)
+        return super().list_clusters(workspace)
+
+    def delete_workspace(self, name: str) -> None:
+        self._maybe_fail("delete_workspace", name)
+        super().delete_workspace(name)
+
+
+def test_one_projects_teardown_failure_does_not_block_the_others(
+    db_session: Session, member: Actor, reviewer: Actor
+) -> None:
+    """It fails at the very last SkyPilot call, after the final-spend snapshot was already written, so
+    that snapshot must be rolled back with the rest of the project's partial work."""
+    client = _FailingForClient("delete_workspace")
+    broken = _approve(db_session, member, reviewer)
+    healthy = _approve(db_session, member, reviewer)
+    sync_workspaces(db_session, client)
+    broken_name = broken.skypilot_workspace
+    client.add_cluster(broken_name, cost_cents=300)
+    projects.withdraw(db_session, member, project=broken)
+    projects.withdraw(db_session, member, project=healthy)
+    newcomer = _approve(db_session, member, reviewer)
+    client.failing_workspace = broken_name
+
+    with patch("krater.services.skypilot_sync.logger") as log:
+        sync_workspaces(db_session, client)
+
+    assert newcomer.skypilot_workspace == workspace_name_for(newcomer.id)
+    assert healthy.skypilot_workspace is None
+    assert len(_torn_down_events(db_session, healthy)) == 1
+
+    assert broken.skypilot_workspace == broken_name
+    assert _torn_down_events(db_session, broken) == []
+    assert budget.latest_spend_cents(db_session, broken) == 0
+    log.exception.assert_called_once()
+    assert broken.id in log.exception.call_args.args
+
+    # Once SkyPilot recovers, the next pass finishes the job.
+    client.failing_workspace = None
+    sync_workspaces(db_session, client)
+    assert broken.skypilot_workspace is None
+    assert _torn_down_events(db_session, broken)[0].payload["final_spend_cents"] == 300
 
 
 # --------------------------------------------------------------------------------------------------
@@ -370,6 +513,36 @@ def test_raising_the_ceiling_re_arms_the_warning(db_session: Session, member: Ac
         select(AuditEvent).where(AuditEvent.action == AUDIT_BUDGET_WARNING, AuditEvent.project_id == project.id)
     ).all()
     assert len(warnings_after) == 2
+
+
+def test_one_projects_enforcement_failure_does_not_block_the_others(
+    db_session: Session, member: Actor, reviewer: Actor
+) -> None:
+    client = _FailingForClient("list_clusters")
+    broken = _approve(db_session, member, reviewer, budget_cents=1000)
+    healthy = _approve(db_session, member, reviewer, budget_cents=1000)
+    sync_workspaces(db_session, client)
+    client.add_cluster(broken.skypilot_workspace, cost_cents=1200)
+    healthy_cluster = client.add_cluster(healthy.skypilot_workspace, cost_cents=1200)
+    sync_spend(db_session, client)
+    client.failing_workspace = broken.skypilot_workspace
+
+    with patch("krater.services.skypilot_sync.logger") as log:
+        enforce_budgets(db_session, client, warn_percent=WARN_PERCENT)
+
+    assert healthy_cluster not in {c.name for c in client.list_clusters(healthy.skypilot_workspace)}
+
+    def events(project, action: str) -> list[AuditEvent]:
+        stmt = select(AuditEvent).where(AuditEvent.action == action, AuditEvent.project_id == project.id)
+        return list(db_session.scalars(stmt))
+
+    assert len(events(healthy, AUDIT_BUDGET_TEARDOWN)) == 1
+    # The broken project's warning was written before its teardown failed: rolled back with it, so the
+    # next pass writes it again rather than leaving a warning for an enforcement that never happened.
+    assert events(broken, AUDIT_BUDGET_WARNING) == []
+    assert events(broken, AUDIT_BUDGET_TEARDOWN) == []
+    log.exception.assert_called_once()
+    assert broken.id in log.exception.call_args.args
 
 
 # --------------------------------------------------------------------------------------------------
