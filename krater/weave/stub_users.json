@@ -1,0 +1,66 @@
+[
+  {
+    "sub": "PWLMEMBERONE",
+    "name": "Mia Member",
+    "email": "mia@example.com",
+    "email_verified": true,
+    "slack_id": "U0001MEMBER",
+    "groups": ["ganymede:member"]
+  },
+  {
+    "sub": "PWLMEMBERTWO",
+    "name": "Max Member",
+    "email": "max@example.com",
+    "email_verified": true,
+    "slack_id": null,
+    "groups": ["ganymede:member"]
+  },
+  {
+    "sub": "PWLREVIEWERONE",
+    "name": "Rae Reviewer",
+    "email": "rae@example.com",
+    "email_verified": true,
+    "slack_id": "U0002REVIEW",
+    "groups": ["ganymede:member", "ganymede:reviewer"]
+  },
+  {
+    "sub": "PWLREVIEWERTWO",
+    "name": "Remy Reviewer",
+    "email": "remy@example.com",
+    "email_verified": true,
+    "slack_id": "U0003REVIEW",
+    "groups": ["ganymede:member", "ganymede:reviewer"]
+  },
+  {
+    "sub": "PWLADMINONE",
+    "name": "Ana Admin",
+    "email": "ana@example.com",
+    "email_verified": true,
+    "slack_id": "U0004ADMIN",
+    "groups": ["ganymede:member", "ganymede:reviewer", "ganymede:admin"]
+  },
+  {
+    "sub": "PWLNONMEMBER",
+    "name": "Nico Nonmember",
+    "email": "nico@example.com",
+    "email_verified": true,
+    "slack_id": null,
+    "groups": []
+  },
+  {
+    "sub": "PWLUNVERIFIED",
+    "name": "Uma Unverified",
+    "email": "uma@example.com",
+    "email_verified": false,
+    "slack_id": null,
+    "groups": []
+  },
+  {
+    "sub": "PWLSLACKGUEST",
+    "name": "Gus Guest",
+    "email": "gus@example.com",
+    "email_verified": true,
+    "slack_id": "U0005GUEST",
+    "groups": ["ganymede:member"]
+  }
+]
