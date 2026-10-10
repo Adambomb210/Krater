@@ -78,6 +78,20 @@ def test_admin_page_lists_events_quilt_refused(client: TestClient, login_as, sub
     assert "submission_exists" in response.text
 
 
+def test_the_quilt_section_is_shown_once_and_not_in_the_title(
+    client: TestClient, login_as, submitted_project, db_session
+) -> None:
+    member = login_as(MEMBER_SUB)
+    _failed_quilt_row(db_session, submitted_project(member))
+
+    login_as(ADMIN_SUB)
+    response = client.get("/admin")
+
+    title = response.text.split("<title>", 1)[1].split("</title>", 1)[0]
+    assert "Quilt" not in title
+    assert response.text.count('id="quilt"') == 1
+
+
 def test_admin_can_retry_a_refused_event(client: TestClient, login_as, submitted_project, db_session) -> None:
     member = login_as(MEMBER_SUB)
     row = _failed_quilt_row(db_session, submitted_project(member))
