@@ -102,7 +102,7 @@ def test_pricing_page_dash_when_one_gpu_lacks_a_spot_price(client: TestClient, d
 
     response = client.get("/pricing")
 
-    assert "Lowest spot" in response.text
+    assert "Typical interruptible" in response.text
     assert "–" in response.text
 
 
@@ -113,7 +113,7 @@ def test_pricing_page_hides_the_spot_column_when_no_gpu_has_one(client: TestClie
     response = client.get("/pricing")
 
     assert response.status_code == 200
-    assert "Lowest spot" not in response.text
+    assert "Typical interruptible" not in response.text
 
 
 def test_pricing_link_is_in_the_nav(client: TestClient) -> None:
@@ -128,3 +128,34 @@ def test_the_live_history_link_shows_only_when_it_can_have_data(client, monkeypa
     assert "/pricing/history" not in client.get("/pricing").text  # compute off, no samples
     monkeypatch.setattr(get_settings(), "compute_mode", "vast")
     assert "/pricing/history" in client.get("/pricing").text
+
+
+def test_the_interruptible_column_comes_from_krater_samples(client: TestClient, db_session: Session) -> None:
+    # SkyPilot's catalog has no interruptible prices; Krater's own hourly samples do.
+    from datetime import UTC, datetime, timedelta
+
+    from krater.models import GpuPriceSample
+
+    _seed(db_session, name="RTX 3090", on_demand_min_cents=20, spot_min_cents=None)
+    now = datetime.now(UTC)
+    for hours_ago in (30, 2):
+        db_session.add(
+            GpuPriceSample(
+                sampled_at=now - timedelta(hours=hours_ago),
+                gpu_name="RTX 3090",
+                rental_type="bid",
+                num_gpus=1,
+                disk_gb=32,
+                offer_count=20,
+                truncated=False,
+                min_microusd=100_000,
+                p10_microusd=110_000,
+                median_microusd=118_000,
+            )
+        )
+    db_session.flush()
+
+    page = client.get("/pricing").text
+
+    assert "Typical interruptible" in page
+    assert "$0.12/hr" in page

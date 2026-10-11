@@ -82,8 +82,9 @@ def pricing_refresh(timestamp: int) -> None:
 
 # --------------------------------------------------------------------------------------------------
 # Krater Compute: Krater's own Vast price history. See `krater.services.price_history`. Only the worker
-# holds a Vast client; without a usable one (no key, or the fake in production), or with compute off, this does
-# nothing: its searches count against the same daily quota the scheduler needs.
+# holds a Vast client; without a usable one (no key, or the fake in production) this does nothing. It runs with
+# compute off too, so the budget estimator has interruptible prices before launching opens; it stops at half of
+# Vast's daily search quota, leaving the rest to the scheduler.
 # --------------------------------------------------------------------------------------------------
 
 
@@ -107,8 +108,6 @@ PRICE_HISTORY_SEARCH_PAUSE_SECONDS = 2.0
 def price_history_record(timestamp: int) -> None:
     """Sample Vast's prices for the tracked GPU models. Fails soft: a failed run leaves a gap in the history."""
     settings = get_settings()
-    if settings.compute_mode != "vast":
-        return
     client = get_vast_client()
     if client is None:
         return

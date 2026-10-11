@@ -212,10 +212,13 @@ class BudgetEstimate:
     refreshed_at: datetime
     # `SOURCE_CATALOG` or `SOURCE_SAMPLES`. Estimates stored before this field read as the catalog.
     rate_source: str = SOURCE_CATALOG
+    # Interruptible was asked for but Krater has no interruptible price for this GPU yet, so `basis` is on demand.
+    spot_unavailable: bool = False
 
     def as_dict(self) -> dict:
         return {
             "rate_source": self.rate_source,
+            "spot_unavailable": self.spot_unavailable,
             "accelerator_name": self.accelerator_name,
             "accelerator_count": self.accelerator_count,
             "hours": self.hours,
@@ -284,6 +287,10 @@ def estimate_cost(
 ) -> BudgetEstimate:
     """Recompute a budget estimate from Krater's own Vast samples, or else its current `GpuPrice` (catalog) row.
 
+    Interruptible (`BASIS_SPOT`, Krater's default) prices at the typical bid Krater sampled. SkyPilot's catalog has no
+    interruptible prices, so a GPU Krater hasn't sampled yet is priced on demand instead, and the estimate says so
+    (`spot_unavailable`): an upper bound, never a refusal.
+
     Raises `ValidationFailed` (field name -> message, matching every other form-validating service
     call) for bad input or an accelerator/basis Krater has no current pricing for -- callers show these
     as field errors next to the estimator's own inputs, distinct from the budget field itself.
@@ -308,14 +315,18 @@ def estimate_cost(
         raise ValidationFailed({"estimator_gpu": f"No current pricing for {accelerator_name}×{accelerator_count}."})
 
     rate_source = SOURCE_CATALOG
+    spot_unavailable = False
+    if basis == BASIS_SPOT and sampled is None and (price is None or price.spot_min_cents is None):
+        basis, spot_unavailable = BASIS_ON_DEMAND, True
+        sampled = sampled_rate_cents(
+            session, accelerator_name=accelerator_name, basis=BASIS_ON_DEMAND, now=now or datetime.now(UTC)
+        )
+        if price is None and sampled is None:
+            raise ValidationFailed({"estimator_gpu": f"No current pricing for {accelerator_name}×{accelerator_count}."})
     if sampled is not None:
         rate_cents, refreshed_at = sampled
         rate_source = SOURCE_SAMPLES
     elif basis == BASIS_SPOT:
-        if price.spot_min_cents is None:
-            raise ValidationFailed(
-                {"estimator_basis": f"No spot pricing available for {accelerator_name}×{accelerator_count}."}
-            )
         rate_cents = price.spot_min_cents
         refreshed_at = price.refreshed_at
     else:
@@ -337,6 +348,7 @@ def estimate_cost(
         total_cents=subtotal_cents + margin_cents,
         refreshed_at=refreshed_at,
         rate_source=rate_source,
+        spot_unavailable=spot_unavailable,
     )
 
 

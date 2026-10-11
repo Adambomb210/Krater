@@ -35,19 +35,6 @@ def test_the_cron_follows_the_interval(compute_on, minutes: int, cron: str) -> N
         assert worker_app._price_history_cron() == cron
 
 
-def test_price_history_record_does_nothing_with_compute_off(compute_on) -> None:
-    # Its searches would use up the daily quota for nothing (staging, 2026-10-11).
-    with (
-        patch("krater.worker.app.get_settings", return_value=compute_on.model_copy(update={"compute_mode": "off"})),
-        patch("krater.worker.app.get_vast_client") as mock_client,
-        patch("krater.worker.app.price_history") as mock_history,
-    ):
-        price_history_record.func(timestamp=1_791_700_000)
-
-        mock_client.assert_not_called()
-        mock_history.record.assert_not_called()
-
-
 def test_price_history_record_does_nothing_without_a_vast_client() -> None:
     with (
         patch("krater.worker.app.get_vast_client", return_value=None),

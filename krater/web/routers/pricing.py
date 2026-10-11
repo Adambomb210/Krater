@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated
 
 import sqlalchemy as sa
@@ -45,12 +46,29 @@ def pricing_index(
     accelerator_names = pricing.list_accelerator_names(db_session)
     gpu_filter = gpu if gpu in accelerator_names else ""
     rows = pricing.list_prices(db_session, sort=sort, accelerator_name=gpu_filter or None)
+    # Interruptible prices come from Krater's own samples (the catalog has none): the typical 1-GPU bid of the last
+    # week, times the row's GPU count.
+    now = datetime.now(UTC)
+    sampled_bid: dict[str, int | None] = {}
+    for name in {row.accelerator_name for row in rows}:
+        sampled = pricing.sampled_rate_cents(db_session, accelerator_name=name, basis=pricing.BASIS_SPOT, now=now)
+        sampled_bid[name] = sampled[0] if sampled else None
+    # Per row: Krater's sampled bid for the row's GPU count, or else the catalog's lowest spot price, if it has one.
+    interruptible = {
+        (row.accelerator_name, row.accelerator_count): (
+            sampled_bid[row.accelerator_name] * row.accelerator_count
+            if sampled_bid[row.accelerator_name] is not None
+            else row.spot_min_cents
+        )
+        for row in rows
+    }
 
     return templates.TemplateResponse(
         request,
         "pricing/index.html",
         {
             "rows": rows,
+            "interruptible": interruptible,
             "accelerator_names": accelerator_names,
             "selected_gpu": gpu_filter,
             "sort": sort if sort in _SORT_LABELS else pricing.DEFAULT_SORT,

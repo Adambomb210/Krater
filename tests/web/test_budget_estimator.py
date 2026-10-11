@@ -339,14 +339,13 @@ def test_creating_a_project_without_using_the_estimator_stores_no_estimate(
     assert revision.budget_estimate is None
 
 
-def test_estimator_offers_the_spot_basis_only_when_some_gpu_has_a_spot_price(
-    client: TestClient, login_as, db_session: Session
-) -> None:
+def test_the_estimator_starts_on_interruptible(client: TestClient, login_as, db_session: Session) -> None:
+    # Interruptible is what Krater Compute rents by default, so it's the estimator's default too, catalog or not.
     login_as(MEMBER_SUB)
     _seed_price(db_session, name="A100", count=1, median_cents=110, spot_cents=None)
 
-    assert "Lowest spot (interruptible)" not in client.get("/projects/new").text
+    page = client.get("/projects/new").text
 
-    _seed_price(db_session, name="H100", count=1, median_cents=200, spot_cents=60)
-
-    assert "Lowest spot (interruptible)" in client.get("/projects/new").text
+    assert 'value="spot" selected' in page
+    assert "Interruptible (typical bid" in page
+    assert page.index('value="spot"') < page.index('value="on_demand"')

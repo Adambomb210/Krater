@@ -15,7 +15,7 @@ behaviours that cost money to get wrong. Only the worker builds a client. See [v
 reason and an audit event: reliability floor, bid margin, pause grace, move after, box idle, destroy after, reconcile
 alert, runner start deadline, heartbeat timeout, storage quota, box sync deadline, box resume timeout.
 
-**Price history** (`/pricing/history`). Every hour, with compute on, the worker samples 18 GPU models, bid and on demand: min, p10
+**Price history** (`/pricing/history`). Every hour, whenever it has a Vast key, the worker samples 18 GPU models, bid and on demand: min, p10
 and median full hourly cost of 1-GPU offers with 32 GB of disk. Members pick targets from the chart. A run stops when less than
 half of Vast's daily search quota is left (`vast-api.md`).
 

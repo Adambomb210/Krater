@@ -148,7 +148,7 @@ nothing.
 
 ## Estimator: Krater's own Vast samples first
 
-With compute on, Krater Compute's worker samples Vast every hour (`krater.services.price_history`). The
+Whenever the worker has a Vast key, compute on or off, it samples Vast every hour (`krater.services.price_history`). The
 estimator uses those samples instead of the catalog for a GPU that has at least a day of them in the last 7 days: the
 rate is the median of the samples' median full hourly prices (32 GB of disk included) for the chosen basis (`spot` =
 interruptible bids, `on_demand`), a typical price rather than the catalog's cheapest spot offer. Catalog names are
@@ -156,3 +156,10 @@ matched to Vast's ignoring spaces and dashes, with Vast's `SXM`/`PCIE`/`NVL` var
 (never `Ti`, which is a different card). The stored estimate records `rate_source` (`krater_samples` or `catalog`);
 estimates stored before that field read as the catalog. With production compute off and no key in the worker, there
 are no samples and the estimator keeps using the catalog.
+
+**Interruptible first.** The estimator defaults to `spot` (interruptible), what Krater Compute rents by default.
+SkyPilot's catalog has no interruptible prices at all (0 of 43 GPUs on staging, 2026-10-11), so they come from
+Krater's bid samples. A GPU with neither is estimated on demand instead, as an upper bound: the estimate's `basis`
+becomes `on_demand`, it records `spot_unavailable: true`, and its summary says "on-demand; no interruptible prices
+for this GPU yet". `/pricing` shows a "Typical interruptible" column from the same samples (the 1-GPU bid times the
+row's GPU count), or the catalog's spot price if it ever has one.

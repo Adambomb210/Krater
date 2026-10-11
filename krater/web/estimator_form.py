@@ -9,7 +9,7 @@ don't drift. See `docs/dev/pricing.md`: the server always recomputes the rate/to
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
@@ -20,24 +20,36 @@ from krater.web.money import format_cents
 
 
 def gpu_options(session: Session) -> list[dict[str, str | bool]]:
-    """`{key, label, has_spot}` for every currently-priced (accelerator, count), for the estimator's `<select>`."""
-    return [
-        {
-            "key": pricing.gpu_key(row.accelerator_name, row.accelerator_count),
-            "label": f"{row.accelerator_name} × {row.accelerator_count}",
-            "has_spot": row.spot_min_cents is not None,
-        }
-        for row in pricing.list_prices(session)
-    ]
+    """`{key, label, has_spot}` for every currently-priced (accelerator, count), for the estimator's `<select>`.
+    `has_spot`: Krater has an interruptible price for it (its own samples; the catalog has none today)."""
+    now = datetime.now(UTC)
+    sampled: dict[str, bool] = {}
+    options = []
+    for row in pricing.list_prices(session):
+        if row.accelerator_name not in sampled:
+            sampled[row.accelerator_name] = (
+                pricing.sampled_rate_cents(
+                    session, accelerator_name=row.accelerator_name, basis=pricing.BASIS_SPOT, now=now
+                )
+                is not None
+            )
+        options.append(
+            {
+                "key": pricing.gpu_key(row.accelerator_name, row.accelerator_count),
+                "label": f"{row.accelerator_name} × {row.accelerator_count}",
+                "has_spot": row.spot_min_cents is not None or sampled[row.accelerator_name],
+            }
+        )
+    return options
 
 
 def default_estimator_values(settings: Settings) -> dict[str, str]:
-    """Blank estimator field values for a fresh new/edit form -- no GPU/hours chosen yet, on-demand
-    basis, the configured default safety margin."""
+    """Blank estimator field values for a fresh new/edit form -- no GPU/hours chosen yet, interruptible
+    basis (what Krater Compute rents by default), the configured default safety margin."""
     return {
         "estimator_gpu": "",
         "estimator_hours": "",
-        "estimator_basis": pricing.BASIS_ON_DEMAND,
+        "estimator_basis": pricing.BASIS_SPOT,
         "estimator_margin_percent": str(settings.budget_estimate_default_margin_percent),
     }
 
@@ -96,7 +108,9 @@ def summary_text_from_dict(data: dict) -> str:
     refreshed_at = data["refreshed_at"]
     if isinstance(refreshed_at, str):
         refreshed_at = datetime.fromisoformat(refreshed_at)
-    basis_label = "spot" if data["basis"] == pricing.BASIS_SPOT else "on-demand"
+    basis_label = "interruptible" if data["basis"] == pricing.BASIS_SPOT else "on-demand"
+    if data.get("spot_unavailable"):
+        basis_label = "on-demand; no interruptible prices for this GPU yet"
     if data.get("rate_source") == pricing.SOURCE_SAMPLES:
         source = f"Krater's Vast prices, median of the week to {refreshed_at:%b} {refreshed_at.day}"
     else:
