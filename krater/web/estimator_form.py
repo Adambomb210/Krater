@@ -97,10 +97,14 @@ def summary_text_from_dict(data: dict) -> str:
     if isinstance(refreshed_at, str):
         refreshed_at = datetime.fromisoformat(refreshed_at)
     basis_label = "spot" if data["basis"] == pricing.BASIS_SPOT else "on-demand"
+    if data.get("rate_source") == pricing.SOURCE_SAMPLES:
+        source = f"Krater's Vast prices, median of the week to {refreshed_at:%b} {refreshed_at.day}"
+    else:
+        source = f"prices from {refreshed_at:%b} {refreshed_at.day}"
     return (
         f"{data['accelerator_count']}× {data['accelerator_name']} × {float(data['hours']):g}h at "
         f"{format_cents(data['rate_cents'])}/hr ({basis_label}) + {data['margin_percent']}% margin = "
-        f"{format_cents(data['total_cents'])} (prices from {refreshed_at:%b} {refreshed_at.day})"
+        f"{format_cents(data['total_cents'])} ({source})"
     )
 
 

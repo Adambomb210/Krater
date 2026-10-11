@@ -2,18 +2,24 @@
 serve `/pricing` plus the proposal-form budget estimator. See `docs/dev/pricing.md` for where the numbers come from
 (SkyPilot's public catalog CSV on GitHub), how aggregation works, and the refresh/failure
 story. Framework-free like every other service: no FastAPI here.
+
+The estimator prefers Krater's own Vast price history (`krater.services.price_history`, sampled by the worker while
+it has a Vast key) once a GPU has at least a day of samples in the last week: the median of the samples' medians, a
+typical price rather than the catalog's cheapest offer. Otherwise it uses the catalog.
 """
 
 from __future__ import annotations
 
+import math
+import re
 import statistics
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from krater.models import GpuPrice
+from krater.models import GpuPrice, GpuPriceSample
 from krater.pricing.catalog import FakeCatalog, GpuOffer, LiveCatalog
 from krater.services.errors import ValidationFailed
 
@@ -21,6 +27,16 @@ from krater.services.errors import ValidationFailed
 BASIS_ON_DEMAND = "on_demand"
 BASIS_SPOT = "spot"
 VALID_BASES = (BASIS_ON_DEMAND, BASIS_SPOT)
+
+#: Where an estimate's rate came from (`BudgetEstimate.rate_source`).
+SOURCE_CATALOG = "catalog"
+SOURCE_SAMPLES = "krater_samples"
+#: Krater's samples are used once a GPU has at least `SAMPLE_MIN_SPAN` of them within `SAMPLE_WINDOW`.
+SAMPLE_WINDOW = timedelta(days=7)
+SAMPLE_MIN_SPAN = timedelta(days=1)
+#: Vast names variants the catalog lumps together (A100 SXM4 and A100 PCIE are both the catalog's A100). Never "Ti":
+#: an RTX 5070 Ti is a different GPU from an RTX 5070.
+_VARIANT_SUFFIXES = ("sxm", "sxm4", "sxm5", "pcie", "nvl")
 
 #: Sort keys accepted by `list_prices`' `sort` argument (also what `/pricing`'s `?sort=` reads).
 _SORT_COLUMNS: dict[str, tuple] = {
@@ -194,9 +210,12 @@ class BudgetEstimate:
     margin_cents: int
     total_cents: int
     refreshed_at: datetime
+    # `SOURCE_CATALOG` or `SOURCE_SAMPLES`. Estimates stored before this field read as the catalog.
+    rate_source: str = SOURCE_CATALOG
 
     def as_dict(self) -> dict:
         return {
+            "rate_source": self.rate_source,
             "accelerator_name": self.accelerator_name,
             "accelerator_count": self.accelerator_count,
             "hours": self.hours,
@@ -210,6 +229,49 @@ class BudgetEstimate:
         }
 
 
+def _normalized(name: str) -> str:
+    return re.sub(r"[\s_-]", "", name.lower())
+
+
+def sample_name_matches(catalog_name: str, sample_name: str) -> bool:
+    """Whether Vast's `sample_name` is the catalog's `catalog_name` (spacing aside, or one of its variants)."""
+    catalog, sample = _normalized(catalog_name), _normalized(sample_name)
+    return sample == catalog or (sample.startswith(catalog) and sample[len(catalog) :] in _VARIANT_SUFFIXES)
+
+
+def sampled_rate_cents(
+    session: Session, *, accelerator_name: str, basis: str, now: datetime
+) -> tuple[int, datetime] | None:
+    """A typical full hourly price for one `accelerator_name` (32 GB disk included) from Krater's samples of the last
+    `SAMPLE_WINDOW`, and when the newest was taken; `None` without `SAMPLE_MIN_SPAN` of samples."""
+    since = now - SAMPLE_WINDOW
+    names = [
+        name
+        for name in session.scalars(
+            sa.select(GpuPriceSample.gpu_name).where(GpuPriceSample.sampled_at >= since).distinct()
+        )
+        if sample_name_matches(accelerator_name, name)
+    ]
+    if not names:
+        return None
+    rows = session.execute(
+        sa.select(GpuPriceSample.median_microusd, GpuPriceSample.sampled_at).where(
+            GpuPriceSample.gpu_name.in_(names),
+            GpuPriceSample.rental_type == ("bid" if basis == BASIS_SPOT else "ondemand"),
+            GpuPriceSample.num_gpus == 1,
+            GpuPriceSample.sampled_at >= since,
+            GpuPriceSample.median_microusd.is_not(None),
+        )
+    ).all()
+    if not rows:
+        return None
+    times = [sampled_at for _, sampled_at in rows]
+    if max(times) - min(times) < SAMPLE_MIN_SPAN:
+        return None
+    median_microusd = statistics.median(median for median, _ in rows)
+    return math.ceil(median_microusd / 10_000), max(times)
+
+
 def estimate_cost(
     session: Session,
     *,
@@ -218,8 +280,9 @@ def estimate_cost(
     hours: float,
     basis: str,
     margin_percent: int,
+    now: datetime | None = None,
 ) -> BudgetEstimate:
-    """Recompute a budget estimate from Krater's own current `GpuPrice` row.
+    """Recompute a budget estimate from Krater's own Vast samples, or else its current `GpuPrice` (catalog) row.
 
     Raises `ValidationFailed` (field name -> message, matching every other form-validating service
     call) for bad input or an accelerator/basis Krater has no current pricing for -- callers show these
@@ -239,18 +302,25 @@ def estimate_cost(
     if errors:
         raise ValidationFailed(errors)
 
+    sampled = sampled_rate_cents(session, accelerator_name=accelerator_name, basis=basis, now=now or datetime.now(UTC))
     price = get_price(session, accelerator_name=accelerator_name, accelerator_count=accelerator_count)
-    if price is None:
+    if price is None and sampled is None:
         raise ValidationFailed({"estimator_gpu": f"No current pricing for {accelerator_name}×{accelerator_count}."})
 
-    if basis == BASIS_SPOT:
+    rate_source = SOURCE_CATALOG
+    if sampled is not None:
+        rate_cents, refreshed_at = sampled
+        rate_source = SOURCE_SAMPLES
+    elif basis == BASIS_SPOT:
         if price.spot_min_cents is None:
             raise ValidationFailed(
                 {"estimator_basis": f"No spot pricing available for {accelerator_name}×{accelerator_count}."}
             )
         rate_cents = price.spot_min_cents
+        refreshed_at = price.refreshed_at
     else:
         rate_cents = price.on_demand_median_cents
+        refreshed_at = price.refreshed_at
 
     subtotal_cents = round(rate_cents * accelerator_count * hours)
     margin_cents = round(subtotal_cents * margin_percent / 100)
@@ -265,13 +335,16 @@ def estimate_cost(
         subtotal_cents=subtotal_cents,
         margin_cents=margin_cents,
         total_cents=subtotal_cents + margin_cents,
-        refreshed_at=price.refreshed_at,
+        refreshed_at=refreshed_at,
+        rate_source=rate_source,
     )
 
 
 __all__ = [
     "BASIS_ON_DEMAND",
     "BASIS_SPOT",
+    "SOURCE_CATALOG",
+    "SOURCE_SAMPLES",
     "VALID_BASES",
     "BudgetEstimate",
     "aggregate_offers",
@@ -283,4 +356,6 @@ __all__ = [
     "list_prices",
     "parse_gpu_key",
     "refresh_prices",
+    "sample_name_matches",
+    "sampled_rate_cents",
 ]
