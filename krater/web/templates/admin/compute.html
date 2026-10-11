@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block title %}Compute settings{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h1>Compute settings</h1>
+  <p class="muted">
+    The defaults every project's machines follow. An admin can override any of them for one project from that
+    project's compute settings. Members choose their own target and max prices, within their project's hourly cap.
+  </p>
+  <form method="post" action="/admin/compute" class="form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    {% for row in rows %}
+      <div class="field">
+        <label for="compute-{{ row.field.name }}">{{ row.field.label }}{% if row.field.unit %} ({{ row.field.unit }}){% endif %}</label>
+        <input type="text" inputmode="decimal" id="compute-{{ row.field.name }}" name="{{ row.field.name }}" value="{{ row.value }}">
+        <p class="field-hint">{{ row.field.help }}</p>
+        {% if errors[row.field.name] %}<p class="field-error">{{ errors[row.field.name] }}</p>{% endif %}
+      </div>
+    {% endfor %}
+    <div class="field">
+      <label for="compute-reason">Reason (required)</label>
+      <textarea id="compute-reason" name="reason" rows="2">{{ reason }}</textarea>
+      {% if errors.reason %}<p class="field-error">{{ errors.reason }}</p>{% endif %}
+    </div>
+    <button type="submit" class="button button--primary">Save defaults</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Projects with their own settings</h2>
+  {% if overrides %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th scope="col">Project</th>
+          <th scope="col">Overrides</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in overrides %}
+          <tr>
+            <td><a href="/admin/compute/projects/{{ item.project.id }}">{{ item.project.title or "Untitled proposal" }}</a></td>
+            <td>
+              {% for field, value in item.fields %}
+                {{ field.label }}: {{ value }}{% if field.unit %} {{ field.unit }}{% endif %}{% if not loop.last %}<br>{% endif %}
+              {% endfor %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">Every project follows the defaults.</p>
+  {% endif %}
+</section>
+{% endblock %}

@@ -3,6 +3,7 @@
 from krater.models.approval_policy import ApprovalPolicy
 from krater.models.audit_event import AuditEvent
 from krater.models.budget_entry import BudgetEntry
+from krater.models.compute_settings import ComputeSettings, ProjectComputeSettings
 from krater.models.enums import (
     ApprovalStage,
     BudgetEntryKind,
@@ -29,8 +30,10 @@ __all__ = [
     "AuditEvent",
     "BudgetEntry",
     "BudgetEntryKind",
+    "ComputeSettings",
     "GpuPrice",
     "Project",
+    "ProjectComputeSettings",
     "ProjectRevision",
     "ProjectStatus",
     "QuiltOutbox",

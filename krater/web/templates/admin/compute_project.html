@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}Compute settings: {{ project.title or "Untitled proposal" }}{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h1>Compute settings for <a href="/projects/{{ project.id }}">{{ project.title or "Untitled proposal" }}</a></h1>
+  <p class="muted">
+    Leave a field blank to follow the default (<a href="/admin/compute">all defaults</a>).
+  </p>
+  <form method="post" action="/admin/compute/projects/{{ project.id }}" class="form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    {% for row in rows %}
+      <div class="field">
+        <label for="compute-{{ row.field.name }}">{{ row.field.label }}{% if row.field.unit %} ({{ row.field.unit }}){% endif %}</label>
+        <input type="text" inputmode="decimal" id="compute-{{ row.field.name }}" name="{{ row.field.name }}" value="{{ row.value }}" placeholder="Default: {{ row.default }}">
+        <p class="field-hint">{{ row.field.help }} Default: {{ row.default }}{% if row.field.unit %} {{ row.field.unit }}{% endif %}.</p>
+        {% if errors[row.field.name] %}<p class="field-error">{{ errors[row.field.name] }}</p>{% endif %}
+      </div>
+    {% endfor %}
+    <div class="field">
+      <label for="compute-reason">Reason (required)</label>
+      <textarea id="compute-reason" name="reason" rows="2">{{ reason }}</textarea>
+      {% if errors.reason %}<p class="field-error">{{ errors.reason }}</p>{% endif %}
+    </div>
+    <button type="submit" class="button button--primary">Save project settings</button>
+  </form>
+</section>
+{% endblock %}

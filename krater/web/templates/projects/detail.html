@@ -209,6 +209,10 @@
     </div>
   {% endif %}
 
+  {% if is_admin %}
+    <p><a href="/admin/compute/projects/{{ project.id }}">Compute settings for this project</a></p>
+  {% endif %}
+
   {% if can_admin_set_hourly_cap %}
     <div class="admin-action">
     <h3>Hourly cap per launch</h3>

@@ -25,6 +25,7 @@ from krater.web.request_id import RequestIdMiddleware
 from krater.web.routers import (
     admin,
     auth,
+    compute_admin,
     gallery,
     pages,
     pricing,
@@ -98,6 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(projects.router)
     app.include_router(reviews.router)
     app.include_router(admin.router)
+    app.include_router(compute_admin.router)
     app.include_router(gallery.router)
     app.include_router(pricing.router)
     app.include_router(skypilot_policy.router)

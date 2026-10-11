@@ -6,6 +6,7 @@
 {% block content %}
 <section class="card">
   <h1>All projects</h1>
+  <p><a href="/admin/compute">Compute settings</a>: defaults and per-project overrides for rented machines.</p>
   {% for status in statuses %}
     {% set group = by_status[status] %}
     {% if group %}
