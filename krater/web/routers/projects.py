@@ -35,6 +35,7 @@ from krater.services import screenshots as screenshot_service
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
 from krater.services.launch_rules import LAUNCHABLE_STATUSES, hourly_cap_cents
+from krater.services.skypilot_sync import current_budget_flag
 from krater.slack import get_slack_client
 from krater.storage import ObjectStore, get_object_store
 from krater.weave import WeaveClient, get_weave_client
@@ -315,9 +316,7 @@ def _build_detail_context(
     compute_on = compute_mode == "skypilot"
     skypilot_budget_flag = None
     if (compute_on and project.skypilot_workspace is not None) or compute_mode == "vast":
-        skypilot_budget_flag = current_budget_flag(
-            session, project, warn_percent=get_settings().skypilot_budget_warn_percent
-        )
+        skypilot_budget_flag = current_budget_flag(session, project, warn_percent=get_settings().budget_warn_percent)
 
     screenshots = _screenshot_entries(get_object_store(), current) if current is not None else []
 

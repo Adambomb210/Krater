@@ -75,6 +75,17 @@ class Settings(BaseSettings):
     # presigned URLs for their own job's keys in it.
     compute_s3_bucket: str = "krater-compute"
 
+    # SkyPilot integration. See docs/skypilot-integration.md and docs/dev/skypilot-spike.md.
+    # `fake` uses an in-memory SkyPilot for dev and tests; `live` talks to a real API server over REST.
+    skypilot_mode: Literal["fake", "live"] = "fake"
+    skypilot_api_url: str = ""
+    skypilot_service_token: str = ""  # admin service-account bearer token Krater uses for REST calls
+    # Shared secret carried in the admin-policy URL's query string (RestfulAdminPolicy can't send headers). Not a
+    # strong secret: SkyPilot clients fetch the URL too, so the endpoint must be safe for any member to call.
+    skypilot_policy_token: str = ""
+    skypilot_reconcile_interval_minutes: int = 5
+    skypilot_autodown_idle_minutes: int = 30
+
     # Budgets and caps, whatever compute layer runs. The old SKYPILOT_ env names still work for one release, so a
     # deploy doesn't have to change its env file and Krater in the same step.
     budget_warn_percent: int = Field(
@@ -176,9 +187,13 @@ class Settings(BaseSettings):
         if self.env == "production":
             if self.weave_mode == "stub":
                 raise ValueError("KRATER_WEAVE_MODE cannot be 'stub' when KRATER_ENV=production")
-            if self.skypilot_mode == "fake":
-                # Even with compute off: the budget estimator's GPU prices come from SkyPilot's catalog.
-                raise ValueError("KRATER_SKYPILOT_MODE cannot be 'fake' when KRATER_ENV=production")
+            if self.pricing_mode == "fake":
+                # Even with compute off: the budget estimator's GPU prices come from the public catalog.
+                raise ValueError("KRATER_PRICING_MODE cannot be 'fake' when KRATER_ENV=production")
+            if self.compute_mode == "skypilot" and self.skypilot_mode == "fake":
+                raise ValueError(
+                    "KRATER_SKYPILOT_MODE cannot be 'fake' when KRATER_COMPUTE_MODE=skypilot in production"
+                )
             if self.compute_mode == "vast" and self.vast_mode != "live":
                 raise ValueError("KRATER_VAST_MODE must be 'live' when KRATER_COMPUTE_MODE=vast in production")
             if self.compute_mode == "vast" and self.compute_label_prefix == DEFAULT_COMPUTE_LABEL_PREFIX:

@@ -18,7 +18,7 @@ from krater.services.pricing import aggregate_offers
 pytestmark = pytest.mark.live
 
 
-def _real_client() -> LiveCatalog:
+def _real_client() -> LiveSkyPilotClient:
     # Only `pricing_catalog_url` matters for `list_gpu_prices` -- no API URL/service token needed
     # (docs/dev/pricing.md: this never talks to a SkyPilot API server).
     settings = Settings()

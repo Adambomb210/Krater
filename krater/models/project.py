@@ -59,7 +59,7 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Compute's migrations drop them.
     # This project's own hourly price cap per rented machine, set by an admin
     # (`krater.services.projects.set_hourly_cost_cap`). `None` means the global default,
-    # `Settings.compute_max_hourly_cost_cents`; see `krater.services.launch_rules.hourly_cap_cents`.
+    # `Settings.compute_max_hourly_cost_cents`; see `krater.services.launch_policy.hourly_cap_cents`.
     max_hourly_cost_cents: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
 
     submitter: Mapped[User] = relationship(foreign_keys=[submitter_id], back_populates="projects")

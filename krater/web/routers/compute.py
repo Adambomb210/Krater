@@ -25,7 +25,7 @@ from krater.services import projects as project_service
 from krater.services.actor import Actor
 from krater.services.compute_jobs import JobSpec
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
-from krater.services.launch_policy import LAUNCHABLE_STATUSES, hourly_cap_cents
+from krater.services.launch_rules import LAUNCHABLE_STATUSES, hourly_cap_cents
 from krater.vast import usd_to_microusd
 from krater.web.charts import PricePoint, price_chart_svg
 from krater.web.csrf import verify_csrf_token

@@ -48,7 +48,7 @@ from krater.models import (
 from krater.models.compute_job import ACTIVE_JOB_STATES, FINISHED_JOB_STATES
 from krater.services import budget, budget_alerts, compute_settings
 from krater.services.compute_settings import ComputePolicy
-from krater.services.launch_policy import LAUNCHABLE_STATUSES, hourly_cap_cents
+from krater.services.launch_rules import LAUNCHABLE_STATUSES, hourly_cap_cents
 from krater.vast import (
     Instance,
     Offer,
@@ -180,7 +180,7 @@ class Scheduler:
                 project,
                 ceiling_cents=ceiling,
                 spend_cents=spent,
-                warn_percent=self.settings.skypilot_budget_warn_percent,
+                warn_percent=self.settings.budget_warn_percent,
             )
             projected = spent + spend.next_minute_cents(self.session, project)
             if budget_alerts.budget_percent(ceiling, projected) >= 100.0:
