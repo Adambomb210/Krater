@@ -16,3 +16,4 @@ venv/
 htmlcov/
 *.log
 backups/
+runner/dist/
