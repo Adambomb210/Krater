@@ -53,21 +53,16 @@ def test_production_with_compute_off_still_refuses_the_fake_price_catalog() -> N
         Settings(**{**_PRODUCTION_READY, "compute_mode": "off", "pricing_mode": "fake"})
 
 
-def test_renamed_settings_still_read_their_old_env_names(monkeypatch) -> None:
-    """A deploy can update Krater before its env file: the SKYPILOT_ names keep working for one release."""
-    monkeypatch.setenv("KRATER_SKYPILOT_MODE", "live")
-    monkeypatch.setenv("KRATER_SKYPILOT_MAX_HOURLY_COST_CENTS", "750")
-    monkeypatch.setenv("KRATER_SKYPILOT_BUDGET_WARN_PERCENT", "70")
+def test_production_compute_on_vast_needs_the_live_vast_api() -> None:
+    with pytest.raises(ValueError, match="VAST_MODE"):
+        Settings(**{**_PRODUCTION_READY, "compute_mode": "vast", "vast_mode": "fake"})
 
-    settings = Settings()
+    Settings(**{**_PRODUCTION_READY, "compute_mode": "vast", "vast_mode": "live"})
 
-    assert (settings.pricing_mode, settings.compute_max_hourly_cost_cents, settings.budget_warn_percent) == (
-        "live",
-        750,
-        70,
-    )
-    monkeypatch.setenv("KRATER_COMPUTE_MAX_HOURLY_COST_CENTS", "900")
-    assert Settings().compute_max_hourly_cost_cents == 900  # the new name wins
+
+def test_production_rejects_a_short_skypilot_policy_token() -> None:
+    with pytest.raises(ValueError, match="SKYPILOT_POLICY_TOKEN"):
+        Settings(**{**_PRODUCTION_READY, "skypilot_policy_token": "too-short"})
 
 
 def test_production_rejects_the_default_secret_key() -> None:

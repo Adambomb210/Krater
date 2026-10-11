@@ -54,9 +54,17 @@ class Settings(BaseSettings):
     weave_group_reviewer: str = "krater-reviewers"
     weave_group_admin: str = "krater-admins"
 
-    # Which compute layer launches members' machines. Only `off` for now: Krater runs proposals, review, budgets,
-    # Slack, the gallery and Quilt events, and launches nothing. Krater Compute (its own Vast layer) adds `vast`.
-    compute_mode: Literal["off"] = "off"
+    # Which compute layer launches members' machines. `skypilot` runs the SkyPilot integration below
+    # (workspaces, the reconcile job, the launch-policy endpoint). `vast` runs Krater Compute: the worker rents
+    # Vast machines itself (`krater.compute`, docs/compute/). `off` launches nothing: Krater still runs
+    # proposals, review, budgets, Slack, the gallery and Quilt events, but provisions no workspaces, runs no
+    # reconcile, answers 404 on the launch-policy endpoint and shows no launch instructions. Production
+    # runs `off` until Krater Compute is ready.
+    compute_mode: Literal["off", "skypilot", "vast"] = "skypilot"
+    # Every instance Krater rents is labelled `<prefix><job>-<attempt>`. The scheduler destroys any instance on the
+    # account with this prefix that it has no record of, so give each Krater (staging, production) sharing a Vast
+    # account its own prefix, and never start another tool's labels with it.
+    compute_label_prefix: str = "krater-job-"
 
     # Budgets and caps, whatever compute layer runs. The old SKYPILOT_ env names still work for one release, so a
     # deploy doesn't have to change its env file and Krater in the same step.
@@ -159,9 +167,11 @@ class Settings(BaseSettings):
         if self.env == "production":
             if self.weave_mode == "stub":
                 raise ValueError("KRATER_WEAVE_MODE cannot be 'stub' when KRATER_ENV=production")
-            if self.pricing_mode == "fake":
-                # Even with compute off: the budget estimator's GPU prices come from the public catalog.
-                raise ValueError("KRATER_PRICING_MODE cannot be 'fake' when KRATER_ENV=production")
+            if self.skypilot_mode == "fake":
+                # Even with compute off: the budget estimator's GPU prices come from SkyPilot's catalog.
+                raise ValueError("KRATER_SKYPILOT_MODE cannot be 'fake' when KRATER_ENV=production")
+            if self.compute_mode == "vast" and self.vast_mode != "live":
+                raise ValueError("KRATER_VAST_MODE must be 'live' when KRATER_COMPUTE_MODE=vast in production")
             if self.slack_mode == "fake":
                 raise ValueError("KRATER_SLACK_MODE cannot be 'fake' when KRATER_ENV=production")
             if self.s3_mode == "fake":
