@@ -233,7 +233,8 @@ class VastClient:
             )
         if status >= 400 or data.get("success") is False:
             error = data.get("error") if isinstance(data.get("error"), str) else None
-            message = data.get("msg") or data.get("detail") or error or "no message"
+            # Field names only, never values: a create answer can carry the instance's API key.
+            message = data.get("msg") or data.get("detail") or error or f"no message; fields {sorted(data)}"
             raise VastRequestFailedError(
                 f"Vast refused {method} {path} ({status}): {str(message)[:300]}", status_code=status, error=error
             )

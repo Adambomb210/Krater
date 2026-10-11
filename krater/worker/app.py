@@ -90,6 +90,10 @@ def _price_history_cron() -> str:
     return f"*/{get_settings().price_history_interval_minutes} * * * *"
 
 
+#: Seconds between price-history searches: 36 searches take about 40 s.
+PRICE_HISTORY_SEARCH_PAUSE_SECONDS = 1.0
+
+
 @app.periodic(cron=_price_history_cron())
 @app.task(name="price_history_record")
 def price_history_record(timestamp: int) -> None:
@@ -106,6 +110,8 @@ def price_history_record(timestamp: int) -> None:
             gpu_names=settings.price_history_gpus,
             disk_gb=settings.price_history_disk_gb,
             now=datetime.fromtimestamp(timestamp, tz=UTC),
+            # Vast rate-limits about 30 searches in quick succession (staging, 2026-10-11).
+            pause_seconds=PRICE_HISTORY_SEARCH_PAUSE_SECONDS,
         )
         session.commit()
         logger.info(

@@ -350,6 +350,30 @@ def test_a_refused_create_puts_the_job_back_in_its_place(db_session, member, pro
     assert fake.instances == {}
 
 
+def test_a_create_answered_200_without_success_is_settled_by_its_label(db_session, member, project, fake) -> None:  # noqa: F811
+    """Seen on staging: Vast answered `{"success": false}` with no message and rented the machine anyway."""
+    job = _submit(db_session, member, project)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = fake.handle(request)
+        if request.method == "PUT" and "/asks/" in request.url.path:
+            return httpx.Response(200, json={"success": False})
+        return response
+
+    flaky = fake.client()
+    flaky._http = httpx.Client(transport=httpx.MockTransport(handler))
+    _pass(db_session, flaky)
+    row = _instance(db_session, job)
+    assert row.state is ComputeInstanceState.CREATING and job.state is ComputeJobState.STARTING
+    assert len(fake.instances) == 1
+
+    _pass(db_session, fake.client(), NOW + timedelta(minutes=1))
+
+    assert row.state is ComputeInstanceState.PROVISIONING
+    assert row.vast_instance_id == next(iter(fake.instances))
+    assert len(fake.instances) == 1  # adopted: not swept, not rented again
+
+
 # -- Pauses, moves, limits ----------------------------------------------------------------------------------
 
 
