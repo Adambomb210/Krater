@@ -254,16 +254,20 @@ def test_estimate_cost_unknown_gpu_key_is_a_validation_error(db_session: Session
     assert "estimator_gpu" in exc_info.value.errors
 
 
-def test_estimate_cost_spot_with_no_spot_pricing_is_a_validation_error(db_session: Session) -> None:
+def test_interruptible_without_any_interruptible_price_is_estimated_on_demand(db_session: Session) -> None:
+    # The catalog has no interruptible prices and Krater hasn't sampled this GPU: an on-demand upper bound, labelled.
     price = _seed_gpu_price(db_session, name="A100", count=1)
     price.spot_min_cents = None
     db_session.flush()
 
-    with pytest.raises(ValidationFailed) as exc_info:
-        pricing.estimate_cost(
-            db_session, accelerator_name="A100", accelerator_count=1, hours=1, basis="spot", margin_percent=0
-        )
-    assert "estimator_basis" in exc_info.value.errors
+    result = pricing.estimate_cost(
+        db_session, accelerator_name="A100", accelerator_count=1, hours=1, basis="spot", margin_percent=0
+    )
+
+    assert result.basis == "on_demand"
+    assert result.spot_unavailable is True
+    assert result.rate_cents == price.on_demand_median_cents
+    assert result.as_dict()["spot_unavailable"] is True
 
 
 @pytest.mark.parametrize(
