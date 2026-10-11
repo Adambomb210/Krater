@@ -4,20 +4,23 @@
 {% block title %}Edit draft{% endblock %}
 
 {% block content %}
-<section class="card">
-  <div class="page-header">
-    <h1>Edit draft</h1>
+<div class="page-head">
+  <div>
     <a class="back-link" href="/projects/{{ project.id }}">&larr; Back to project</a>
+    <h1>Edit draft</h1>
+    <p class="page-subtitle">
+      {% if draft.kind.value == "completion" %}
+        Completion write-up for &ldquo;{{ project.title }}&rdquo;.
+      {% elif draft.kind.value == "amendment" %}
+        Amendment to &ldquo;{{ project.title }}&rdquo;.
+      {% else %}
+        Proposal draft.
+      {% endif %}
+    </p>
   </div>
-  <p class="muted">
-    {% if draft.kind.value == "completion" %}
-      Completion write-up for &ldquo;{{ project.title }}&rdquo;.
-    {% elif draft.kind.value == "amendment" %}
-      Amendment to &ldquo;{{ project.title }}&rdquo;.
-    {% else %}
-      Proposal draft.
-    {% endif %}
-  </p>
+</div>
+
+<section class="card form-card">
 
   <form method="post" action="/projects/{{ project.id }}/edit" class="form" novalidate>
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -84,7 +87,9 @@
       </div>
     {% endif %}
 
-    <button type="submit" name="form_action" value="save" class="button button--primary">Save draft</button>
+    <div class="form-actions">
+      <button type="submit" name="form_action" value="save" class="button button--primary">Save draft</button>
+    </div>
   </form>
 
   {% if draft.kind.value == "completion" %}
@@ -138,7 +143,8 @@
     </div>
   {% endif %}
 
-  <div class="edit-section submit-bar">
+  <div class="edit-section">
+  <h2>Submit for review</h2>
   <p class="muted">Saved changes stay a draft until you submit. Save first: submitting doesn't include unsaved edits.</p>
   <form
     method="post"
