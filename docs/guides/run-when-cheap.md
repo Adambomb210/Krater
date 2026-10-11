@@ -45,7 +45,9 @@ ckpt_dir = os.environ.get("KRATER_CHECKPOINT_DIR", "checkpoints")
 latest = os.path.join(ckpt_dir, "latest.pt")
 if os.environ.get("KRATER_RESUMED") == "1" and os.path.exists(latest):
     state = torch.load(latest)
-    model.load_state_dict(state["model"]); optimizer.load_state_dict(state["optimizer"]); start_step = state["step"]
+    model.load_state_dict(state["model"])
+    optimizer.load_state_dict(state["optimizer"])
+    start_step = state["step"]
 
 # every few hundred steps:
 torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": step}, latest + ".tmp")

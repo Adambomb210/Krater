@@ -10,14 +10,16 @@
 
   <p class="policy-note">
     These are <strong>estimates from a public catalog of Vast prices</strong> (SkyPilot's), not live quotes:
-    what a machine actually costs at launch can differ, and the live price history below is closer. Rows above Ganymede's default per-machine cap
+    what a machine actually costs at launch can differ. Rows above Ganymede's default per-machine cap
     (${{ "%.2f"|format(cap_cents / 100) }}/hr) are marked below. See the
     <a href="https://github.com/patchworklabsorg/krater/blob/main/docs/guides/run-when-cheap.md">run-when-cheap guide</a>
     for spot/interruptible machines, which can cost less if you're willing to be interrupted
     (the catalog doesn't list spot prices for every GPU).
   </p>
 
-  <p><a href="/pricing/history">Live Vast price history</a>: what Krater actually sees on Vast, every 10 minutes.</p>
+  {% if show_history %}
+    <p><a href="/pricing/history">Live Vast price history</a>: what Krater actually sees on Vast, every 10 minutes.</p>
+  {% endif %}
 
   {% if refreshed_at %}
     <p class="muted">Last updated {{ refreshed_at.strftime("%b") }} {{ refreshed_at.day }}, {{ refreshed_at.strftime("%Y %H:%M UTC") }}.</p>
