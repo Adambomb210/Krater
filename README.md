@@ -8,7 +8,7 @@ gallery of completed projects.
 
 - [Spec](docs/SPEC.md): product spec, data model, workflow, deployment, open questions
 - [Weave integration](docs/weave-integration.md): sign-in and roles (Weave owns roles; Krater reads them from claims and the directory API)
-- [SkyPilot integration](docs/skypilot-integration.md): workspaces, the admin-policy launch gate, and the spend reconciler
+- [Krater Compute](docs/compute/README.md): renting Vast machines for members' jobs and boxes, spend and budgets
 - [Handoff](docs/HANDOFF.md): start here if you are picking this project up (setup, state, decisions, next steps)
 - [Future work](docs/FUTURE.md): what comes after v1, loose ends, and parked ideas
 - [Run only when compute is cheap](docs/guides/run-when-cheap.md): member guide to interruptible machines
@@ -62,6 +62,3 @@ Weave owns roles. A Weave admin gives people Krater's app roles `member`, `revie
 them at sign-in and re-checks them with Weave's directory API before every action. In stub mode (the default for
 development) the fixture users in `krater/weave/stub_users.json` carry their roles. See `docs/weave-integration.md`.
 
-CI also runs a nightly SkyPilot contract check against a real SkyPilot API server
-(`.github/workflows/skypilot-contract.yml`, see `docs/dev/skypilot-contract.md`). The SkyPilot version is pinned in
-`scripts/dev/skypilot-requirements.txt`.

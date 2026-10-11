@@ -6,8 +6,8 @@
   and a `ScrubbingFilter` (redacts secrets -- see its docstring) to the root logger and to uvicorn's own
   `uvicorn.access`/`uvicorn.error` loggers. uvicorn configures those with `propagate=False` and their own
   handlers, so a filter on the root logger alone would never see their records -- see
-  `docs/skypilot-integration.md`'s neighbor, `docs/SPEC.md` "Error handling", for why the access log in
-  particular matters: it logs the full request line, query string included, and the SkyPilot policy
+  `docs/SPEC.md` "Error handling", for why the access log in
+  particular matters: it logs the full request line, query string included, and a
   route's `?token=...` lives right there.
 - in production, formats the root logger's own output as one JSON object per line.
 """
@@ -38,7 +38,7 @@ _REQUEST_ID_HEADER = "X-Request-ID"
 #: ones the keyword only appears *inside* of, like `weave_client_secret` or `s3_access_key_id`, which is why
 #: `name` greedily grabs the whole surrounding identifier rather than just the bare keyword. Matched
 #: case-insensitively; the value is redacted regardless of what it looks like. This is what keeps the
-#: SkyPilot policy URL's `?token=...` (and Slack's `X-Slack-Signature`, `Cookie`, Weave's client secret,
+#: any URL's `?token=...` (and Slack's `X-Slack-Signature`, `Cookie`, Weave's client secret,
 #: S3's access/secret keys, etc.) out of both application logs and uvicorn's access log.
 _SENSITIVE_KEY_PATTERN = re.compile(
     r"""
@@ -74,7 +74,7 @@ def scrub(text: str) -> str:
 #: `(client_addr, method, full_path, http_version, status_code)`. Collapsing that into a plain string (our
 #: usual approach below) would make its unpacking crash on every single access log line -- so an
 #: `uvicorn.access` record with that exact shape gets its `full_path` element scrubbed in place instead,
-#: preserving the tuple uvicorn's formatter expects. `full_path` is where the SkyPilot policy route's
+#: preserving the tuple uvicorn's formatter expects. `full_path` is where a
 #: `?token=...` lives.
 _UVICORN_ACCESS_ARGS_LENGTH = 5
 _UVICORN_ACCESS_FULL_PATH_INDEX = 2

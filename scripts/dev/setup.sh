@@ -146,7 +146,7 @@ if [ "$PG_PORT" != "5432" ]; then
   echo "  export KRATER_TEST_DATABASE_URL=$TEST_URL"
 fi
 cat <<EOF
-Run the app in stub mode (fake users, fake SkyPilot/Slack/S3), then open http://localhost:8000:
+Run the app in stub mode (fake users, fake Slack/S3/Vast), then open http://localhost:8000:
   uv run uvicorn krater.web.app:create_app --factory --reload
 Tests and lint:
   uv run pytest

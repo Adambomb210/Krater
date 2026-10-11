@@ -12,24 +12,24 @@ from __future__ import annotations
 import pytest
 
 from krater.config import Settings
+from krater.pricing.catalog import CatalogError, LiveCatalog
 from krater.services.pricing import aggregate_offers
-from krater.skypilot.errors import SkyPilotError
-from krater.skypilot.live import LiveSkyPilotClient
 
 pytestmark = pytest.mark.live
 
 
-def _real_client() -> LiveSkyPilotClient:
+def _real_client() -> LiveCatalog:
     # Only `pricing_catalog_url` matters for `list_gpu_prices` -- no API URL/service token needed
     # (docs/dev/pricing.md: this never talks to a SkyPilot API server).
-    return LiveSkyPilotClient(Settings(skypilot_mode="live", skypilot_api_url="http://unused.invalid"))
+    settings = Settings()
+    return LiveCatalog(settings.pricing_catalog_url, timeout_seconds=settings.pricing_catalog_fetch_timeout_seconds)
 
 
 def test_real_vast_catalog_fetches_and_parses() -> None:
     client = _real_client()
     try:
         offers = client.list_gpu_prices()
-    except SkyPilotError as exc:
+    except CatalogError as exc:
         pytest.skip(f"could not reach SkyPilot's public Vast catalog: {exc}")
 
     assert offers, "expected at least one GPU offer from the real catalog"
@@ -45,7 +45,7 @@ def test_real_vast_catalog_aggregates_without_crashing() -> None:
     client = _real_client()
     try:
         offers = client.list_gpu_prices()
-    except SkyPilotError as exc:
+    except CatalogError as exc:
         pytest.skip(f"could not reach SkyPilot's public Vast catalog: {exc}")
 
     aggregates = aggregate_offers(offers)

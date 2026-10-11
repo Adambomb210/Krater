@@ -806,7 +806,7 @@ def set_hourly_cost_cap(
     default_cap_cents: int,
     reason: str,
 ) -> Project:
-    """Admin override: set `project`'s own hourly price cap for SkyPilot launches, or clear it (`None`) so
+    """Admin override: set `project`'s own hourly price cap for rented machines, or clear it (`None`) so
     it uses the global default, `default_cap_cents`. Admin only; `reason` is required.
 
     Raises `ValidationFailed` for a cap that isn't positive (budget and withdrawal are how launches get

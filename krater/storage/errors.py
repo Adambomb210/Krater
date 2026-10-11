@@ -1,7 +1,7 @@
 """Exception types raised by `krater.storage`.
 
-Mirrors `krater.skypilot.errors`: one error type for "storage couldn't be reached or failed
-unexpectedly". There's no "understood but rejected" counterpart here the way SkyPilot has one, because
+Mirrors `krater.slack.errors`: one error type for "storage couldn't be reached or failed
+unexpectedly". There's no "understood but rejected" counterpart here, because
 the two calls that can fail this way (`head`, `delete`) don't have a meaningful business-rejection case
 of their own -- a missing object is a normal `None`/no-op, not an error.
 """

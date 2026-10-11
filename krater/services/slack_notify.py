@@ -4,7 +4,7 @@ the periodic reconcile pass that catches anything a web request's deferred job m
 
 Framework-free (no FastAPI, no procrastinate) so it can be unit-tested directly against
 `krater.slack.FakeSlackClient`/`krater.weave.StubWeaveClient` and driven by the worker's task wrappers
-(`krater/worker/app.py`) alike -- mirrors `krater.services.skypilot_sync`. Every function here is safe
+(`krater/worker/app.py`) alike. Every function here is safe
 to call repeatedly: each one re-checks the state it would otherwise duplicate (an already-created
 channel, an already-posted message, an already-archived channel, an already-posted budget notification)
 before doing anything, so a retried or re-run job never double-posts.
@@ -370,7 +370,7 @@ def sync_budget_notifications(session: Session, slack_client: SlackClient) -> No
     """Post every not-yet-posted `budget_warning`/`budget_teardown` `AuditEvent` to its project's
     channel, and record it in `SlackNotification` so it's never posted twice.
 
-    These events are written by `krater.services.skypilot_sync.enforce_budgets` with `actor=None` (a
+    These events are written by `krater.services.budget_alerts` with `actor=None` (a
     system process, not a request), so nothing calls this synchronously the way `notify_decision`/
     `post_admin_override` are -- the periodic reconcile is the only thing that posts them.
     """
@@ -406,7 +406,7 @@ def sync_missed_archives(session: Session, slack_client: SlackClient) -> None:
 
 def reconcile(session: Session, slack_client: SlackClient, weave_client: WeaveClient) -> None:
     """Run every periodic Slack step in order, committing after each so one step's `SlackError` doesn't
-    lose the others' work (mirrors `krater.services.skypilot_sync.reconcile`)."""
+    lose the others' work."""
     steps = (
         ("sync_reviewer_invites", lambda: sync_reviewer_invites(session, slack_client, weave_client)),
         ("sync_budget_notifications", lambda: sync_budget_notifications(session, slack_client)),

@@ -19,8 +19,8 @@ def record(
 ) -> AuditEvent:
     """Write an `AuditEvent` for `action`, performed by `actor`, and return it.
 
-    `actor` is `None` for events written by a system process with no human behind it (the SkyPilot
-    reconciler's `budget_warning`/`budget_teardown`/workspace-teardown events). `project` is optional
+    `actor` is `None` for events written by a system process with no human behind it (the compute scheduler's
+    `budget_warning`/`budget_teardown` events). `project` is optional
     (some actions aren't project-scoped). `payload` is a free-form JSON-able dict of extra context
     (e.g. amounts, decision, revision id). Flushes, doesn't commit.
     """

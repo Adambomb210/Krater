@@ -1,4 +1,4 @@
-"""SpendSnapshot: an estimated-spend reading written by the SkyPilot spend reconciler."""
+"""SpendSnapshot: an estimated-spend reading written by Krater Compute's spend loop."""
 
 from __future__ import annotations
 

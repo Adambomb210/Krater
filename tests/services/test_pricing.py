@@ -1,7 +1,7 @@
 """Tests for `krater.services.pricing`: aggregation, atomic replace, fail-soft, and the estimator.
 
-`tests/fixtures/skypilot/vast_vms_sample.csv` is a real capture of SkyPilot's public Vast catalog (see
-docs/dev/pricing.md), parsed the same way `LiveSkyPilotClient.list_gpu_prices` does.
+`tests/fixtures/pricing/vast_vms_sample.csv` is a real capture of SkyPilot's public Vast catalog (see
+docs/dev/pricing.md), parsed the same way `LiveCatalog.list_gpu_prices` does.
 """
 
 from __future__ import annotations
@@ -13,21 +13,19 @@ import pytest
 from sqlalchemy.orm import Session
 
 from krater.models import GpuPrice
+from krater.pricing.catalog import CatalogError, FakeCatalog, GpuOffer
+from krater.pricing.catalog import parse_vast_catalog_csv as _parse_vast_catalog_csv
 from krater.services import pricing
 from krater.services.errors import ValidationFailed
-from krater.skypilot.errors import SkyPilotUnavailableError
-from krater.skypilot.fake import FakeSkyPilotClient
-from krater.skypilot.live import _parse_vast_catalog_csv
-from krater.skypilot.types import GpuOffer
 
-FIXTURE_CSV = Path(__file__).resolve().parent.parent / "fixtures" / "skypilot" / "vast_vms_sample.csv"
+FIXTURE_CSV = Path(__file__).resolve().parent.parent / "fixtures" / "pricing" / "vast_vms_sample.csv"
 
 
-class _BrokenSkyPilotClient:
-    """A `SkyPilotClient`-shaped stub whose `list_gpu_prices` always fails, for fail-soft tests."""
+class _BrokenCatalog:
+    """A catalog whose `list_gpu_prices` always fails, for fail-soft tests."""
 
     def list_gpu_prices(self) -> list[GpuOffer]:
-        raise SkyPilotUnavailableError("the catalog is down")
+        raise CatalogError("the catalog is down")
 
 
 def _seed_gpu_price(session: Session, *, name: str = "A100", count: int = 1) -> GpuPrice:
@@ -143,7 +141,7 @@ def test_aggregate_offers_handles_missing_vcpus_memory_vram() -> None:
 def test_refresh_prices_replaces_rows_and_returns_the_group_count(db_session: Session) -> None:
     _seed_gpu_price(db_session, name="STALE-GPU", count=1)
 
-    client = FakeSkyPilotClient()
+    client = FakeCatalog()
     count = pricing.refresh_prices(db_session, client)
     db_session.commit()
 
@@ -157,8 +155,8 @@ def test_refresh_prices_fails_soft_and_keeps_old_rows_on_a_source_error(db_sessi
     _seed_gpu_price(db_session, name="A100", count=1)
     db_session.commit()
 
-    with pytest.raises(SkyPilotUnavailableError):
-        pricing.refresh_prices(db_session, _BrokenSkyPilotClient())
+    with pytest.raises(CatalogError):
+        pricing.refresh_prices(db_session, _BrokenCatalog())
     db_session.rollback()
 
     rows = pricing.list_prices(db_session)
@@ -173,7 +171,7 @@ def test_refresh_prices_is_atomic_within_the_caller_transaction(db_session: Sess
     _seed_gpu_price(db_session, name="A100", count=1)
     db_session.commit()
 
-    pricing.refresh_prices(db_session, FakeSkyPilotClient())
+    pricing.refresh_prices(db_session, FakeCatalog())
     # Simulate the caller's transaction never committing (e.g. an exception elsewhere in the request).
     db_session.rollback()
 

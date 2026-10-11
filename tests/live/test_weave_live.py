@@ -327,7 +327,7 @@ def test_directory_lists_admins(fixture: dict[str, Any], weave_client: LiveWeave
 
 
 def test_directory_lists_members(fixture: dict[str, Any], weave_client: LiveWeaveClient) -> None:
-    """The one call the SkyPilot reconciler makes to decide who keeps workspace access."""
+    """A directory lookup by sub, as every state-changing action makes."""
     _needs_weave_roles(fixture)
 
     records = {record.sub: record for record in weave_client.list_users_with_role("ganymede:member")}

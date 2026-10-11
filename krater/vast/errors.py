@@ -1,6 +1,6 @@
 """Exception types raised by `krater.vast`.
 
-Callers branch on these the same way as `krater.skypilot.errors`: one for "couldn't complete the round trip"
+Callers branch on these the same way as `krater.slack.errors`: one for "couldn't complete the round trip"
 (network error, timeout, a 5xx, a 429), one for "Vast understood the request and refused it". Messages carry
 Vast's own `error`/`msg` fields, never a raw response body: a create response holds the new instance's own API
 key, so bodies are not safe to log.

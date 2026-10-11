@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 class AuditEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     __tablename__ = "audit_events"
 
-    # Nullable: the SkyPilot reconciler (`krater.services.skypilot_sync`) writes audit events as a
+    # Nullable: Krater Compute's scheduler writes audit events as a
     # system actor with no `User` behind it (there's no human to attribute a periodic reconcile run
     # to). Every human-triggered action still always supplies an actor.
     actor_id: Mapped[uuid.UUID | None] = mapped_column(

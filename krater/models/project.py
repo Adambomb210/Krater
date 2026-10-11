@@ -59,9 +59,9 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # The `allowed_users` Krater last sent to the workspace, so the reconciler can tell who it removed.
     # `None` until the first update after this column was added (the workspace then holds the whole team).
     skypilot_allowed_users: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
-    # This project's own hourly price cap for a SkyPilot launch, set by an admin
+    # This project's own hourly price cap per rented machine, set by an admin
     # (`krater.services.projects.set_hourly_cost_cap`). `None` means the global default,
-    # `Settings.compute_max_hourly_cost_cents`; see `krater.services.launch_policy.hourly_cap_cents`.
+    # `Settings.compute_max_hourly_cost_cents`; see `krater.services.launch_rules.hourly_cap_cents`.
     max_hourly_cost_cents: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
 
     submitter: Mapped[User] = relationship(foreign_keys=[submitter_id], back_populates="projects")

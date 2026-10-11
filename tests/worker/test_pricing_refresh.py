@@ -1,6 +1,6 @@
 """The `pricing_refresh` periodic task: registered on the procrastinate app, on the configured daily
 schedule, calling through to `krater.services.pricing.refresh_prices`, and failing soft on a source
-error (mirrors `tests/worker/test_skypilot_reconcile.py`)."""
+error ."""
 
 from __future__ import annotations
 

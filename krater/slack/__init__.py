@@ -32,7 +32,7 @@ __all__ = [
 def get_slack_client() -> SlackClient:
     """The process-wide `SlackClient`, chosen by `settings.slack_mode`.
 
-    Cached like `krater.weave.get_weave_client`/`krater.skypilot.get_skypilot_client`; tests reach the
+    Cached like `krater.weave.get_weave_client`; tests reach the
     same fake instance this returns to set up/assert on Slack state.
     """
     settings = get_settings()

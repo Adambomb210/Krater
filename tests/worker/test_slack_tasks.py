@@ -1,6 +1,6 @@
 """Thin wiring tests for the Slack procrastinate tasks (`krater/worker/app.py`): registration, the
 periodic schedule, and that each task calls through to the right service function. Mirrors
-`tests/worker/test_skypilot_reconcile.py` -- the actual logic is unit-tested in `tests/services/`.
+the actual logic is unit-tested in `tests/services/`.
 """
 
 from __future__ import annotations

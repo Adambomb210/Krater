@@ -33,7 +33,7 @@ __all__ = [
 def get_object_store() -> ObjectStore:
     """The process-wide `ObjectStore`, chosen by `settings.s3_mode`.
 
-    Cached like `krater.skypilot.get_skypilot_client`; override in tests by passing a `FakeObjectStore`
+    Cached like `krater.slack.get_slack_client`; override in tests by passing a `FakeObjectStore`
     directly to the service functions instead of going through this factory.
     """
     settings = get_settings()
