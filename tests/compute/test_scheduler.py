@@ -616,6 +616,9 @@ def test_a_runner_that_never_starts_fails_the_job(db_session, member, project, c
     assert job.state is ComputeJobState.FAILED
     assert "curl, wget or Python" in job.state_reason
     assert fake.instances == {}
+    # Finished, so the orphan check doesn't rent it again: no retry loop on an image that can't run the runner.
+    _pass(db_session, client, NOW + timedelta(minutes=16))
+    assert job.state is ComputeJobState.FAILED and fake.instances == {}
 
 
 def test_a_silent_runner_fails_the_job(db_session, member, project, client, fake) -> None:  # noqa: F811
