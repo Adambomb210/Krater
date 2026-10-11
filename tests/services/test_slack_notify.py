@@ -513,3 +513,36 @@ def test_post_admin_override_escapes_actor_name_and_reason(db_session: Session, 
     assert "<!channel>" not in block_text
     assert _ESCAPED_INJECTION in block_text
     assert _INJECTION in posted["text"]  # fallback text isn't mrkdwn-parsed, so left raw
+
+
+def test_box_notices_mention_the_owner_in_the_project_channel_once(db_session: Session, member: Actor) -> None:
+    from krater.services.compute_jobs import AUDIT_BOX_DESTROY_SOON
+
+    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    member.user.slack_user_id = "U_OWNER"
+    slack_client = FakeSlackClient()
+    project.slack_channel_id = slack_client.create_channel("ganymede-rover-test")
+    db_session.add(
+        AuditEvent(
+            actor_id=None,
+            action=AUDIT_BOX_DESTROY_SOON,
+            project_id=project.id,
+            payload={
+                "job_id": "00000000-0000-0000-0000-000000000001",
+                "job_name": "<!channel> notebook",
+                "owner_id": str(member.user.id),
+                "destroy_after_hours": 24,
+                "destroy_at": "2026-10-12T14:00:00+00:00",
+            },
+        )
+    )
+    db_session.flush()
+
+    slack_notify.sync_box_notifications(db_session, slack_client)
+    slack_notify.sync_box_notifications(db_session, slack_client)
+
+    assert len(slack_client.messages) == 1
+    (message,) = slack_client.messages.values()
+    text = message["blocks"][0]["text"]["text"]
+    assert "<@U_OWNER>" in text and "2026-10-12 14:00 UTC" in text
+    assert "<!channel>" not in text  # the box's name is escaped
