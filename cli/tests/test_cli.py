@@ -66,6 +66,10 @@ class Fake:
             if token not in self.valid_access:
                 return httpx.Response(401, json={"error": "expired"})
             return self.api(request, url.removeprefix(f"{KRATER}/api/v1"))
+        if url.startswith("https://store.test/"):
+            # A presigned URL: the CLI must not send its Krater sign-in along.
+            assert "authorization" not in request.headers
+            return httpx.Response(200, content={"score": b"0.93\n", "log": b"hi\n"}[url.rsplit("/", 1)[1]])
         return httpx.Response(404)
 
     def api(self, request: httpx.Request, path: str) -> httpx.Response:
@@ -88,6 +92,26 @@ class Fake:
                     "state": "running",
                     "state_reason": None,
                     "machine": {"ssh_host": "1.2.3.4", "ssh_port": 10483},
+                },
+            )
+        if path.startswith(f"/jobs/{JOB}/logs"):
+            return httpx.Response(
+                200, json={"attempt": 2, "text": "epoch 9\ndone\n", "size_bytes": 99, "truncated": True}
+            )
+        if path == f"/jobs/{JOB}/files":
+            return httpx.Response(
+                200,
+                json={
+                    "files": [
+                        {
+                            "area": "outputs",
+                            "name": "eval/score.txt",
+                            "size_bytes": 5,
+                            "url": "https://store.test/score",
+                        },
+                        {"area": "logs", "name": "attempt-1.log", "size_bytes": 3, "url": "https://store.test/log"},
+                        {"area": "outputs", "name": "../../escape.txt", "size_bytes": 1, "url": "https://store.test/x"},
+                    ]
                 },
             )
         if path.startswith(f"/projects/{PROJECT}/secrets/") and request.method == "PUT":
@@ -211,3 +235,26 @@ def test_without_a_sign_in_the_cli_says_how_to(http) -> None:
 
     with pytest.raises(AuthError, match="krater login"):
         run(["projects"], http=http)
+
+
+def test_logs_prints_the_end_of_the_output(http, fake) -> None:
+    _login(http, [])
+    said: list[str] = []
+
+    assert run(["logs", JOB, "--attempt", "2"], http=http, say=said.append) == 0
+
+    assert said[0].startswith("[the last part of attempt 2's output")
+    assert said[1] == "epoch 9\ndone"
+    assert any("attempt=2" in str(r.url) for r in fake.requests)
+
+
+def test_download_saves_each_file_under_its_kind_and_skips_odd_paths(http, fake, tmp_path) -> None:
+    _login(http, [])
+    said: list[str] = []
+
+    assert run(["download", JOB, "--to", str(tmp_path / "results")], http=http, say=said.append) == 0
+
+    assert (tmp_path / "results" / "outputs" / "eval" / "score.txt").read_bytes() == b"0.93\n"
+    assert (tmp_path / "results" / "logs" / "attempt-1.log").read_bytes() == b"hi\n"
+    assert not (tmp_path / "escape.txt").exists() and not (tmp_path / "results" / "escape.txt").exists()
+    assert any(line.startswith("Skipped ../../escape.txt") for line in said)

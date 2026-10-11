@@ -2624,3 +2624,20 @@ h1 .badge {
   box-shadow: 0 2px 8px var(--shadow-stitch); font-size: 0.8125rem; white-space: nowrap;
 }
 .chart-tooltip__title { color: var(--color-ink-soft); margin-bottom: 0.15rem; }
+
+/* A job's output on its page: the end of its log, scrollable, never wider than the card. */
+pre.log {
+  margin: 0.75rem 0 0;
+  max-height: 32rem;
+  overflow: auto;
+  padding: 0.75rem 1rem;
+  border: 1px dashed var(--color-line-strong);
+  border-radius: 0.5rem;
+  background: var(--color-quilt);
+  color: var(--color-ink);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

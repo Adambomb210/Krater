@@ -23,6 +23,8 @@ krater show <job>
 krater cancel <job>
 krater submit <project> --name notebook --image ubuntu:24.04 --box --gpu "RTX 3060" --target 0.07 --max 0.10
 krater ssh <job> -- -L 8888:localhost:8888
+krater logs <job>                      # what the command printed (the end of it)
+krater download <job> --to results/    # outputs, checkpoints and logs, under results/<kind>/
 krater secrets set <project> HF_TOKEN
 krater prices
 ```

@@ -36,6 +36,8 @@ from krater.storage import ObjectStore
 #: The runner's timings, sent with `start` so they can change without a new runner build.
 HEARTBEAT_SECONDS = 60
 CHECKPOINT_SYNC_SECONDS = 600
+#: How often the job's output log goes up, so its team can watch it on the job page.
+LOG_SYNC_SECONDS = 60
 #: Uploads at most this big go up in one PUT; bigger ones in parts of this size. Under Cloudflare's 100 MB cap on a
 #: proxied request body.
 PART_BYTES = 64 * 1024 * 1024
@@ -43,7 +45,7 @@ MAX_UPLOAD_BYTES = 500 * 1024**3
 #: Presigned URLs live this long: a 64 MB part on a slow link still makes it.
 URL_EXPIRES_SECONDS = 3600
 
-AREAS = ("checkpoints", "outputs", "workspace")
+AREAS = ("checkpoints", "outputs", "workspace", "logs")
 _NAME_RE = re.compile(r"^[A-Za-z0-9._\-][A-Za-z0-9._\-/]{0,511}$")
 
 
@@ -87,6 +89,7 @@ class StartInfo:
     ssh_keys: tuple[str, ...] = ()
     heartbeat_seconds: int = HEARTBEAT_SECONDS
     checkpoint_sync_seconds: int = CHECKPOINT_SYNC_SECONDS
+    log_sync_seconds: int = LOG_SYNC_SECONDS
     # The project's secrets, name -> value. Never logged or shown (kept out of the repr).
     secrets: dict[str, str] = field(default_factory=dict, repr=False)
 

@@ -6,6 +6,8 @@
         --gpu "RTX 4090" --target 0.30 --max 0.45 --max-runtime 240
     krater jobs <project>
     krater show <job>
+    krater logs <job>                            (what the command printed)
+    krater download <job> --to results/          (its outputs, checkpoints and logs)
     krater ssh <job> -- -L 8888:localhost:8888
     krater secrets set <project> HF_TOKEN        (reads the value from stdin, or asks without echoing it)
 
@@ -65,6 +67,14 @@ def _parser() -> argparse.ArgumentParser:
 
     show = commands.add_parser("show", help="a job's state, machine and recent events")
     show.add_argument("job")
+    logs = commands.add_parser("logs", help="what a job's command printed (the end of it)")
+    logs.add_argument("job")
+    logs.add_argument("--attempt", type=int, help="an earlier attempt's output (default: the latest)")
+    logs.add_argument("--bytes", type=int, default=65536, help="how much of the end to show (at most 1 MB)")
+    download = commands.add_parser("download", help="download a job's outputs, checkpoints and logs")
+    download.add_argument("job")
+    download.add_argument("--to", default=".", help="the folder to put them in (default: here)")
+    download.add_argument("--only", choices=("outputs", "checkpoints", "logs"), help="just one kind")
     for action, text in (
         ("cancel", "cancel a job or box (its machine is destroyed)"),
         ("stop", "stop a box (it saves /workspace first)"),
@@ -210,6 +220,39 @@ def run(
                 say(f"  {event['at'][:19].replace('T', ' ')}  {event['message']}")
 
         out(job, render)
+    elif args.command == "logs":
+        query = f"?bytes={args.bytes}" + (f"&attempt={args.attempt}" if args.attempt is not None else "")
+        data = krater.get(f"/jobs/{args.job}/logs{query}")
+
+        def render_logs() -> None:
+            if not data["text"]:
+                say("No output yet.")
+                return
+            if data["truncated"]:
+                say(f"[the last part of attempt {data['attempt']}'s output; krater download {args.job} --only logs]")
+            say(data["text"].rstrip("\n"))
+
+        out(data, render_logs)
+    elif args.command == "download":
+        data = krater.get(f"/jobs/{args.job}/files")
+        files = [f for f in data["files"] if args.only is None or f["area"] == args.only]
+        if not files:
+            say("Nothing to download yet.")
+            return 0
+        root = os.path.abspath(args.to)
+        for file in files:
+            target = os.path.abspath(os.path.join(root, file["area"], *file["name"].split("/")))
+            if not target.startswith(root + os.sep):
+                say(f"Skipped {file['name']}: not a plain relative path.")
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with http.stream("GET", file["url"]) as response:  # a presigned URL: no Krater sign-in goes with it
+                response.raise_for_status()
+                with open(target + ".partial", "wb") as handle:
+                    handle.writelines(response.iter_bytes())
+            os.replace(target + ".partial", target)
+            say(f"{file['area']}/{file['name']}  ({file['size_bytes']} bytes)")
+        say(f"Saved {len(files)} files under {root}.")
     elif args.command in ("cancel", "stop", "resume", "move"):
         job = krater.post(f"/jobs/{args.job}/{args.command}")
         out(

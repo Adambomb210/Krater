@@ -58,6 +58,7 @@ func (f *fakeKrater) cfg(t *testing.T) Config {
 		Token:         f.token,
 		CheckpointDir: filepath.Join(dir, "checkpoints"),
 		OutputDir:     filepath.Join(dir, "outputs"),
+		LogDir:        filepath.Join(dir, "logs"),
 	}
 }
 
@@ -435,5 +436,40 @@ func TestANonRootImageGetsItsDirectoriesUnderTmp(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Errorf("not created: %v", err)
+	}
+}
+
+func TestAJobsOutputIsSavedForItsTeam(t *testing.T) {
+	f := newFakeKrater(t)
+	f.command = `echo to stdout; echo to stderr >&2; exit 4`
+
+	code, err := Run(context.Background(), f.cfg(t), http.DefaultClient, http.DefaultClient, noGPU)
+
+	if err != nil || code != 4 {
+		t.Fatalf("Run = %d, %v; want 4", code, err)
+	}
+	saved := string(f.objects["logs/attempt-1.log"])
+	for _, want := range []string{"to stdout\n", "to stderr\n", "the command exited with code 4"} {
+		if !strings.Contains(saved, want) {
+			t.Errorf("the saved log lacks %q:\n%s", want, saved)
+		}
+	}
+}
+
+func TestTheSavedOutputStopsAtItsCap(t *testing.T) {
+	dir := t.TempDir()
+	out, err := newLogFile(dir, 2, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, chunk := range []string{"12345", "67890abc", "more"} {
+		if n, err := out.Write([]byte(chunk)); n != len(chunk) || err != nil {
+			t.Fatalf("Write(%q) = %d, %v: a full log must still accept writes", chunk, n, err)
+		}
+	}
+	_ = out.Close()
+	saved, _ := os.ReadFile(filepath.Join(dir, "attempt-2.log"))
+	if !strings.HasPrefix(string(saved), "1234567890\n[krater: the output passed") || strings.Contains(string(saved), "more") {
+		t.Errorf("saved %q", saved)
 	}
 }

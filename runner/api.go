@@ -29,6 +29,7 @@ type StartInfo struct {
 	SSHKeys               []string `json:"ssh_keys"`
 	HeartbeatSeconds      int      `json:"heartbeat_seconds"`
 	CheckpointSyncSeconds int      `json:"checkpoint_sync_seconds"`
+	LogSyncSeconds        int      `json:"log_sync_seconds"`
 	// The project's secrets, name -> value. Never logged.
 	Secrets map[string]string `json:"secrets"`
 }

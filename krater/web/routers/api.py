@@ -24,13 +24,14 @@ from sqlalchemy.orm import Session
 from krater.config import get_settings
 from krater.db import get_session
 from krater.models import ComputeEscalation, ComputeEvent, ComputeJob, ComputeJobKind, Project, User
-from krater.services import compute_jobs, price_history, project_secrets
+from krater.services import compute_files, compute_jobs, price_history, project_secrets
 from krater.services import projects as project_service
 from krater.services import users as user_service
 from krater.services.actor import Actor
 from krater.services.compute_jobs import JobSpec
 from krater.services.errors import DomainError, InvalidState, NotAllowed, NotAMember, NotFound, ValidationFailed
 from krater.services.launch_rules import LAUNCHABLE_STATUSES, hourly_cap_cents
+from krater.storage import StorageError, get_compute_store
 from krater.vast import microusd_to_usd, usd_to_microusd
 from krater.weave import WeaveClient, WeaveUnavailableError, get_weave_client
 
@@ -300,6 +301,39 @@ async def submit(project_id: uuid.UUID, request: Request, actor: Me, db_session:
 @router.get("/jobs/{job_id}")
 def job_detail(job_id: uuid.UUID, actor: Me, db_session: Db):
     return _job_json(_job(db_session, actor, job_id), detail=True, session=db_session)
+
+
+@router.get("/jobs/{job_id}/logs")
+def job_logs(job_id: uuid.UUID, actor: Me, db_session: Db, attempt: int | None = None, bytes: int = 65536):
+    """The end of the job's output log (`bytes` of it, at most 1 MB): the latest attempt's, or `attempt`'s."""
+    job = _job(db_session, actor, job_id)
+    try:
+        tail = compute_files.log_tail(
+            get_compute_store(), actor, job=job, attempt=attempt, max_bytes=max(1, min(bytes, 1024 * 1024))
+        )
+    except NotAllowed as exc:
+        return _error(403, str(exc))
+    except StorageError:
+        return _error(503, "Krater's storage didn't answer; try again in a minute.")
+    if tail is None:
+        return {"attempt": attempt, "text": "", "size_bytes": 0, "truncated": False}
+    return {"attempt": tail.attempt, "text": tail.text, "size_bytes": tail.size_bytes, "truncated": tail.truncated}
+
+
+@router.get("/jobs/{job_id}/files")
+def job_files(job_id: uuid.UUID, actor: Me, db_session: Db):
+    """The job's outputs, checkpoints and logs, each with a download URL that works for 15 minutes."""
+    job = _job(db_session, actor, job_id)
+    store = get_compute_store()
+    try:
+        downloads = compute_files.list_downloads(store, actor, job=job)
+        return {
+            "files": [{"area": f.area, "name": f.name, "size_bytes": f.size_bytes, "url": url} for f, url in downloads]
+        }
+    except NotAllowed as exc:
+        return _error(403, str(exc))
+    except StorageError:
+        return _error(503, "Krater's storage didn't answer; try again in a minute.")
 
 
 _ACTIONS = {
