@@ -93,7 +93,9 @@ classic reverse-proxy setup where oauth2-proxy sits fully in front and SkyPilot 
 Instead, `SKYPILOT_AUTH_OAUTH2_PROXY_ENABLED`/`_BASE_URL` make the API server itself call `GET
 {base_url}/oauth2/auth` (an nginx-`auth_request`-style check) with the original request's `Host`, `X-Forwarded-Uri`
 and cookies -- a `202` with an `X-Auth-Request-Email` header authenticates the request as that email; `401` triggers
-a redirect to `{base_url}/oauth2/start`. Custom headers aren't forwarded, only cookies, so the browser/CLI flow still
+a redirect to `{base_url}/oauth2/start`. oauth2-proxy only sends `X-Auth-Request-*` headers with
+`OAUTH2_PROXY_SET_XAUTHREQUEST=true`; without it the `202` is empty and SkyPilot answers 500 ("oauth2-proxy is enabled
+but did not return user info"). Custom headers aren't forwarded, only cookies, so the browser/CLI flow still
 needs to actually reach `auth-proxy` (not just the API server) for the initial sign-in.
 
 Separately, Krater's own admin REST calls (workspace CRUD, `cost_report`, teardown) never go through oauth2-proxy at

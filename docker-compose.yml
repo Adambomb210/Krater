@@ -218,6 +218,10 @@ services:
       OAUTH2_PROXY_SCOPE: "openid email profile"
       OAUTH2_PROXY_EMAIL_DOMAINS: "*"
       OAUTH2_PROXY_CODE_CHALLENGE_METHOD: "S256"
+      # SkyPilot asks /oauth2/auth who the user is and reads X-Auth-Request-Email from the answer
+      # (sky/server/auth/oauth2_proxy.py). oauth2-proxy only sends those headers with this on; without
+      # it, `sky api login` ends in a 500 "oauth2-proxy ... did not return user info".
+      OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
       OAUTH2_PROXY_COOKIE_EXPIRE: "8h"
       OAUTH2_PROXY_COOKIE_SECURE: ${KRATER_SKYPILOT_AUTH_COOKIE_SECURE:-true}
     ports:
