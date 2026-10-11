@@ -56,6 +56,7 @@ from krater.vast import (
     RentalType,
     VastClient,
     VastError,
+    VastRedirectError,
     VastRequestFailedError,
     VastUnavailableError,
     microusd_to_usd,
@@ -864,7 +865,11 @@ class Scheduler:
             )
             return True
         except VastRequestFailedError as exc:
-            if exc.status_code is not None and exc.status_code < 400:
+            if (
+                exc.status_code is not None
+                and 200 <= exc.status_code < 300
+                and not isinstance(exc, VastRedirectError)
+            ):
                 # A 200 that says `success: false`: Vast has rented the machine anyway (staging, 2026-10-11), so
                 # treat it like a lost answer and let the next pass find the machine by its label.
                 logger.warning("krater.compute: create for %s answered 200 without success; settling by label", label)

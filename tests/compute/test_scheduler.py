@@ -374,6 +374,23 @@ def test_a_create_answered_200_without_success_is_settled_by_its_label(db_sessio
     assert len(fake.instances) == 1  # adopted: not swept, not rented again
 
 
+def test_a_redirected_create_is_still_a_refusal(db_session, member, project, fake) -> None:  # noqa: F811
+    """A 308 means a path without its trailing slash: nothing happened, and it's a bug, not an unknown outcome."""
+    job = _submit(db_session, member, project)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT" and "/asks/" in request.url.path:
+            return httpx.Response(308, headers={"location": str(request.url)})
+        return fake.handle(request)
+
+    client = fake.client()
+    client._http = httpx.Client(transport=httpx.MockTransport(handler))
+    _pass(db_session, client)
+
+    assert _instance(db_session, job).state is ComputeInstanceState.CREATE_FAILED
+    assert job.state is ComputeJobState.QUEUED
+
+
 # -- Pauses, moves, limits ----------------------------------------------------------------------------------
 
 
