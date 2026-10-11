@@ -120,3 +120,11 @@ def test_pricing_link_is_in_the_nav(client: TestClient) -> None:
     response = client.get("/")
 
     assert 'href="/pricing"' in response.text
+
+
+def test_the_live_history_link_shows_only_when_it_can_have_data(client, monkeypatch) -> None:
+    from krater.config import get_settings
+
+    assert "/pricing/history" not in client.get("/pricing").text  # compute off, no samples
+    monkeypatch.setattr(get_settings(), "compute_mode", "vast")
+    assert "/pricing/history" in client.get("/pricing").text

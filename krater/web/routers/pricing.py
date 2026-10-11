@@ -6,12 +6,14 @@ from __future__ import annotations
 
 from typing import Annotated
 
+import sqlalchemy as sa
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from krater.config import get_settings
 from krater.db import get_session
+from krater.models import GpuPriceSample
 from krater.services import pricing
 from krater.services.actor import Actor
 from krater.services.errors import ValidationFailed
@@ -54,6 +56,9 @@ def pricing_index(
             "sort": sort if sort in _SORT_LABELS else pricing.DEFAULT_SORT,
             "sort_labels": _SORT_LABELS,
             "refreshed_at": pricing.last_refreshed_at(db_session),
+            # Krater's own Vast price history only fills while compute runs (the worker needs a Vast key).
+            "show_history": settings.compute_mode == "vast"
+            or db_session.scalar(sa.select(sa.exists().where(GpuPriceSample.id.is_not(None)))),
             "cap_cents": settings.compute_max_hourly_cost_cents,
         },
     )

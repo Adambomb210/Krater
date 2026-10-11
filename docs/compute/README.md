@@ -66,3 +66,11 @@ One round on staging, with Adam's approval, each a few cents with the spike's sa
 Production stays `KRATER_COMPUTE_MODE=off` until those checks pass. Turning it on needs, in infra: the Vast key mounted
 into the worker only (`KRATER_VAST_API_KEY_FILE`), `KRATER_VAST_MODE=live`, a production `KRATER_COMPUTE_LABEL_PREFIX`,
 `KRATER_COMPUTE_MODE=vast`, and the `krater-compute` bucket (created by the deploy's `ensure_bucket`).
+
+Before turning it on in production, check what the staging round (through Tailscale Funnel) can't: production sits
+behind Cloudflare. From a cloud VM (a datacenter IP, like a Vast host):
+
+- `curl -fsSL https://<krater host>/runner/v1/krater-runner -o /tmp/r` gets the binary, not a Cloudflare challenge
+  page (bot fight mode or browser checks would block every rented machine);
+- one presigned PUT (and one multipart part) through the storage host succeeds, so a SigV4 URL with a signed
+  `content-length` survives Cloudflare's proxy to SeaweedFS.
