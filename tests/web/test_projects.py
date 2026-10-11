@@ -7,7 +7,6 @@ CSRF, and how domain errors map to responses.
 from __future__ import annotations
 
 import uuid
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -559,42 +558,6 @@ def test_an_admin_cannot_add_budget_to_their_own_project(
 # --------------------------------------------------------------------------------------------------
 
 
-def test_launch_instructions_disappear_once_a_project_is_withdrawn(
-    client: TestClient, login_as, approved_project, db_session: Session
-) -> None:
-    member = login_as(MEMBER_SUB)
-    reviewer = login_as(REVIEWER_SUB)
-    project = approved_project(member, reviewer)
-    project.skypilot_workspace = "ganymede-abc123abc123"
-    db_session.flush()
-    login_as(MEMBER_SUB)
-
-    assert "sky launch -w ganymede-abc123abc123" in client.get(f"/projects/{project.id}").text
-
-    project.status = ProjectStatus.WITHDRAWN
-    db_session.flush()
-
-    assert "sky launch -w" not in client.get(f"/projects/{project.id}").text
-
-
-def test_compute_off_hides_launch_instructions_even_with_a_workspace(
-    client: TestClient, login_as, approved_project, db_session: Session, monkeypatch
-) -> None:
-    monkeypatch.setattr(get_settings(), "compute_mode", "off")
-    member = login_as(MEMBER_SUB)
-    reviewer = login_as(REVIEWER_SUB)
-    project = approved_project(member, reviewer)
-    project.skypilot_workspace = "ganymede-abc123abc123"
-    db_session.flush()
-    login_as(MEMBER_SUB)
-
-    page = client.get(f"/projects/{project.id}").text
-
-    assert "sky launch" not in page
-    assert "ganymede-abc123abc123" not in page
-    assert "Launching machines from Krater isn't open yet." in page
-
-
 def test_compute_off_notice_only_shows_while_a_project_could_launch(
     client: TestClient, login_as, approved_project, db_session: Session, monkeypatch
 ) -> None:
@@ -609,24 +572,6 @@ def test_compute_off_notice_only_shows_while_a_project_could_launch(
     assert "Launching machines from Krater" not in client.get(f"/projects/{project.id}").text
 
 
-def test_compute_off_hides_the_skypilot_budget_banner(
-    client: TestClient, login_as, approved_project, db_session: Session, monkeypatch
-) -> None:
-    member = login_as(MEMBER_SUB)
-    reviewer = login_as(REVIEWER_SUB)
-    project = approved_project(member, reviewer)
-    project.skypilot_workspace = "ganymede-abc123abc123"
-    db_session.flush()
-    login_as(MEMBER_SUB)
-
-    with patch("krater.web.routers.projects.current_budget_flag", return_value="teardown") as flag:
-        assert "torn down" in client.get(f"/projects/{project.id}").text
-        monkeypatch.setattr(get_settings(), "compute_mode", "off")
-        flag.reset_mock()
-        assert "torn down" not in client.get(f"/projects/{project.id}").text
-        flag.assert_not_called()
-
-
 # --------------------------------------------------------------------------------------------------
 # Per-project hourly cap
 # --------------------------------------------------------------------------------------------------
@@ -638,13 +583,12 @@ def test_an_admin_sets_a_projects_hourly_cap_from_its_page(
     member = login_as(MEMBER_SUB)
     reviewer = login_as(REVIEWER_SUB)
     project = approved_project(member, reviewer)
-    project.skypilot_workspace = "ganymede-abc123abc123"
     db_session.flush()
     login_as(ADMIN_SUB)
 
     page = client.get(f"/projects/{project.id}")
-    assert "Each launch is capped at $5.00/hour" in page.text
-    assert "Ganymede&#39;s default" in page.text
+    assert "Now $5.00/hour" in page.text
+    assert "(the default)" in page.text
 
     response = client.post(
         f"/projects/{project.id}/admin-hourly-cap",
@@ -656,7 +600,7 @@ def test_an_admin_sets_a_projects_hourly_cap_from_its_page(
     db_session.refresh(project)
     assert project.max_hourly_cost_cents == 1_250
     page = client.get(f"/projects/{project.id}")
-    assert "Each launch is capped at $12.50/hour" in page.text
+    assert "Now $12.50/hour" in page.text
     assert "this project&#39;s own cap" in page.text
 
 

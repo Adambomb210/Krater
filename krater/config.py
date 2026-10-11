@@ -54,23 +54,9 @@ class Settings(BaseSettings):
     weave_group_reviewer: str = "krater-reviewers"
     weave_group_admin: str = "krater-admins"
 
-    # Which compute layer launches members' machines. `skypilot` runs the SkyPilot integration below
-    # (workspaces, the reconcile job, the launch-policy endpoint). `off` launches nothing: Krater still runs
-    # proposals, review, budgets, Slack, the gallery and Quilt events, but provisions no workspaces, runs no
-    # reconcile, answers 404 on the launch-policy endpoint and shows no launch instructions. Production
-    # runs `off` until Krater Compute (its own Vast layer) replaces SkyPilot.
-    compute_mode: Literal["off", "skypilot"] = "skypilot"
-
-    # SkyPilot integration. See docs/skypilot-integration.md and docs/dev/skypilot-spike.md.
-    # `fake` uses an in-memory SkyPilot for dev and tests; `live` talks to a real API server over REST.
-    skypilot_mode: Literal["fake", "live"] = "fake"
-    skypilot_api_url: str = ""
-    skypilot_service_token: str = ""  # admin service-account bearer token Krater uses for REST calls
-    # Shared secret carried in the admin-policy URL's query string (RestfulAdminPolicy can't send headers). Not a
-    # strong secret: SkyPilot clients fetch the URL too, so the endpoint must be safe for any member to call.
-    skypilot_policy_token: str = ""
-    skypilot_reconcile_interval_minutes: int = 5
-    skypilot_autodown_idle_minutes: int = 30
+    # Which compute layer launches members' machines. Only `off` for now: Krater runs proposals, review, budgets,
+    # Slack, the gallery and Quilt events, and launches nothing. Krater Compute (its own Vast layer) adds `vast`.
+    compute_mode: Literal["off"] = "off"
 
     # Budgets and caps, whatever compute layer runs. The old SKYPILOT_ env names still work for one release, so a
     # deploy doesn't have to change its env file and Krater in the same step.
@@ -106,7 +92,7 @@ class Settings(BaseSettings):
     budget_estimate_flag_threshold_percent: int = 20
 
     # Slack integration (review happens in Slack; see docs/SPEC.md "Slack integration" and
-    # docs/dev/slack-setup.md). `fake` is an in-memory Slack for dev and tests, mirroring `skypilot_mode`.
+    # docs/dev/slack-setup.md). `fake` is an in-memory Slack for dev and tests, mirroring `vast_mode`.
     slack_mode: Literal["fake", "live"] = "fake"
     slack_bot_token: str = ""
     slack_signing_secret: str = ""
@@ -140,20 +126,10 @@ class Settings(BaseSettings):
             if self.pricing_mode == "fake":
                 # Even with compute off: the budget estimator's GPU prices come from the public catalog.
                 raise ValueError("KRATER_PRICING_MODE cannot be 'fake' when KRATER_ENV=production")
-            if self.compute_mode == "skypilot" and self.skypilot_mode == "fake":
-                raise ValueError(
-                    "KRATER_SKYPILOT_MODE cannot be 'fake' when KRATER_COMPUTE_MODE=skypilot in production"
-                )
             if self.slack_mode == "fake":
                 raise ValueError("KRATER_SLACK_MODE cannot be 'fake' when KRATER_ENV=production")
             if self.s3_mode == "fake":
                 raise ValueError("KRATER_S3_MODE cannot be 'fake' when KRATER_ENV=production")
-            if (
-                self.compute_mode == "skypilot"
-                and self.skypilot_mode == "live"
-                and len(self.skypilot_policy_token) < 32
-            ):
-                raise ValueError("KRATER_SKYPILOT_POLICY_TOKEN must be at least 32 characters in production")
             # Also refuse anything that still looks like a placeholder (e.g. a lengthened copy of .env.example's).
             if (
                 len(self.secret_key) < MIN_SECRET_KEY_LENGTH

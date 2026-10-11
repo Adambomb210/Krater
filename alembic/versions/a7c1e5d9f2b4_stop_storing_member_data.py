@@ -2,8 +2,8 @@
 
 Drops `users.display_name`, `users.email` and `users.email_verified`: Krater reads names and emails from
 Weave's directory when it needs them. Audit events gain `actor_sub`, filled in for existing rows, and lose the
-emails earlier SkyPilot access-removal events carried. `projects.skypilot_allowed_users` now holds Patchwork IDs, so
-the emails stored there are cleared; the next reconcile fills it in again.
+emails earlier SkyPilot access-removal events carried. The emails in the unused `projects.skypilot_allowed_users`
+are cleared.
 
 Revision ID: a7c1e5d9f2b4
 Revises: 83af68b415ca

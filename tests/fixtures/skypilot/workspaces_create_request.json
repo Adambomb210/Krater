@@ -1,7 +1,0 @@
-{
-  "workspace_name": "ganymede-priv-test",
-  "config": {
-    "private": true,
-    "allowed_users": ["54400d50"]
-  }
-}

@@ -30,7 +30,6 @@ from krater.web.routers import (
     pricing,
     projects,
     reviews,
-    skypilot_policy,
     slack_interactions,
 )
 from krater.web.security_headers import SecurityHeadersMiddleware, apply_security_headers
@@ -100,7 +99,6 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(gallery.router)
     app.include_router(pricing.router)
-    app.include_router(skypilot_policy.router)
     app.include_router(slack_interactions.router)
 
     @app.exception_handler(NotAllowed)
@@ -112,7 +110,7 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(request, "errors/404.html", status_code=404)
 
     # Unknown URLs and the auth dependencies' 403s are plain `HTTPException`s, which FastAPI renders as
-    # JSON. Browsers get the site's error pages instead; API callers (SkyPilot's policy hook, Slack,
+    # JSON. Browsers get the site's error pages instead; API callers (runners on rented machines, Slack,
     # the estimator's fetch) don't ask for HTML, so they keep the JSON body.
     @app.exception_handler(StarletteHTTPException)
     async def _handle_http_exception(request: Request, exc: StarletteHTTPException):

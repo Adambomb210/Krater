@@ -3,7 +3,7 @@
 Makes no network calls. Keeps just enough bookkeeping (size + content type + a byte prefix per key) for
 `krater.services.screenshots` to exercise the real confirm/head/read_prefix/delete flow, including its
 magic-byte signature check. A test that wants to simulate "the browser successfully uploaded through the
-presigned POST" calls `put` directly, mirroring how `FakeSkyPilotClient.add_cluster` simulates a fact a
+presigned POST" calls `put` directly, mirroring how `FakeVast.set_status` simulates a fact a
 real server would otherwise report.
 """
 

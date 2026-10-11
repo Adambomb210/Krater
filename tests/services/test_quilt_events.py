@@ -39,8 +39,6 @@ from krater.services.quilt_events import (
     SUBMISSION_UPDATED,
     event_id,
 )
-from krater.services.skypilot_sync import sync_spend, sync_workspaces
-from krater.skypilot.fake import FakeSkyPilotClient
 
 
 def _rows(session: Session, project: Project) -> list[QuiltOutbox]:
@@ -333,19 +331,6 @@ def test_spend_is_sent_as_the_cumulative_total_only_when_it_changes(
     ).first()
     assert spend_rows[-1].id == event_id("spend", latest.id)
     assert spend_rows[-1].occurred_at == latest.taken_at
-
-
-def test_the_spend_reconciler_writes_spend_recorded(db_session: Session, member: Actor, reviewer: Actor, weave) -> None:
-    client = FakeSkyPilotClient()
-    project = _approved(db_session, member, reviewer)
-    sync_workspaces(db_session, client, weave)
-    client.add_cluster(project.skypilot_workspace, cost_cents=4_200)
-
-    sync_spend(db_session, client)
-    sync_spend(db_session, client)
-
-    spend_rows = [row for row in _rows(db_session, project) if row.type == SPEND_RECORDED]
-    assert [row.payload["spent_cents_total"] for row in spend_rows] == [4_200]
 
 
 # --------------------------------------------------------------------------------------------------

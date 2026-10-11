@@ -1,7 +1,7 @@
 """SlackNotification: tracks which `AuditEvent`s the Slack reconciler has already posted about.
 
 Only used for events the periodic `slack_reconcile` job discovers on its own (`budget_warning` /
-`budget_teardown`, written by `krater.services.skypilot_sync`) rather than ones posted immediately by
+`budget_teardown`, written by `krater.services.budget_alerts`) rather than ones posted immediately by
 the action that caused them -- see `krater.services.slack_notify.sync_budget_notifications`.
 """
 

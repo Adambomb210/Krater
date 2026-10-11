@@ -2,11 +2,11 @@
 
 No Redis (see CLAUDE.md): buckets live in a plain module-level dict, so **limits are per worker process**
 -- running N uvicorn workers gives each its own quota, not a shared one. Fine for the traffic this app
-sees (a handful of members, one Slack workspace, SkyPilot polling), and matches "no Redis" for everything
+sees (a handful of members, one Slack workspace, the runners' heartbeats), and matches "no Redis" for everything
 else in this codebase.
 
 Keyed by client IP for the routes that have no session to speak of (`/login`, `/auth/callback`, the
-SkyPilot policy route, Slack's interactions endpoint), and by user id where one is signed in for POSTs in
+runner API, Slack's interactions endpoint), and by user id where one is signed in for POSTs in
 general -- see `_bucket_key`. The client IP itself only comes from `X-Forwarded-For` when
 `settings.trusted_proxy_count` says this app sits behind that many trusted reverse proxies; otherwise a
 client could simply forge that header to spread requests across arbitrary "IPs" and dodge the limit
@@ -135,17 +135,11 @@ def _signed_in_user_id(request: Request) -> str | None:
 # Route groups
 # --------------------------------------------------------------------------------------------------
 
-#: Generous on purpose (see CLAUDE.md-adjacent docs/skypilot-integration.md: SkyPilot calls this route
-#: 2-3 times per `sky launch`/`validate`, from both its own server and every member's machine) -- this
-#: exists to blunt a scanner or a runaway script hammering a publicly reachable, unauthenticated route,
-#: not to throttle normal use.
 _LOGIN_LIMIT = RateLimit(capacity=20, per_seconds=60)
-_SKYPILOT_POLICY_LIMIT = RateLimit(capacity=120, per_seconds=60)
 _SLACK_LIMIT = RateLimit(capacity=60, per_seconds=60)
 _POST_GENERAL_LIMIT = RateLimit(capacity=120, per_seconds=60)
 
 _AUTH_PATHS = frozenset({"/login", "/auth/callback"})
-_SKYPILOT_POLICY_PATH = "/internal/skypilot/policy"
 _SLACK_PATH = "/slack/interactions"
 
 
@@ -156,8 +150,6 @@ def _classify(request: Request) -> tuple[str, RateLimit, bool] | None:
 
     if path in _AUTH_PATHS and method == "GET":
         return "auth", _LOGIN_LIMIT, True
-    if path == _SKYPILOT_POLICY_PATH:
-        return "skypilot_policy", _SKYPILOT_POLICY_LIMIT, True
     if path == _SLACK_PATH:
         return "slack", _SLACK_LIMIT, True
     if method == "POST":

@@ -19,9 +19,7 @@ _PRODUCTION_READY: dict = {
     "base_url": "https://ganymede.patchworklabs.example",
     "weave_mode": "live",
     "weave_client_secret": "weave-client-secret",
-    "skypilot_mode": "live",
     "pricing_mode": "live",
-    "skypilot_policy_token": "x" * 32,
     "slack_mode": "live",
     "slack_signing_secret": "slack-signing-secret",
     "s3_mode": "live",
@@ -38,21 +36,15 @@ def test_production_ready_settings_construct_fine() -> None:
     "overrides",
     [
         {"weave_mode": "stub"},
-        {"skypilot_mode": "fake"},
+        {"pricing_mode": "fake"},
         {"slack_mode": "fake"},
         {"s3_mode": "fake"},
     ],
-    ids=["weave-stub", "skypilot-fake", "slack-fake", "s3-fake"],
+    ids=["weave-stub", "pricing-fake", "slack-fake", "s3-fake"],
 )
 def test_production_rejects_dev_modes(overrides: dict) -> None:
     with pytest.raises(ValueError):
         Settings(**{**_PRODUCTION_READY, **overrides})
-
-
-def test_production_with_compute_off_needs_no_skypilot_policy_token() -> None:
-    settings = Settings(**{**_PRODUCTION_READY, "compute_mode": "off", "skypilot_policy_token": ""})
-
-    assert settings.compute_mode == "off"
 
 
 def test_production_with_compute_off_still_refuses_the_fake_price_catalog() -> None:
@@ -76,11 +68,6 @@ def test_renamed_settings_still_read_their_old_env_names(monkeypatch) -> None:
     )
     monkeypatch.setenv("KRATER_COMPUTE_MAX_HOURLY_COST_CENTS", "900")
     assert Settings().compute_max_hourly_cost_cents == 900  # the new name wins
-
-
-def test_production_rejects_a_short_skypilot_policy_token() -> None:
-    with pytest.raises(ValueError, match="SKYPILOT_POLICY_TOKEN"):
-        Settings(**{**_PRODUCTION_READY, "skypilot_policy_token": "too-short"})
 
 
 def test_production_rejects_the_default_secret_key() -> None:

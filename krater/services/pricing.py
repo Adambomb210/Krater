@@ -1,6 +1,6 @@
-"""Vast GPU pricing: refresh from SkyPilot's catalog, aggregate per accelerator, and serve `/pricing`
-plus the proposal-form budget estimator. See `docs/dev/pricing.md` for where the numbers come from
-(SkyPilot's public catalog CSV, not a live API server), how aggregation works, and the refresh/failure
+"""Vast GPU pricing: refresh from the public Vast catalog (`krater.pricing.catalog`), aggregate per accelerator, and
+serve `/pricing` plus the proposal-form budget estimator. See `docs/dev/pricing.md` for where the numbers come from
+(SkyPilot's public catalog CSV on GitHub), how aggregation works, and the refresh/failure
 story. Framework-free like every other service: no FastAPI here.
 """
 

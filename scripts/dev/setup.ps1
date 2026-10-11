@@ -190,7 +190,7 @@ try {
         Write-Host "  `$env:KRATER_DATABASE_URL = `"$DevUrl`""
         Write-Host "  `$env:KRATER_TEST_DATABASE_URL = `"$TestUrl`""
     }
-    Write-Host 'Run the app in stub mode (fake users, fake SkyPilot/Slack/S3), then open http://localhost:8000:'
+    Write-Host 'Run the app in stub mode (fake users, fake Slack/S3/Vast), then open http://localhost:8000:'
     Write-Host '  uv run uvicorn krater.web.app:create_app --factory --reload'
     Write-Host 'Tests and lint:'
     Write-Host '  uv run pytest'

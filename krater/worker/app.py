@@ -17,8 +17,6 @@ from krater.pricing.catalog import CatalogError, get_price_catalog
 from krater.quilt import sender as quilt_sender
 from krater.services import people, slack_notify, slack_reviews
 from krater.services.pricing import refresh_prices
-from krater.services.skypilot_sync import reconcile
-from krater.skypilot import SkyPilotError, get_skypilot_client
 from krater.slack import SlackError, get_slack_client
 from krater.weave import get_weave_client
 
@@ -46,36 +44,6 @@ app = procrastinate.App(
 def heartbeat(timestamp: int) -> None:
     """Log once a minute, so it's easy to see the worker and its scheduler are alive."""
     logger.info("krater worker heartbeat", extra={"timestamp": timestamp})
-
-
-def _skypilot_reconcile_cron() -> str:
-    """`*/N * * * *` from `skypilot_reconcile_interval_minutes` -- built at import time, so changing
-    the setting takes effect the next time the worker (and its scheduler) restarts."""
-    return f"*/{get_settings().skypilot_reconcile_interval_minutes} * * * *"
-
-
-@app.periodic(cron=_skypilot_reconcile_cron())
-@app.task(name="skypilot_reconcile")
-def skypilot_reconcile(timestamp: int) -> None:
-    """Provision/tear down SkyPilot workspaces, take spend snapshots, and enforce budgets.
-
-    Thin wrapper around `krater.services.skypilot_sync.reconcile`; see there for the actual logic. Also
-    runnable directly for manual runs/debugging via `python -m krater.skypilot.reconcile_once`. A no-op
-    with `compute_mode=off`: the task stays registered so the worker's schedule doesn't depend on the mode.
-    """
-    del timestamp
-    settings = get_settings()
-    if settings.compute_mode != "skypilot":
-        return
-    session = get_sessionmaker()()
-    try:
-        reconcile(session, get_skypilot_client(), get_weave_client(), warn_percent=settings.budget_warn_percent)
-    except SkyPilotError:
-        # `reconcile` already catches per-step SkyPilot errors and logs+continues; this is a last-resort
-        # net for anything that still escapes (e.g. a step raising before its own try/except is reached).
-        logger.exception("krater.skypilot_reconcile task failed")
-    finally:
-        session.close()
 
 
 # --------------------------------------------------------------------------------------------------
@@ -107,7 +75,7 @@ def pricing_refresh(timestamp: int) -> None:
 # Slack: channel/message upkeep, deferred immediately after the web request (or Slack interaction) that
 # causes it commits, plus a periodic reconcile for anything missed. See `krater.services.slack_notify`
 # and `krater.services.slack_reviews` for the actual logic -- these are thin, self-guarding wrappers
-# (each underlying call is a safe-to-retry no-op when it doesn't apply), mirroring `skypilot_reconcile`.
+# (each underlying call is a safe-to-retry no-op when it doesn't apply).
 # --------------------------------------------------------------------------------------------------
 
 
@@ -248,7 +216,8 @@ def slack_process_reject(revision_id: str, slack_user_id: str, reason: str, resp
 
 
 def _slack_reconcile_cron() -> str:
-    """`*/N * * * *` from `slack_reconcile_interval_minutes` -- see `_skypilot_reconcile_cron` above."""
+    """`*/N * * * *` from `slack_reconcile_interval_minutes`, built at import time: a change
+    takes effect when the worker restarts."""
     return f"*/{get_settings().slack_reconcile_interval_minutes} * * * *"
 
 
@@ -263,8 +232,7 @@ def slack_reconcile(timestamp: int) -> None:
     try:
         slack_notify.reconcile(session, get_slack_client(), get_weave_client())
     except SlackError:
-        # `reconcile` already catches per-step Slack errors and logs+continues; last-resort net, as in
-        # `skypilot_reconcile` above.
+        # `reconcile` already catches per-step Slack errors and logs+continues; this is a last-resort net.
         logger.exception("krater.slack_reconcile task failed")
     finally:
         session.close()
