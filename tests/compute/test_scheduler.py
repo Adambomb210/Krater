@@ -334,6 +334,19 @@ def test_with_the_search_quota_used_up_jobs_wait_for_the_reset(db_session, membe
     assert job.state is ComputeJobState.STARTING
 
 
+def test_each_pass_saves_the_quota_for_admins(db_session, member, project, client, fake) -> None:  # noqa: F811
+    from krater.compute import search_quota
+
+    fake.set_search_quota(20_000, remaining=12_000)
+    _submit(db_session, member, project, target_microusd=50_000)
+
+    _pass(db_session, client)
+
+    row = search_quota.latest(db_session)
+    assert row.limit_rows == 20_000
+    assert row.remaining_rows < 12_000
+
+
 def _timing_out_client(fake: FakeVast) -> VastClient:
     """A client whose create reaches Vast but whose response is lost."""
 

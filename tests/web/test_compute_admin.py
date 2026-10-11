@@ -176,3 +176,22 @@ def test_admin_sees_spend_checks_that_did_not_match(client: TestClient, login_as
 
     assert "Mismatched" in page
     assert "$0.0640" in page and "$0.1000" in page
+
+
+def test_the_page_shows_vasts_search_quota(client: TestClient, login_as, db_session) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from krater.compute import search_quota
+    from krater.vast import SearchQuota
+
+    login_as(ADMIN_SUB)
+    assert "searched Vast yet." in client.get("/admin/compute").text
+
+    now = datetime.now(UTC)
+    reset = now + timedelta(hours=3)
+    search_quota.record(db_session, SearchQuota(limit=20_000, remaining=0, reset_at=reset), now=now)
+    db_session.commit()
+
+    page = client.get("/admin/compute").text
+    assert "<strong>0 of 20,000</strong> search rows left" in page
+    assert "no job or box can start until the reset" in page

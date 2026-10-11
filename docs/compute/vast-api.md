@@ -95,6 +95,9 @@ What Krater does about it:
   every 15 minutes (`krater/compute/search_pacing.py`). Under a quarter of the quota left, every 15 minutes; with
   none left, no searches until the reset, and waiting jobs say so.
 - Price history runs only with compute on, hourly, and stops a run when less than half the quota is left.
+- After each scheduler pass and price-history run the worker saves the quota (`vast_search_quota`), which
+  `/admin/compute` shows. Under a quarter left, and used up, each write an `AuditEvent`
+  (`compute_search_quota_low`, `compute_search_quota_exhausted`) and log an error, once per day.
 
 Still to check at a reset: whether the quota counts the rows returned or the `limit` asked for, and whether price
 filters (`min_bid`, `dph_total`) and `order` by `min_bid` work in a search. If they do, a search can ask only for

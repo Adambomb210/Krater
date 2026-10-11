@@ -28,6 +28,32 @@
   </form>
 </section>
 
+<section class="card" id="search-quota">
+  <h2>Vast search quota</h2>
+  {% if quota %}
+    {% set row = quota.row %}
+    {% if quota.reset_passed %}
+      <p>The quota reset at {{ row.reset_at.strftime("%H:%M UTC") }}. Fresh numbers come with the worker's next search.</p>
+    {% else %}
+      <p>
+        <strong>{{ "{:,}".format(row.remaining_rows) }} of {{ "{:,}".format(row.limit_rows) }}</strong> search rows left
+        today, as of {{ row.observed_at.strftime("%H:%M UTC") }}. It resets at {{ row.reset_at.strftime("%H:%M UTC") }}.
+      </p>
+      {% if quota.exhausted %}
+        <p class="field-error">Used up: Krater can't find offers, so no job or box can start until the reset.</p>
+      {% elif quota.low %}
+        <p class="field-error">Under a quarter left: Krater searches for each waiting job at most every 15 minutes.</p>
+      {% endif %}
+    {% endif %}
+  {% else %}
+    <p class="muted">The worker hasn't searched Vast yet.</p>
+  {% endif %}
+  <p class="muted">
+    Vast counts offer-search rows against a daily quota per account. Krater backs off searches that find nothing,
+    and price history stops at half the quota, so starting jobs gets the rest.
+  </p>
+</section>
+
 <section class="card">
   <h2>Projects with their own settings</h2>
   {% if overrides %}

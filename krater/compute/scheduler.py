@@ -34,7 +34,7 @@ from decimal import ROUND_FLOOR, Decimal
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from krater.compute import launch, offers, runner_api, spend
+from krater.compute import launch, offers, runner_api, search_quota, spend
 from krater.compute.search_pacing import SearchPacer
 from krater.config import Settings
 from krater.models import (
@@ -176,6 +176,7 @@ class Scheduler:
             )
         else:
             self._start_queued()
+        search_quota.record(self.session, self.client.search_quota, now=self.now)
         self.session.commit()
         return self.result
 
