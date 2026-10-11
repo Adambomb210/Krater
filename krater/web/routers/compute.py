@@ -12,7 +12,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Annotated
 
 import sqlalchemy as sa
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
@@ -20,7 +20,7 @@ from krater.config import get_settings
 from krater.db import get_session
 from krater.models import ComputeEscalation, ComputeEvent, ComputeJob, ComputeJobKind, ComputeJobState, Project
 from krater.models.compute_job import ACTIVE_JOB_STATES
-from krater.services import compute_jobs, price_history
+from krater.services import compute_jobs, price_history, project_secrets
 from krater.services import projects as project_service
 from krater.services.actor import Actor
 from krater.services.compute_jobs import JobSpec
@@ -95,6 +95,10 @@ def compute_index(
 ):
     _require_vast()
     project = _project(db_session, actor, project_id)
+    return _index_page(request, db_session, actor, project)
+
+
+def _index_page(request: Request, db_session: Session, actor: Actor, project: Project, *, errors=None, posted=None):
     jobs = list(
         db_session.scalars(
             sa.select(ComputeJob).where(ComputeJob.project_id == project.id).order_by(ComputeJob.created_at.desc())
@@ -108,8 +112,59 @@ def compute_index(
             "jobs": jobs,
             "active_states": ACTIVE_JOB_STATES,
             "can_launch": _is_team(actor, project) and project.status in LAUNCHABLE_STATUSES,
+            "secrets": project_secrets.list_secrets(db_session, project),
+            "secrets_enabled": project_secrets.enabled(get_settings()),
+            "can_manage_secrets": actor.is_member and (_is_team(actor, project) or actor.is_admin),
+            "max_secrets": project_secrets.MAX_SECRETS_PER_PROJECT,
+            "errors": errors or {},
+            "posted": posted or {},
         },
+        status_code=422 if errors else 200,
     )
+
+
+@router.post("/projects/{project_id}/compute/secrets", dependencies=[Depends(verify_csrf_token)])
+def set_secret(
+    request: Request,
+    project_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+    name: Annotated[str, Form()] = "",
+    value: Annotated[str, Form()] = "",
+):
+    _require_vast()
+    project = _project(db_session, actor, project_id)
+    try:
+        secret = project_secrets.set_secret(
+            db_session, actor, project=project, name=name, value=value, settings=get_settings()
+        )
+    except ValidationFailed as exc:
+        db_session.rollback()
+        # Never echo the value back into the page.
+        return _index_page(request, db_session, actor, project, errors=exc.errors, posted={"name": name})
+    except InvalidState as exc:
+        db_session.rollback()
+        flash(request, str(exc), "error")
+        return RedirectResponse(f"/projects/{project.id}/compute", status_code=303)
+    db_session.commit()
+    flash(request, f"Saved {secret.name}. Jobs get it when they next start.", "success")
+    return RedirectResponse(f"/projects/{project.id}/compute", status_code=303)
+
+
+@router.post("/projects/{project_id}/compute/secrets/{name}/delete", dependencies=[Depends(verify_csrf_token)])
+def delete_secret(
+    request: Request,
+    project_id: uuid.UUID,
+    name: str,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+):
+    _require_vast()
+    project = _project(db_session, actor, project_id)
+    project_secrets.delete_secret(db_session, actor, project=project, name=name)
+    db_session.commit()
+    flash(request, f"Deleted {name}. Running machines keep the value they started with.", "success")
+    return RedirectResponse(f"/projects/{project.id}/compute", status_code=303)
 
 
 def _form_page(request: Request, db_session: Session, project: Project, *, errors=None, posted=None, status_code=200):

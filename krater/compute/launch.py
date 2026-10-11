@@ -4,7 +4,8 @@ Krater launches in Vast's `args` mode and replaces the image's ENTRYPOINT with `
 field *is* the entrypoint override (Vast's own CLI sends `--entrypoint X` as `"onstart": X`), and `args` are passed
 to it. Without the override, an image with its own ENTRYPOINT would get `sh -c ...` as arguments, exit, and be
 restarted by Vast in a billing loop. So an image needs a POSIX `sh`, and a member whose image's entrypoint does setup
-(activating an environment, say) puts that in the command. Not yet checked on a paid launch.
+(activating an environment, say) puts that in the command. Checked on staging (2026-10-11): `nginx:1.27-alpine`,
+whose ENTRYPOINT is `/docker-entrypoint.sh`, ran the member's command.
 
 The bootstrap downloads the runner from Krater with curl, wget or Python (whichever the image has), checks its
 sha256, and runs it; the runner asks Krater for the command. Then the shell waits forever, whatever happened: Vast
@@ -61,7 +62,8 @@ _BOX_TAIL = r"""[ "$OK" = 1 ] && nohup "$R" >>/var/log/krater-runner.log 2>&1 &
 exit 0"""
 
 #: Boxes launch in Vast's SSH mode, where Vast sets up sshd and `onstart` is a startup script run after its init.
-#: Pending the paid check: whether the runner starts there, what lands in authorized_keys, and the 22/tcp mapping.
+#: Checked on staging (2026-10-11) with plain `ubuntu:24.04`: Vast brings its own sshd, the startup script runs and
+#: starts the runner, authorized_keys holds only the keys the runner installs, and 22/tcp is mapped to a public port.
 BOX_RUNTYPE = "ssh_direct"
 
 

@@ -34,6 +34,10 @@ services:
     # only way in is through the TLS proxy (docs/dev/production.md). Applies to every port below.
     ports:
       - "${KRATER_BIND_ADDRESS:-0.0.0.0}:${PORT:-8000}:8000"
+    # The project secrets key: the portal hands secrets to each machine's runner. Point KRATER_PROJECT_SECRETS_KEY_HOST_FILE
+    # at the key file on the host and set KRATER_PROJECT_SECRETS_KEY_FILE=/run/secrets/project_secrets_key.
+    volumes:
+      - ${KRATER_PROJECT_SECRETS_KEY_HOST_FILE:-/dev/null}:/run/secrets/project_secrets_key:ro
     depends_on:
       migrate:
         condition: service_completed_successfully

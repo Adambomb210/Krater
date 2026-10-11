@@ -61,9 +61,13 @@ def download_runner(settings: Annotated[Settings, Depends(get_settings)]):
 
 
 @router.post("/start")
-def start(request: Request, db_session: Annotated[Session, Depends(get_session)]):
+def start(
+    request: Request,
+    db_session: Annotated[Session, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+):
     try:
-        info = runner_api.start(db_session, _instance(request, db_session), now=_now())
+        info = runner_api.start(db_session, _instance(request, db_session), now=_now(), settings=settings)
     except NotAllowed as exc:
         db_session.rollback()
         return _deny(exc)

@@ -40,9 +40,16 @@ bootstrap runs as its startup script, starting the runner in the background. The
 4. saves `/workspace` every 10 minutes, and when a heartbeat reply says `sync` (Krater is about to stop the box),
    then confirms with `POST /runner/v1/synced`.
 
-Pending the paid check: that Vast runs the startup script in SSH mode, what Vast itself puts in authorized_keys, the
-22/tcp mapping, and what it does with a `JUPYTER_TOKEN` Krater sets. Krater refuses to start boxes while the Vast
-account has any SSH keys, since Vast may install them in every instance.
+Checked on staging (2026-10-11), plain `ubuntu:24.04` in SSH mode: Vast installs and runs sshd itself, runs the
+startup script, and the runner starts within a minute of the rental. `authorized_keys` held only the member's key
+(the account had no SSH keys, and Vast's `SSH_PUBLIC_KEY` was empty). 22/tcp is mapped to a public port
+(`VAST_TCP_PORT_22`), which is what the job page shows; Vast's own SSH proxy (`sshN.vast.ai`) works too. Krater
+refuses to start boxes while the Vast account has any SSH keys, since Vast may install them in every instance.
+
+What a member can read inside their box: the container's environment (`/proc/1/environ`) has `KRATER_JOB_TOKEN`
+(this instance's runner token: it can only report for this box), Vast's `CONTAINER_API_KEY` (it can stop or destroy
+this one instance; Krater treats that like any unexpected stop) and a `JUPYTER_TOKEN` Vast generates. Boxes are
+SSH-only in v1 (Adam, 2026-10-11): members run Jupyter themselves through an SSH tunnel.
 
 ## What a member's job sees
 
@@ -52,10 +59,27 @@ account has any SSH keys, since Vast may install them in every instance.
 | `KRATER_CHECKPOINT_DIR` | Save checkpoints here. Restored before the command starts |
 | `KRATER_OUTPUT_DIR` | Put results here. Uploaded when the command exits |
 | `KRATER_JOB_ID`, `KRATER_ATTEMPT` | For logs |
+| the project's secrets | Such as `HF_TOKEN`, set on the project's Compute page |
 
 Write a checkpoint under a temporary name ending in `.tmp` or `.partial` and rename it when it's complete: the
 runner skips those names, so it never uploads a half-written file. The image needs a POSIX `sh` and one of curl, wget
-or Python; its own ENTRYPOINT is not run, so put any setup in the command.
+or Python; its own ENTRYPOINT is not run, so put any setup in the command. An image whose `USER` isn't root can't
+create `/krater/...`, so the runner uses `/tmp/krater/checkpoints` and `/tmp/krater/outputs` instead (the variables
+say which). If it can't make its directories at all it reports exit code 125.
+
+## Project secrets
+
+A project's team sets secrets on its Compute page (`krater.services.project_secrets`): write-only, encrypted with
+the keys in `KRATER_PROJECT_SECRETS_KEY_FILE` (Fernet, one per line, newest first), which only the portal reads. The
+runner gets them in its `start` reply and puts them in the command's environment; for a box it writes
+`/etc/profile.d/krater-secrets.sh` (mode 0600, outside `/workspace`, so never synced), which login shells read. It
+logs how many, never a value. Names are capital letters, digits and underscores; `KRATER_`, `VAST_`, `CONTAINER_`,
+`LD_`, `PYTHON*`, `PATH`, `HOME` and the like are refused.
+
+What this protects and what it doesn't: values never go into Vast's create request, so they don't sit in Vast's
+instance records. But the runner fetches them with `KRATER_JOB_TOKEN`, which is in that request's environment, so
+anyone holding the organization's Vast key could read the token while the machine runs and fetch them too. And the
+machine's host can read anything on the machine. Members should use tokens they can scope and revoke.
 
 ## Security
 
