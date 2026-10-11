@@ -115,6 +115,25 @@ POLICY_FIELDS: tuple[PolicyField, ...] = (
         30,
     ),
     PolicyField(
+        "box_sync_deadline_minutes",
+        "Box sync deadline",
+        "Before stopping a box, Krater asks its runner to save /workspace, and stops it anyway after this long.",
+        "minutes",
+        1,
+        120,
+        10,
+    ),
+    PolicyField(
+        "box_resume_timeout_minutes",
+        "Box resume timeout",
+        "A stopped box restarts only if its machine's GPU is free. If it isn't running this long after the member "
+        "asks, Krater tells them and offers to start it elsewhere from its last saved workspace.",
+        "minutes",
+        2,
+        120,
+        10,
+    ),
+    PolicyField(
         "storage_quota_gb",
         "Storage quota",
         "Checkpoints and outputs one project's machines may keep in Krater's storage. Uploads past it are refused.",
@@ -150,6 +169,8 @@ class ComputePolicy:
     runner_start_minutes: int
     heartbeat_timeout_minutes: int
     storage_quota_gb: int
+    box_sync_deadline_minutes: int
+    box_resume_timeout_minutes: int
     #: The fields a project overrides (empty for the global policy).
     overridden: frozenset[str] = frozenset()
 

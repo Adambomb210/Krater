@@ -91,7 +91,9 @@ class ComputeJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 #: States in which a job holds budget and may have a live instance.
-ACTIVE_JOB_STATES = frozenset({ComputeJobState.STARTING, ComputeJobState.RUNNING, ComputeJobState.PAUSED})
+ACTIVE_JOB_STATES = frozenset(
+    {ComputeJobState.STARTING, ComputeJobState.RUNNING, ComputeJobState.PAUSED, ComputeJobState.STOPPED}
+)
 FINISHED_JOB_STATES = frozenset({ComputeJobState.SUCCEEDED, ComputeJobState.FAILED, ComputeJobState.CANCELLED})
 
 
@@ -143,6 +145,19 @@ class ComputeInstance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     runner_starts_needed: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=1, server_default="1")
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     last_heartbeat: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Boxes. Krater stops an idle box in two steps: it asks the runner to sync /workspace (`stop_requested_at`), and
+    # stops the machine once the runner confirms (`last_synced_at`) or the sync deadline passes.
+    stop_requested_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    stop_reason: Mapped[str | None] = mapped_column(sa.String(200), nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    stopped_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    # When the member asked to resume a stopped box (Vast restarts it only if the machine's GPU is still free).
+    start_requested_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    # Since when the box has looked idle (low GPU use and no open session), by its heartbeats.
+    idle_since: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    # How to reach a box over SSH, from Vast (the direct port when there is one).
+    ssh_host: Mapped[str | None] = mapped_column(sa.String(255), nullable=True)
+    ssh_port: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     # Set when Krater decides to destroy it; the scheduler retries until Vast confirms it's gone.
     destroy_requested_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     destroy_reason: Mapped[str | None] = mapped_column(sa.String(200), nullable=True)

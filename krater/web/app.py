@@ -23,6 +23,7 @@ from krater.web.rate_limit import RateLimitMiddleware
 from krater.web.request_id import RESPONSE_HEADER as REQUEST_ID_HEADER
 from krater.web.request_id import RequestIdMiddleware
 from krater.web.routers import (
+    account,
     admin,
     auth,
     compute_admin,
@@ -100,6 +101,7 @@ def create_app() -> FastAPI:
     app.include_router(projects.router)
     app.include_router(reviews.router)
     app.include_router(admin.router)
+    app.include_router(account.router)
     app.include_router(compute_admin.router)
     app.include_router(runner.router)
     app.include_router(gallery.router)

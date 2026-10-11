@@ -26,6 +26,7 @@
           <div class="site-nav__account">
             {% if signed_in_name %}
               <span class="site-nav__user">{{ signed_in_name }}</span>
+              <a href="/account/ssh-keys"{% if path.startswith("/account") %} aria-current="page"{% endif %}>SSH keys</a>
               <form class="site-nav__logout" action="/logout" method="post">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="link-button">Sign out</button>

@@ -106,6 +106,7 @@ class ComputeJobState(enum.StrEnum):
     STARTING = "starting"  # an instance is being created or is pulling the image
     RUNNING = "running"
     PAUSED = "paused"  # its interruptible instance was outbid
+    STOPPED = "stopped"  # a box Krater stopped (idle, or the member asked): its disk is kept until it resumes
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -127,5 +128,6 @@ class ComputeInstanceState(enum.StrEnum):
     PROVISIONING = "provisioning"  # Vast id known; pulling the image (disk billed, GPU not yet)
     RUNNING = "running"
     PAUSED = "paused"  # outbid: not running, but not stopped by Krater either
+    STOPPED = "stopped"  # stopped by Krater (a box): the GPU is free, the disk still bills
     DESTROYED = "destroyed"  # destroyed and confirmed gone (or never existed)
     CREATE_FAILED = "create_failed"  # Vast refused the create, or it never appeared
