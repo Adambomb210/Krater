@@ -423,6 +423,8 @@ class Scheduler:
             # It was running and isn't now, without Krater stopping it: outbid (or the host went away).
             row.state = ComputeInstanceState.PAUSED
             row.paused_since = self.now
+            # A pause kills the container's processes and Vast restarts it on resume: the runner must start again.
+            row.runner_starts_needed = row.runner_starts + 1
             job.state = ComputeJobState.PAUSED
             job.state_reason = "Outbid: the machine is paused."
             _event(
@@ -449,8 +451,7 @@ class Scheduler:
         since = row.entered_running_at or row.running_since
         if since is None:
             return
-        started_since_entering = row.runner_started_at is not None and row.runner_started_at >= since
-        if not started_since_entering:
+        if row.runner_starts < row.runner_starts_needed:
             if self.now - since >= timedelta(minutes=policy.runner_start_minutes):
                 _finish(
                     job,

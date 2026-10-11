@@ -29,6 +29,9 @@ def upgrade() -> None:
     op.add_column("compute_instances", sa.Column("runner_token_hash", sa.String(length=64), nullable=True))
     op.add_column("compute_instances", sa.Column("runner_started_at", sa.DateTime(timezone=True), nullable=True))
     op.add_column("compute_instances", sa.Column("runner_starts", sa.Integer(), server_default="0", nullable=False))
+    op.add_column(
+        "compute_instances", sa.Column("runner_starts_needed", sa.Integer(), server_default="1", nullable=False)
+    )
     op.add_column("compute_instances", sa.Column("last_heartbeat_at", sa.DateTime(timezone=True), nullable=True))
     op.add_column(
         "compute_instances",
@@ -54,6 +57,7 @@ def downgrade() -> None:
     for name in (
         "last_heartbeat",
         "last_heartbeat_at",
+        "runner_starts_needed",
         "runner_starts",
         "runner_started_at",
         "runner_token_hash",
