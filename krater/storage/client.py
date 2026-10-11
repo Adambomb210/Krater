@@ -45,6 +45,11 @@ class ObjectStore(Protocol):
         object exists. Used to check a file's magic-byte signature without fetching the whole object."""
         ...
 
+    def read_tail(self, key: str, n: int) -> bytes | None:
+        """The last `n` bytes of `key` (a suffix-ranged `GET`), or `None` if no such object exists. Used to show the
+        end of a job's log without fetching all of it."""
+        ...
+
     def delete(self, key: str) -> None:
         """Delete `key`. Safe to call on a key that's already gone (S3's own `DeleteObject` semantics)."""
         ...

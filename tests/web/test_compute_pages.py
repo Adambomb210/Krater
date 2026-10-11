@@ -336,3 +336,63 @@ def test_without_a_key_the_page_says_secrets_are_off(client: TestClient, login_a
 
     assert "Secrets aren't set up on this Krater yet" in page.text
     assert "Save secret" not in page.text
+
+
+# -- Output and files ----------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def store(monkeypatch):
+    from krater.storage.fake import FakeObjectStore
+
+    fake = FakeObjectStore()
+    monkeypatch.setattr("krater.web.routers.compute.get_compute_store", lambda: fake)
+    return fake
+
+
+def _stored(store, job, area, name, content: bytes) -> None:
+    key = f"projects/{job.project_id}/jobs/{job.id}/{area}/{name}"
+    store.put(key, content_type="", size_bytes=len(content), content=content)
+
+
+def test_the_job_page_shows_the_output_and_the_files(client: TestClient, login_as, project, db_session, store) -> None:
+    member = login_as(MEMBER_SUB)
+    job = _job(db_session, project, member)
+    _stored(store, job, "logs", "attempt-1.log", b"epoch 1 loss 0.42\n<b>not markup</b>\n")
+    _stored(store, job, "outputs", "eval/score.txt", b"0.93\n")
+
+    page = client.get(f"/projects/{project.id}/compute/{job.id}").text
+
+    assert "epoch 1 loss 0.42" in page
+    assert "&lt;b&gt;not markup&lt;/b&gt;" in page
+    assert f"/projects/{project.id}/compute/{job.id}/files/outputs/eval/score.txt" in page
+    assert f"krater download {job.id}" in page
+
+
+def test_a_file_link_redirects_to_a_short_lived_url(client: TestClient, login_as, project, db_session, store) -> None:
+    member = login_as(MEMBER_SUB)
+    job = _job(db_session, project, member)
+    _stored(store, job, "outputs", "eval/score.txt", b"0.93\n")
+    base = f"/projects/{project.id}/compute/{job.id}/files"
+
+    response = client.get(f"{base}/outputs/eval/score.txt", follow_redirects=False)
+    missing = client.get(f"{base}/outputs/nope", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"].endswith(f"jobs/{job.id}/outputs/eval/score.txt?expires=900")
+    assert missing.status_code == 404
+
+
+def test_reviewers_see_the_job_but_not_its_output(client: TestClient, login_as, project, db_session, store) -> None:
+    member = login_as(MEMBER_SUB)
+    job = _job(db_session, project, member)
+    _stored(store, job, "logs", "attempt-1.log", b"private output\n")
+    _stored(store, job, "outputs", "x.txt", b"x")
+    login_as(REVIEWER_SUB)
+
+    page = client.get(f"/projects/{project.id}/compute/{job.id}")
+    download = client.get(f"/projects/{project.id}/compute/{job.id}/files/outputs/x.txt", follow_redirects=False)
+
+    assert page.status_code == 200
+    assert "private output" not in page.text
+    assert download.status_code == 403

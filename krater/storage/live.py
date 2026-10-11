@@ -161,6 +161,19 @@ class S3ObjectStore:
             raise StorageUnavailableError(f"could not read {key!r}: {exc}") from exc
         return response["Body"].read()
 
+    def read_tail(self, key: str, n: int) -> bytes | None:
+        try:
+            response = self._internal.get_object(Bucket=self._bucket, Key=key, Range=f"bytes=-{n}")
+        except ClientError as exc:
+            if _is_not_found(exc):
+                return None
+            if _is_invalid_range(exc):
+                return b""
+            raise StorageUnavailableError(f"could not read {key!r}: {exc}") from exc
+        except BotoCoreError as exc:
+            raise StorageUnavailableError(f"could not read {key!r}: {exc}") from exc
+        return response["Body"].read()
+
     def delete(self, key: str) -> None:
         try:
             self._internal.delete_object(Bucket=self._bucket, Key=key)

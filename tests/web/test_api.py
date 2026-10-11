@@ -153,3 +153,26 @@ def test_unknown_routes_under_the_api_are_json(client: TestClient) -> None:
     response = client.get("/api/v1/nothing-here", headers={"accept": "text/html"})
 
     assert response.status_code == 404 and response.json()["error"]
+
+
+def test_a_member_reads_a_jobs_output_and_lists_its_files(client: TestClient, project, monkeypatch) -> None:
+    from krater.storage.fake import FakeObjectStore
+
+    store = FakeObjectStore()
+    monkeypatch.setattr("krater.web.routers.api.get_compute_store", lambda: store)
+    job = client.post(f"/api/v1/projects/{project.id}/jobs", json=JOB, headers=_as(MEMBER_SUB)).json()
+    prefix = f"projects/{project.id}/jobs/{job['id']}"
+    store.put(f"{prefix}/logs/attempt-1.log", content_type="", size_bytes=6, content=b"hello\n")
+    store.put(f"{prefix}/outputs/score.txt", content_type="", size_bytes=5, content=b"0.93\n")
+
+    logs = client.get(f"/api/v1/jobs/{job['id']}/logs", headers=_as(MEMBER_SUB)).json()
+    files = client.get(f"/api/v1/jobs/{job['id']}/files", headers=_as(MEMBER_SUB)).json()["files"]
+    refused = client.get(f"/api/v1/jobs/{job['id']}/files", headers=_as(REVIEWER_SUB))
+
+    assert logs == {"attempt": 1, "text": "hello\n", "size_bytes": 6, "truncated": False}
+    assert [(f["area"], f["name"], f["size_bytes"]) for f in files] == [
+        ("outputs", "score.txt", 5),
+        ("logs", "attempt-1.log", 6),
+    ]
+    assert all("expires=900" in f["url"] for f in files)
+    assert refused.status_code == 403

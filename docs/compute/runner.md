@@ -26,7 +26,12 @@ The runner then:
    command (SIGTERM, then SIGKILL after 30 s) when Krater answers `stop`;
 5. uploads changed checkpoints every 10 minutes, and checkpoints and outputs (`$KRATER_OUTPUT_DIR`, default
    `/krater/outputs`) when the command exits;
-6. reports the exit code. The scheduler destroys the machine on its next pass.
+6. saves the command's stdout and stderr, with its own lines, to the job's log (`logs/attempt-<n>.log`, up to
+   16 MB; the rest still reaches Vast's container log) and uploads it every minute and at exit;
+7. reports the exit code. The scheduler destroys the machine on its next pass.
+
+The job's team reads the log, outputs and checkpoints on the job page (Output and Files; downloads are redirects to
+URLs signed for 15 minutes) or with `krater logs` and `krater download`. Reviewers see the job but not its files.
 
 ## Boxes
 

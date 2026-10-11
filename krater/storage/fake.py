@@ -46,6 +46,12 @@ class FakeObjectStore:
             return None
         return content[:n]
 
+    def read_tail(self, key: str, n: int) -> bytes | None:
+        content = self._content.get(key)
+        if content is None:
+            return None
+        return content[-n:] if n else b""
+
     def delete(self, key: str) -> None:
         self._objects.pop(key, None)
         self._content.pop(key, None)

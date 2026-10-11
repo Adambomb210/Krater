@@ -7,7 +7,8 @@
 //  3. runs the member's command with `sh -c`;
 //  4. sends a heartbeat every minute with the GPU use it samples from nvidia-smi, and stops the command when Krater
 //     says so;
-//  5. uploads changed checkpoints on a timer, and checkpoints and outputs when the command exits;
+//  5. uploads changed checkpoints on a timer, and checkpoints and outputs when the command exits; the command's
+//     output (and the runner's own lines) go to the job's log, uploaded every minute, which its team reads in Krater;
 //  6. reports the exit code. Krater then destroys the machine.
 //
 // The runner is not the container's main process: the bootstrap shell is, and it waits forever after the runner
@@ -21,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -47,6 +49,8 @@ type Config struct {
 	ProcNet       string
 	// Where a box's login shells read the project's secrets from.
 	SecretsProfile string
+	// Where the job's output log is kept before upload; blank means a krater-logs folder in the temp directory.
+	LogDir string
 }
 
 func configFromEnv() (Config, error) {
@@ -176,6 +180,23 @@ func Run(ctx context.Context, cfg Config, apiHTTP, storageHTTP *http.Client, gpu
 
 	cmd := exec.Command("sh", "-c", info.Command)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	logDir := cfg.LogDir
+	if logDir == "" {
+		logDir = filepath.Join(os.TempDir(), "krater-logs")
+	}
+	var logs *Syncer
+	if out, err := newLogFile(logDir, info.Attempt, LogMaxBytes); err != nil {
+		logf("can't save the command's output for Krater: %v", err)
+	} else {
+		defer out.Close()
+		previous := log.Writer()
+		log.SetOutput(io.MultiWriter(previous, out))
+		defer log.SetOutput(previous)
+		cmd.Stdout, cmd.Stderr = io.MultiWriter(os.Stdout, out), io.MultiWriter(os.Stderr, out)
+		// With pipes, Wait also waits for the output to close: don't hang on a background process that keeps it.
+		cmd.WaitDelay = 10 * time.Second
+		logs = NewSyncer(api, "logs", logDir, storageHTTP)
+	}
 	secrets := secretEnv(info.Secrets)
 	if len(secrets) > 0 {
 		logf("%d project secrets in the command's environment", len(secrets))
@@ -214,6 +235,10 @@ func Run(ctx context.Context, cfg Config, apiHTTP, storageHTTP *http.Client, gpu
 		defer wg.Done()
 		syncLoop(loops, checkpoints, seconds(info.CheckpointSyncSeconds, 600))
 	}()
+	if logs != nil {
+		wg.Add(1)
+		go func() { defer wg.Done(); syncLoop(loops, logs, seconds(info.LogSyncSeconds, 60)) }()
+	}
 
 	code := exitCode(cmd.Wait())
 	close(done)
@@ -226,6 +251,11 @@ func Run(ctx context.Context, cfg Config, apiHTTP, storageHTTP *http.Client, gpu
 			logf("final upload of %s failed: %v", s.Area, err)
 		} else if n > 0 {
 			logf("uploaded %d %s files", n, s.Area)
+		}
+	}
+	if logs != nil {
+		if _, err := logs.Push(ctx); err != nil {
+			logf("final upload of the output log failed: %v", err)
 		}
 	}
 	if err := retry(ctx, 10*time.Minute, func() error { return api.Exit(ctx, code) }); err != nil {
@@ -276,10 +306,12 @@ func syncLoop(ctx context.Context, s *Syncer, every time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if n, err := s.Push(ctx); err != nil && ctx.Err() == nil {
-				logf("checkpoint upload failed: %v", err)
-			} else if n > 0 {
-				logf("uploaded %d checkpoint files", n)
+			n, err := s.Push(ctx)
+			switch {
+			case err != nil && ctx.Err() == nil:
+				logf("%s upload failed: %v", s.Area, err)
+			case n > 0 && s.Area != "logs": // a line about the log would change the log, and upload it again
+				logf("uploaded %d %s files", n, s.Area)
 			}
 		}
 	}

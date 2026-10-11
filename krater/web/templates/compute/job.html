@@ -36,7 +36,7 @@
       <dt>GPU</dt><dd>{{ instance.gpu_name }} at {{ instance.full_microusd | rate }} ({{ "bid" if instance.interruptible else "on demand" }})</dd>
       <dt>State</dt><dd>{{ instance.state.value }}</dd>
       {% if job.kind.value == "box" and instance.ssh_host and instance.ssh_port %}
-        <dt>SSH</dt><dd><code>ssh -p {{ instance.ssh_port }} root@{{ instance.ssh_host }}</code></dd>
+        <dt>SSH</dt><dd><code>ssh -p {{ instance.ssh_port }} root@{{ instance.ssh_host }}</code>, or <code>krater ssh {{ job.id }}</code></dd>
         <dt>Jupyter</dt><dd>If you start Jupyter in the box, reach it through an SSH tunnel: <code>ssh -L 8888:localhost:8888 -p {{ instance.ssh_port }} root@{{ instance.ssh_host }}</code></dd>
       {% endif %}
       {% if instance.last_synced_at %}<dt>Workspace saved</dt><dd>{{ instance.last_synced_at.strftime("%Y-%m-%d %H:%M UTC") }}</dd>{% endif %}
@@ -68,6 +68,51 @@
     {% endif %}
   </div>
 </section>
+
+{% if can_read_files %}
+<section class="card" id="output">
+  <h2>Output</h2>
+  {% if files_error %}
+    <p class="muted">Krater's storage didn't answer, so the output can't be shown right now.</p>
+  {% elif log %}
+    <p class="muted">
+      What the command printed{% if job.attempts > 1 %} on attempt {{ log.attempt }}{% endif %}, saved every minute while it
+      runs{% if log.truncated %}; the end of {{ log.size_bytes | filesize }}{% endif %}.
+      <a href="/projects/{{ project.id }}/compute/{{ job.id }}/files/logs/attempt-{{ log.attempt }}.log">Download the whole log</a>.
+    </p>
+    <pre class="log">{{ log.text }}</pre>
+  {% elif job.kind.value == "box" %}
+    <p class="muted">Boxes have no command output; SSH in to see what's running.</p>
+  {% else %}
+    <p class="muted">Nothing yet. The output appears here within a minute of the command starting.</p>
+  {% endif %}
+</section>
+
+<section class="card" id="files">
+  <h2>Files</h2>
+  <p class="muted">
+    What the job saved in <code>$KRATER_OUTPUT_DIR</code> (uploaded when the command exits) and
+    <code>$KRATER_CHECKPOINT_DIR</code> (every 10 minutes and at exit), and its output logs. A link works for 15 minutes
+    after you click it. From a terminal: <code>krater download {{ job.id }}</code>.
+  </p>
+  {% if files %}
+    <table class="table">
+      <thead><tr><th scope="col">Kind</th><th scope="col">File</th><th scope="col">Size</th></tr></thead>
+      <tbody>
+        {% for file in files %}
+          <tr>
+            <td>{{ {"outputs": "output", "checkpoints": "checkpoint", "logs": "log"}[file.area] }}</td>
+            <td><a href="/projects/{{ project.id }}/compute/{{ job.id }}/files/{{ file.area }}/{{ file.name }}">{{ file.name }}</a></td>
+            <td>{{ file.size_bytes | filesize }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% elif not files_error %}
+    <p class="muted">None yet.</p>
+  {% endif %}
+</section>
+{% endif %}
 
 <section class="card">
   <h2>What happened</h2>

@@ -20,12 +20,13 @@ from krater.config import get_settings
 from krater.db import get_session
 from krater.models import ComputeEscalation, ComputeEvent, ComputeJob, ComputeJobKind, ComputeJobState, Project
 from krater.models.compute_job import ACTIVE_JOB_STATES
-from krater.services import compute_jobs, price_history, project_secrets
+from krater.services import compute_files, compute_jobs, price_history, project_secrets
 from krater.services import projects as project_service
 from krater.services.actor import Actor
 from krater.services.compute_jobs import JobSpec
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
 from krater.services.launch_rules import LAUNCHABLE_STATUSES, hourly_cap_cents
+from krater.storage import StorageError, get_compute_store
 from krater.vast import usd_to_microusd
 from krater.web.charts import PricePoint, price_chart_svg
 from krater.web.csrf import verify_csrf_token
@@ -271,6 +272,15 @@ def job_page(
     )
     live = [row for row in job.instances if row.is_live]
     is_team = _is_team(actor, project)
+    can_read_files = compute_files.can_read(actor, project)
+    files, log, files_error = [], None, False
+    if can_read_files:
+        store = get_compute_store()
+        try:
+            files = compute_files.list_files(store, actor, job=job)
+            log = compute_files.log_tail(store, actor, job=job)
+        except StorageError:
+            files_error = True
     return templates.TemplateResponse(
         request,
         "compute/job.html",
@@ -283,8 +293,29 @@ def job_page(
             "can_stop": is_team and job.kind is ComputeJobKind.BOX and job.state is ComputeJobState.RUNNING,
             "can_resume": is_team and job.kind is ComputeJobKind.BOX and job.state is ComputeJobState.STOPPED,
             "escalations": ESCALATION_LABELS,
+            "can_read_files": can_read_files,
+            "files": files,
+            "log": log,
+            "files_error": files_error,
         },
     )
+
+
+@router.get("/projects/{project_id}/compute/{job_id}/files/{area}/{name:path}")
+def job_file(
+    project_id: uuid.UUID,
+    job_id: uuid.UUID,
+    area: str,
+    name: str,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(session_actor)],
+):
+    """Download one of the job's files: a redirect to a URL signed for 15 minutes, made on the click."""
+    _require_vast()
+    project = _project(db_session, actor, project_id)
+    job = _job(db_session, project, job_id)
+    url = compute_files.download_url(get_compute_store(), actor, job=job, area=area, name=name)
+    return RedirectResponse(url, status_code=303)
 
 
 _ACTIONS = {
