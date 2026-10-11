@@ -79,6 +79,18 @@ Weave owns Krater's roles. As a Weave superadmin, open the Krater app's page in 
 everyone else their roles the same way. To shut someone out of Krater, remove their roles or app access in Weave and
 revoke their tokens there.
 
+Every staging user must also have accepted the Code of Conduct. Since patchworklabsorg/weave#171, Weave refuses every
+app to a user who hasn't: sign-in ends on Weave's `/slack` page, and the directory hides them, so Krater treats them as
+gone. A local Weave has no Slack to accept through, so set it in Weave per user (or have a superadmin mark them exempt
+on the user's admin page):
+
+```bash
+bin/rails runner 'User.find_for_any_email("you@example.com").update_columns(slack_coc_accepted_at: Time.current)'
+```
+
+Krater also checks Slack membership before a submission. A local Weave has no Slack integration either, so set
+`slack_id` and `slack_membership: "member"` the same way for anyone who submits.
+
 ## 3. A separate, small-credit Vast.ai account
 
 **Use a throwaway or clearly-separated Vast account, never the production one.** Create it at vast.ai, add the
@@ -222,6 +234,10 @@ The `/pricing` page stays empty until the worker's daily refresh (07:00 UTC). To
    sky api login -e http://localhost:46580     # the API server; it forwards /oauth2/* to auth-proxy
    ```
    This opens a browser to Weave sign-in (via oauth2-proxy). Use the same Weave account as your project's submitter.
+   After Weave, SkyPilot shows its own "Sign in to SkyPilot CLI" page: click **Authorize** there, and the CLI finishes.
+   With `--no-browser`, the CLI prints that URL instead. The `sky` client doesn't run on native Windows (it needs the
+   POSIX `resource` module), so run it in WSL or in a `berkeleyskypilot/skypilot:0.13.0` container. If the sign-in ends
+   in a 500 "oauth2-proxy ... did not return user info", the proxy is missing `OAUTH2_PROXY_SET_XAUTHREQUEST=true`.
 5. **Launch a tiny job** targeting your project's workspace explicitly (required -- see
    `docs/skypilot-integration.md` section 2 for what happens if you don't):
    ```bash
