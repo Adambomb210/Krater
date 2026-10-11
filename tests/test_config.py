@@ -57,7 +57,11 @@ def test_production_compute_on_vast_needs_the_live_vast_api() -> None:
     with pytest.raises(ValueError, match="VAST_MODE"):
         Settings(**{**_PRODUCTION_READY, "compute_mode": "vast", "vast_mode": "fake"})
 
-    Settings(**{**_PRODUCTION_READY, "compute_mode": "vast", "vast_mode": "live"})
+    with pytest.raises(ValueError, match="LABEL_PREFIX"):
+        Settings(**{**_PRODUCTION_READY, "compute_mode": "vast", "vast_mode": "live"})
+    Settings(
+        **{**_PRODUCTION_READY, "compute_mode": "vast", "vast_mode": "live", "compute_label_prefix": "krater-prod-"}
+    )
 
 
 def test_production_rejects_a_short_skypilot_policy_token() -> None:
