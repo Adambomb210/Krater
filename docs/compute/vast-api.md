@@ -44,12 +44,35 @@ each behavior that would cost money to get wrong, and `tests/vast/test_client.py
 - **Open:** the bill showed $0.059/h after the bid was raised to $0.064. Is a bid charged at its own price or at a
   clearing price? And what does a paused instance's `actual_status` say?
 
+## Checked on the staging round (2026-10-11)
+
+Krater rented nine RTX 3060 bids on staging through its own scheduler (seven confirmed, two from "refused" creates),
+$0.019 in all.
+
+- **Entrypoint override works.** In `args` mode Vast's `onstart` field is the container's entrypoint: Krater sends
+  `runtype: "args"`, `onstart: "sh"`, `args: ["-c", script]`, and both `alpine:3.20` (no ENTRYPOINT) and
+  `nginx:1.27-alpine` (ENTRYPOINT `/docker-entrypoint.sh`) ran the member's command. Members' own images work.
+- **A create can answer 200 with `{"success": false}` and no message, and rent the machine anyway.** It happened
+  twice in a row for one job, then not again. Krater treats such an answer as unconfirmed and finds the machine by
+  its label on the next pass, like a lost answer (a 4xx is still a refusal). That path is tested against FakeVast
+  only, since the answer didn't come back after the fix. Until then the sweep destroyed each such machine within a
+  minute; Vast's charges for them carry no project (the reconciliation flags them as unknown).
+- **The container starts before Vast says `running`.** The runner reported in 20–40 s after the create, while
+  `actual_status` was still empty; Vast showed `running` 30–60 s later.
+- **Charges are current while a machine runs**, as the spike found: the watchdog saw them rise every minute.
+- **Rate limit:** 36 searches in about 4 s got a 429 after 33. Paced at 1 s, a scheduler call at the same minute
+  still got one. Price history now waits 2 s between searches, and the scheduler retries on its next pass.
+- **A natural pause happened** after 8 minutes on a $0.0294 bid. A paused instance reads `actual_status: exited`,
+  `intended_status: stopped`, `cur_state` and `next_state: stopped`, and keeps its `status_msg`. Raising the bid
+  every minute up to the job's max ($0.0778, 2.6× the first bid) didn't bring it back within 30 minutes, so Krater
+  moved the job: the next machine's runner started with `resumed=true`.
+- **Vast runs the image's own `USER`**: `curlimages/curl` ran as uid 100. The runner now falls back to `/tmp/krater`
+  for directories it can't create, and the job passed.
+- **SSH mode** (boxes): see `runner.md`. A stop takes Vast about a minute to show (`exited`); a start on the same
+  machine came back in under a minute.
+
 ## Not checked live yet
 
-- **Entrypoint override.** In `args` mode Vast's `onstart` field is the container's entrypoint (Vast's CLI sends
-  `--entrypoint X` as `"onstart": X`, and documents `--onstart-cmd bash --args -c '...'`). Krater sends
-  `runtype: "args"`, `onstart: "sh"`, `args: ["-c", script]`, so a member's image ENTRYPOINT can't swallow the
-  command. The 2026-10-11 spike used an image without an ENTRYPOINT, so this needs one paid launch with an image
-  that has one.
 - `gpu_ram` in a search filter: sent in MB, as Vast's CLI does (it multiplies a `gpu_ram>=24` query by 1000).
-- Rate limits: Vast answers 429 with a `detail`; how many calls a minute it allows isn't documented.
+- Whether a bid is billed at its own price or a clearing price, and whether paused time bills disk: Vast's charges
+  are rounded to $0.001, too coarse for runs this short.

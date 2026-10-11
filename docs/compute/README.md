@@ -2,7 +2,7 @@
 
 Krater rents Vast.ai machines for Ganymede members itself, replacing SkyPilot. This branch (`claude/krater-compute`, on
 top of PR #1's `claude/compute-off`) is the Compute PR. Design: "Krater Compute v1: design" (a Claude Doc Adam shared).
-Nothing here has rented a real machine yet: see [What still needs a paid check](#what-still-needs-a-paid-check).
+Its first paid round ran on staging on 2026-10-11: see [Paid checks](#paid-checks).
 
 ## The pieces
 
@@ -48,22 +48,41 @@ still read their old `KRATER_SKYPILOT_*` names for one release.
 
 ## Still to do on this branch
 
-- Not built, and needing a decision: project secrets (such as `HF_TOKEN`) encrypted at rest, and where that key lives;
-  a member CLI, which needs an auth design; Slack messages for box idle and destroy warnings (they are events only).
+- **Project secrets** (such as `HF_TOKEN`) are built as decided on 2026-10-11: stored encrypted, fetched by the
+  runner at start (see [runner.md](runner.md#project-secrets)). The key is its own file,
+  `KRATER_PROJECT_SECRETS_KEY_FILE`, mounted into the portal only (an agenix secret in infra), separate from the
+  database and `KRATER_SECRET_KEY`; Adam to confirm. Checked against FakeVast and the Go tests, not on a rented machine.
+- **Boxes are SSH-only in v1** (decided 2026-10-11): members run Jupyter through an SSH tunnel.
+- Not built: a member CLI, which needs an auth design; Slack messages for box idle and destroy warnings (they are
+  events only).
 
-## What still needs a paid check
+## Paid checks
 
-One round on staging, with Adam's approval, each a few cents with the spike's safety rules:
+One round on local staging, 2026-10-11, approved by Adam (scripts: `staging/compute-round/` outside the repo):
 
-- an image with an ENTRYPOINT and one without (is `onstart` really the entrypoint override in `args` mode?);
-- the full run: runner download from a Vast host, start, heartbeat, exit, destroy confirmed;
-- whether Vast's charges are current while a machine runs;
-- a natural pause (a long bid at `min_bid`), and what a paused instance's status says;
-- a box: sshd and the runner in SSH mode, what lands in authorized_keys, the 22/tcp mapping, `JUPYTER_TOKEN`.
+- **Passed:** an image without an ENTRYPOINT (`alpine`, exit code 3 recorded as a failure) and one with
+  (`nginx`, run twice); the runner downloaded from Vast hosts through the public tunnel, checksum checked, start,
+  heartbeats, exit, machine destroyed on the next pass; charges current while running; a box on plain
+  `ubuntu:24.04` (SSH through the mapped port and through Vast's proxy, only the member's key, stop with the
+  `/workspace` handshake, resume on the same machine, cancel). Details in [vast-api.md](vast-api.md) and
+  [runner.md](runner.md).
+- **Found and fixed:** a create answered 200 with `success: false` still rented a machine (now settled by label);
+  price history hit Vast's rate limit (now paced).
+- **A natural pause** (a $0.0294 bid, outbid after 8 minutes): Krater saw it, raised the bid every minute after the
+  5-minute grace up to the job's max without reviving it, and moved the job at 30 minutes. The move found a bug: the
+  check that the old machine was gone hit Vast's rate limit, and the next pass left the job paused with no machine.
+  Fixed (dad83fa) and confirmed live: the job was requeued and its runner resumed on a new machine.
+- **A non-root image** (`curlimages/curl`, uid 100, its own ENTRYPOINT): its runner couldn't create `/krater/...`, a
+  bug that would have failed every such job. Fixed (the runner falls back to `/tmp/krater`) and confirmed live,
+  together with a project secret reaching the command.
+- **Cost:** $0.019 charged by Vast for nine machines; the watchdog never had to act.
+- **Not covered:** checkpoint and output uploads from a Vast host (staging's storage isn't public; checked locally
+  against SeaweedFS), and idle detection (the box was stopped by hand).
 
 ## Deploying
 
-Production stays `KRATER_COMPUTE_MODE=off` until those checks pass. Turning it on needs, in infra: the Vast key mounted
+Production stays `KRATER_COMPUTE_MODE=off` until Adam turns it on: the staging round passed, and what it couldn't
+cover (uploads from a Vast host, the Cloudflare checks below) is still open. Turning it on needs, in infra: the Vast key mounted
 into the worker only (`KRATER_VAST_API_KEY_FILE`), `KRATER_VAST_MODE=live`, a production `KRATER_COMPUTE_LABEL_PREFIX`,
 `KRATER_COMPUTE_MODE=vast`, and the `krater-compute` bucket (created by the deploy's `ensure_bucket`).
 
