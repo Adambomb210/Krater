@@ -1,5 +1,11 @@
 # SkyPilot integration & budget enforcement
 
+> **Being replaced.** On 2026-10-11 Adam and Jasper decided to drop SkyPilot for Krater Compute, Krater's own layer on
+> Vast.ai: SkyPilot's Vast support crashes before renting, copies the organization's Vast key onto member machines and
+> ignores the hourly cap at rental. Until Compute lands, production runs `KRATER_COMPUTE_MODE=off`: no workspaces, no
+> reconcile job, a 404 on the launch-policy endpoint and no launch instructions. This document describes
+> `KRATER_COMPUTE_MODE=skypilot`, which dev and staging still default to.
+
 SkyPilot runs Ganymede's compute, mainly renting GPUs from Vast.ai. It runs as its own API server. Krater doesn't
 schedule or run jobs, but it **does** enforce each project's dollar ceiling, because SkyPilot has no budget feature to
 hand that job to.

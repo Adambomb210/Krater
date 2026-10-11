@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     weave_group_reviewer: str = "krater-reviewers"
     weave_group_admin: str = "krater-admins"
 
+    # Which compute layer launches members' machines. `skypilot` runs the SkyPilot integration below
+    # (workspaces, the reconcile job, the launch-policy endpoint). `off` launches nothing: Krater still runs
+    # proposals, review, budgets, Slack, the gallery and Quilt events, but provisions no workspaces, runs no
+    # reconcile, answers 404 on the launch-policy endpoint and shows no launch instructions. Production
+    # runs `off` until Krater Compute (its own Vast layer) replaces SkyPilot.
+    compute_mode: Literal["off", "skypilot"] = "skypilot"
+
     # SkyPilot integration. See docs/skypilot-integration.md and docs/dev/skypilot-spike.md.
     # `fake` uses an in-memory SkyPilot for dev and tests; `live` talks to a real API server over REST.
     skypilot_mode: Literal["fake", "live"] = "fake"
@@ -69,6 +76,8 @@ class Settings(BaseSettings):
     # GPU pricing (see docs/dev/pricing.md): fetched straight from SkyPilot's public Vast catalog CSV,
     # not the SkyPilot API server -- no workspace/auth needed, and it's the exact same data the
     # optimizer itself reads. `skypilot_mode=fake` uses `FakeSkyPilotClient`'s canned catalog instead.
+    # The catalog is used with `compute_mode=off` too, so with compute off `skypilot_mode=live` only means
+    # "fetch the real catalog": no API server, service token or policy token is needed.
     skypilot_catalog_url: str = (
         "https://raw.githubusercontent.com/skypilot-org/skypilot-catalog/master/catalogs/v8/vast/vms.csv"
     )
@@ -112,12 +121,17 @@ class Settings(BaseSettings):
             if self.weave_mode == "stub":
                 raise ValueError("KRATER_WEAVE_MODE cannot be 'stub' when KRATER_ENV=production")
             if self.skypilot_mode == "fake":
+                # Even with compute off: the budget estimator's GPU prices come from SkyPilot's catalog.
                 raise ValueError("KRATER_SKYPILOT_MODE cannot be 'fake' when KRATER_ENV=production")
             if self.slack_mode == "fake":
                 raise ValueError("KRATER_SLACK_MODE cannot be 'fake' when KRATER_ENV=production")
             if self.s3_mode == "fake":
                 raise ValueError("KRATER_S3_MODE cannot be 'fake' when KRATER_ENV=production")
-            if self.skypilot_mode == "live" and len(self.skypilot_policy_token) < 32:
+            if (
+                self.compute_mode == "skypilot"
+                and self.skypilot_mode == "live"
+                and len(self.skypilot_policy_token) < 32
+            ):
                 raise ValueError("KRATER_SKYPILOT_POLICY_TOKEN must be at least 32 characters in production")
             # Also refuse anything that still looks like a placeholder (e.g. a lengthened copy of .env.example's).
             if (

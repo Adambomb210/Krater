@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from krater.config import get_settings
 from krater.worker.app import app, skypilot_reconcile
 
 
@@ -36,3 +37,17 @@ def test_skypilot_reconcile_calls_through_to_the_service_function() -> None:
         assert args[2] is mock_get_weave_client.return_value
         assert kwargs["warn_percent"] == 80  # KRATER_SKYPILOT_BUDGET_WARN_PERCENT default
         fake_session.close.assert_called_once()
+
+
+def test_skypilot_reconcile_does_nothing_with_compute_off(monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "compute_mode", "off")
+    with (
+        patch("krater.worker.app.reconcile") as mock_reconcile,
+        patch("krater.worker.app.get_skypilot_client") as mock_get_client,
+        patch("krater.worker.app.get_sessionmaker") as mock_get_sessionmaker,
+    ):
+        skypilot_reconcile.func(timestamp=123)
+
+        mock_reconcile.assert_not_called()
+        mock_get_client.assert_not_called()
+        mock_get_sessionmaker.assert_not_called()

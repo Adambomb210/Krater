@@ -21,6 +21,8 @@ from krater.weave import get_weave_client
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     settings = get_settings()
+    if settings.compute_mode != "skypilot":
+        raise SystemExit("KRATER_COMPUTE_MODE is not 'skypilot': there is nothing to reconcile")
     session = get_sessionmaker()()
     try:
         reconcile(

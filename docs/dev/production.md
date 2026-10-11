@@ -39,7 +39,14 @@ onto alastor takes a merge in `patchworklabsorg/infra`, then `nix flake update p
 Backups are a `krater-backup` timer (03:30 UTC) writing to `/var/lib/krater/backups`. Restore as in section 4, with
 `docker exec -i krater-db` in place of `docker compose ... exec -T db`, user and database `krater`.
 
-**SkyPilot bootstrap.** Krater's SkyPilot admin token only exists after SkyPilot's first start, so it lives in a host
+**Compute off (the first deploy).** SkyPilot's Vast support can't rent a machine and copies the Vast key onto members'
+hosts, so Krater ships to production with `KRATER_COMPUTE_MODE=off` until Krater Compute replaces it. The module's
+`skypilot.enable = false` sets that and leaves out the SkyPilot server, its sign-in proxy, their secrets, the
+`krater-sky` hostname and the bootstrap below. `KRATER_SKYPILOT_MODE` stays `live`: with compute off it only means
+"fetch SkyPilot's public GPU catalog" for the budget estimator, and needs no server or tokens. With nothing launched,
+the 80% and 100% budget alerts never fire.
+
+**SkyPilot bootstrap** (only with compute on). Krater's SkyPilot admin token only exists after SkyPilot's first start, so it lives in a host
 file rather than in agenix. Basic auth is on only while its password file exists, because while it's on, members
 can't sign in. Do this once, as root on alastor:
 

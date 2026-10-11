@@ -309,8 +309,9 @@ def _build_detail_context(
 
     can_review = actor.is_reviewer and not is_submitter and not is_credited_builder and current_is_pending
 
+    compute_on = get_settings().compute_mode == "skypilot"
     skypilot_budget_flag = None
-    if project.skypilot_workspace is not None:
+    if compute_on and project.skypilot_workspace is not None:
         skypilot_budget_flag = current_budget_flag(
             session, project, warn_percent=get_settings().skypilot_budget_warn_percent
         )
@@ -343,7 +344,9 @@ def _build_detail_context(
         "is_admin": actor.is_admin,
         # The workspace outlives a finished project until the reconciler tears it down: only show how to launch
         # into it while the launch gate would actually allow it.
-        "can_launch": project.skypilot_workspace is not None and project.status in LAUNCHABLE_STATUSES,
+        "can_launch": compute_on and project.skypilot_workspace is not None and project.status in LAUNCHABLE_STATUSES,
+        "compute_on": compute_on,
+        "show_compute_off_notice": not compute_on and project.status in LAUNCHABLE_STATUSES,
         "has_draft": has_draft,
         "can_edit_draft": is_submitter and has_draft,
         "can_submit": is_submitter and has_draft and current.kind is not RevisionKind.COMPLETION,

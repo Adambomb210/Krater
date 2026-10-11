@@ -62,6 +62,15 @@ def test_missing_token_is_a_404(client: TestClient, monkeypatch) -> None:
     assert response.status_code == 404
 
 
+def test_compute_off_404s_even_with_the_right_token(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "skypilot_policy_token", TOKEN)
+    monkeypatch.setattr(get_settings(), "compute_mode", "off")
+
+    response = _post(client, config={"active_workspace": "default"})
+
+    assert response.status_code == 404
+
+
 def test_unconfigured_token_always_404s(client: TestClient, monkeypatch) -> None:
     """An empty configured token (misconfiguration) must never accept an empty/absent token either."""
     monkeypatch.setattr(get_settings(), "skypilot_policy_token", "")

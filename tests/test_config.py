@@ -48,6 +48,18 @@ def test_production_rejects_dev_modes(overrides: dict) -> None:
         Settings(**{**_PRODUCTION_READY, **overrides})
 
 
+def test_production_with_compute_off_needs_no_skypilot_policy_token() -> None:
+    settings = Settings(**{**_PRODUCTION_READY, "compute_mode": "off", "skypilot_policy_token": ""})
+
+    assert settings.compute_mode == "off"
+
+
+def test_production_with_compute_off_still_refuses_the_fake_price_catalog() -> None:
+    """The budget estimator's GPU prices come from SkyPilot's catalog even with compute off."""
+    with pytest.raises(ValueError, match="SKYPILOT_MODE"):
+        Settings(**{**_PRODUCTION_READY, "compute_mode": "off", "skypilot_mode": "fake"})
+
+
 def test_production_rejects_a_short_skypilot_policy_token() -> None:
     with pytest.raises(ValueError, match="SKYPILOT_POLICY_TOKEN"):
         Settings(**{**_PRODUCTION_READY, "skypilot_policy_token": "too-short"})

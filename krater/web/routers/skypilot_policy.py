@@ -60,8 +60,9 @@ async def skypilot_launch_policy(
     settings: Annotated[Settings, Depends(get_settings)],
     token: str | None = None,
 ) -> Response:
-    # Wrong or missing token: 404, not 403/401, so the route doesn't reveal its own existence.
-    if not _token_is_valid(settings, token):
+    # Wrong or missing token: 404, not 403/401, so the route doesn't reveal its own existence. With compute
+    # off there is no SkyPilot to gate, so the route doesn't exist at all.
+    if settings.compute_mode != "skypilot" or not _token_is_valid(settings, token):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
 
     raw_body = await request.body()

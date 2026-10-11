@@ -7,10 +7,12 @@ CSRF, and how domain errors map to responses.
 from __future__ import annotations
 
 import uuid
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from krater.config import get_settings
 from krater.models import ProjectStatus
 from krater.services import projects as project_service
 from tests.conftest import ADMIN_SUB, MEMBER_SUB, OTHER_MEMBER_SUB, REVIEWER_SUB, get_csrf_token
@@ -573,6 +575,56 @@ def test_launch_instructions_disappear_once_a_project_is_withdrawn(
     db_session.flush()
 
     assert "sky launch -w" not in client.get(f"/projects/{project.id}").text
+
+
+def test_compute_off_hides_launch_instructions_even_with_a_workspace(
+    client: TestClient, login_as, approved_project, db_session: Session, monkeypatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "compute_mode", "off")
+    member = login_as(MEMBER_SUB)
+    reviewer = login_as(REVIEWER_SUB)
+    project = approved_project(member, reviewer)
+    project.skypilot_workspace = "ganymede-abc123abc123"
+    db_session.flush()
+    login_as(MEMBER_SUB)
+
+    page = client.get(f"/projects/{project.id}").text
+
+    assert "sky launch" not in page
+    assert "ganymede-abc123abc123" not in page
+    assert "Launching machines from Krater isn't open yet." in page
+
+
+def test_compute_off_notice_only_shows_while_a_project_could_launch(
+    client: TestClient, login_as, approved_project, db_session: Session, monkeypatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "compute_mode", "off")
+    member = login_as(MEMBER_SUB)
+    reviewer = login_as(REVIEWER_SUB)
+    project = approved_project(member, reviewer)
+    project.status = ProjectStatus.WITHDRAWN
+    db_session.flush()
+    login_as(MEMBER_SUB)
+
+    assert "Launching machines from Krater" not in client.get(f"/projects/{project.id}").text
+
+
+def test_compute_off_hides_the_skypilot_budget_banner(
+    client: TestClient, login_as, approved_project, db_session: Session, monkeypatch
+) -> None:
+    member = login_as(MEMBER_SUB)
+    reviewer = login_as(REVIEWER_SUB)
+    project = approved_project(member, reviewer)
+    project.skypilot_workspace = "ganymede-abc123abc123"
+    db_session.flush()
+    login_as(MEMBER_SUB)
+
+    with patch("krater.web.routers.projects.current_budget_flag", return_value="teardown") as flag:
+        assert "torn down" in client.get(f"/projects/{project.id}").text
+        monkeypatch.setattr(get_settings(), "compute_mode", "off")
+        flag.reset_mock()
+        assert "torn down" not in client.get(f"/projects/{project.id}").text
+        flag.assert_not_called()
 
 
 # --------------------------------------------------------------------------------------------------

@@ -59,10 +59,13 @@ def skypilot_reconcile(timestamp: int) -> None:
     """Provision/tear down SkyPilot workspaces, take spend snapshots, and enforce budgets.
 
     Thin wrapper around `krater.services.skypilot_sync.reconcile`; see there for the actual logic. Also
-    runnable directly for manual runs/debugging via `python -m krater.skypilot.reconcile_once`.
+    runnable directly for manual runs/debugging via `python -m krater.skypilot.reconcile_once`. A no-op
+    with `compute_mode=off`: the task stays registered so the worker's schedule doesn't depend on the mode.
     """
     del timestamp
     settings = get_settings()
+    if settings.compute_mode != "skypilot":
+        return
     session = get_sessionmaker()()
     try:
         reconcile(
