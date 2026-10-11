@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 import procrastinate
 
+from krater.compute import launch as compute_launch
 from krater.compute import reconcile as compute_reconciler
 from krater.compute import scheduler as compute_scheduler
 from krater.config import get_settings
@@ -135,7 +136,11 @@ def compute_schedule(timestamp: int) -> None:
     session = get_sessionmaker()()
     try:
         result = compute_scheduler.run_pass(
-            session, client, settings, now=max(datetime.now(UTC), datetime.fromtimestamp(timestamp, tz=UTC))
+            session,
+            client,
+            settings,
+            now=max(datetime.now(UTC), datetime.fromtimestamp(timestamp, tz=UTC)),
+            runner_sha256=compute_launch.runner_sha256(settings.compute_runner_binary_path),
         )
         if result.rented or result.destroyed or result.swept or result.errors:
             logger.info(

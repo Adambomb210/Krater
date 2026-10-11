@@ -33,7 +33,7 @@ from decimal import ROUND_FLOOR, Decimal
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from krater.compute import launch, offers, spend
+from krater.compute import launch, offers, runner_api, spend
 from krater.config import Settings
 from krater.models import (
     ComputeEscalation,
@@ -112,11 +112,16 @@ def _finish(job: ComputeJob, state: ComputeJobState, reason: str, *, now: dateti
 
 
 class Scheduler:
-    def __init__(self, session: Session, client: VastClient, settings: Settings, *, now: datetime) -> None:
+    def __init__(
+        self, session: Session, client: VastClient, settings: Settings, *, now: datetime, runner_sha256: str | None
+    ) -> None:
         self.session = session
         self.client = client
         self.settings = settings
         self.now = now
+        # `None` when the runner binary isn't there to serve: nothing new is rented (it couldn't start).
+        self.runner_sha256 = runner_sha256
+        self.runner_url = settings.compute_runner_url or settings.base_url
         self.prefix = settings.compute_label_prefix
         self.result = PassResult()
         self._policies: dict = {}
@@ -135,7 +140,12 @@ class Scheduler:
         self._settle_creates(by_label)
         self._sweep(listing)
         self._watch(listing)
-        self._start_queued()
+        if self.runner_sha256 is None:
+            logger.error(
+                "krater.compute: no runner binary at %s; not renting anything", self.settings.compute_runner_binary_path
+            )
+        else:
+            self._start_queued()
         self.session.commit()
         return self.result
 
@@ -382,6 +392,7 @@ class Scheduler:
             if row.state is ComputeInstanceState.PROVISIONING:
                 row.state = ComputeInstanceState.RUNNING
                 row.running_since = self.now
+                row.entered_running_at = self.now
                 job.state = ComputeJobState.RUNNING
                 job.state_reason = None
                 job.started_at = job.started_at or self.now
@@ -389,6 +400,7 @@ class Scheduler:
             elif row.state is ComputeInstanceState.PAUSED:
                 row.state = ComputeInstanceState.RUNNING
                 row.paused_since = None
+                row.entered_running_at = self.now  # Vast restarted the container: the runner starts again
                 job.state = ComputeJobState.RUNNING
                 job.state_reason = None
                 _event(self.session, job, "resumed", "The machine is running again.", now=self.now, instance=row)
@@ -403,6 +415,8 @@ class Scheduler:
                     now=self.now,
                 )
                 self._destroy(row, "max runtime reached")
+                return
+            self._check_runner(row, job, policy)
             return
 
         if row.state is ComputeInstanceState.RUNNING:
@@ -428,6 +442,34 @@ class Scheduler:
                     self._requeue_moved(job)
             elif paused_for >= timedelta(minutes=policy.pause_grace_minutes) and row.interruptible:
                 self._raise_bid(row, job, policy)
+
+    def _check_runner(self, row: ComputeInstance, job: ComputeJob, policy: ComputePolicy) -> None:
+        """A running machine's runner must start within the start deadline of the container (re)starting, and keep
+        sending heartbeats. Otherwise the machine is billing for nothing Krater can see or stop cleanly."""
+        since = row.entered_running_at or row.running_since
+        if since is None:
+            return
+        started_since_entering = row.runner_started_at is not None and row.runner_started_at >= since
+        if not started_since_entering:
+            if self.now - since >= timedelta(minutes=policy.runner_start_minutes):
+                _finish(
+                    job,
+                    ComputeJobState.FAILED,
+                    "Krater's runner never started on the machine. The image needs a POSIX shell and one of curl, "
+                    "wget or Python.",
+                    now=self.now,
+                )
+                self._destroy(row, "runner never started")
+            return
+        last = row.last_heartbeat_at or row.runner_started_at
+        if self.now - last >= timedelta(minutes=policy.heartbeat_timeout_minutes):
+            _finish(
+                job,
+                ComputeJobState.FAILED,
+                f"The runner stopped reporting for {policy.heartbeat_timeout_minutes} minutes.",
+                now=self.now,
+            )
+            self._destroy(row, "runner stopped reporting")
 
     def _requeue_moved(self, job: ComputeJob) -> None:
         _requeue(
@@ -574,6 +616,7 @@ class Scheduler:
 
     def _rent(self, job: ComputeJob, choice: offers.Choice, *, hold_cents: int, taken: set[int]) -> bool:
         attempt = job.attempts + 1
+        token, token_hash = runner_api.new_token()
         label = f"{self.prefix}{job.id.hex[:12]}-{attempt}"
         row = ComputeInstance(
             job_id=job.id,
@@ -586,6 +629,7 @@ class Scheduler:
             interruptible=choice.rental_type == "bid",
             gpu_microusd=choice.gpu_microusd,
             disk_microusd=choice.disk_microusd,
+            runner_token_hash=token_hash,
             # The pass's clock, not the database's: the settle and provision timeouts compare with it.
             created_at=self.now,
         )
@@ -614,10 +658,10 @@ class Scheduler:
             disk_gb=job.disk_gb,
             label=label,
             bid_price=choice.bid,
-            env=launch.job_env(job, attempt),
+            env=launch.job_env(job, attempt, runner_url=self.runner_url, token=token),
             runtype="args",
             onstart=launch.ENTRYPOINT,
-            args=launch.startup_args(job),
+            args=launch.startup_args(self.runner_sha256),
         )
         try:
             vast_id = self.client.create_instance(choice.offer.id, request)
@@ -662,5 +706,7 @@ class Scheduler:
         return False
 
 
-def run_pass(session: Session, client: VastClient, settings: Settings, *, now: datetime) -> PassResult:
-    return Scheduler(session, client, settings, now=now).run()
+def run_pass(
+    session: Session, client: VastClient, settings: Settings, *, now: datetime, runner_sha256: str | None
+) -> PassResult:
+    return Scheduler(session, client, settings, now=now, runner_sha256=runner_sha256).run()
