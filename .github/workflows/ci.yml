@@ -52,3 +52,22 @@ jobs:
 
       - name: Run tests
         run: uv run pytest
+
+      - name: Run the krater CLI's tests (cli/, its own package)
+        working-directory: cli
+        run: uv run --frozen --group dev pytest
+
+  runner:
+    # The Go runner Krater starts on rented machines (runner/, standard library only).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Vet and test
+        working-directory: runner
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race ./...

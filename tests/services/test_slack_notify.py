@@ -541,3 +541,44 @@ def test_box_notices_mention_the_owner_in_the_project_channel_once(db_session: S
     text = message["blocks"][0]["text"]["text"]
     assert "<@U_OWNER>" in text and "2026-10-12 14:00 UTC" in text
     assert "<!channel>" not in text  # the box's name is escaped
+
+
+def _box_notice(db_session: Session, project, member: Actor, name: str) -> AuditEvent:
+    from krater.services.compute_jobs import AUDIT_BOX_STOPPED
+
+    event = AuditEvent(
+        actor_id=None,
+        action=AUDIT_BOX_STOPPED,
+        project_id=project.id,
+        payload={"job_id": "j", "job_name": name, "owner_id": str(member.user.id), "destroy_after_hours": 24},
+    )
+    db_session.add(event)
+    db_session.flush()
+    return event
+
+
+def test_a_failing_channel_does_not_hold_up_other_box_notices(db_session: Session, member: Actor) -> None:
+    slack_client = FakeSlackClient()
+    gone = projects.create_project(db_session, member, title="Gone", write_up="w", budget_requested_cents=5000)
+    gone.slack_channel_id = "C_REMOVED"
+    fine = projects.create_project(db_session, member, title="Fine", write_up="w", budget_requested_cents=5000)
+    fine.slack_channel_id = slack_client.create_channel("ganymede-fine")
+    archived = projects.create_project(db_session, member, title="Done", write_up="w", budget_requested_cents=5000)
+    archived.slack_channel_id = slack_client.create_channel("ganymede-done")
+    archived.slack_channel_archived = True
+    _box_notice(db_session, gone, member, "first")
+    _box_notice(db_session, fine, member, "second")
+    _box_notice(db_session, archived, member, "third")
+    real_post = slack_client.post_message
+
+    def post(channel_id, **kwargs):
+        if channel_id == "C_REMOVED":
+            raise SlackRequestFailedError("channel_not_found")
+        return real_post(channel_id, **kwargs)
+
+    slack_client.post_message = post
+
+    slack_notify.sync_box_notifications(db_session, slack_client)
+
+    texts = [m["text"] for m in slack_client.messages.values()]
+    assert len(texts) == 1 and "second" in texts[0]  # the archived channel's is dropped, the failing one retried later

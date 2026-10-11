@@ -3,7 +3,8 @@ runner.
 
 A secret's value is write-only: the team sets or replaces it and can see its name, never its value again. Krater
 encrypts it with the keys in `KRATER_PROJECT_SECRETS_KEY_FILE` (Fernet, newest key first, so old values still read
-after a rotation). The runner fetches the project's secrets with its own token when it starts
+after a rotation; `python -m krater.rotate_project_secrets` then re-encrypts them all with the newest, so the old
+key can go). The runner fetches the project's secrets with its own token when it starts
 (`krater.compute.runner_api.start`), so values never go into Vast's create request. The machine's host can still read
 them, like anything on that machine, so members should use tokens they can scope and revoke.
 """
@@ -142,6 +143,21 @@ def delete_secret(session: Session, actor: Actor, *, project: Project, name: str
     session.delete(secret)
     session.flush()
     audit.record(session, actor, "project_secret.deleted", project=project, payload={"name": name})
+
+
+def rotate_all(session: Session, settings: Settings) -> tuple[int, list[str]]:
+    """Re-encrypt every stored secret with the newest key (the first line of the key file), so an older key can then
+    be removed. Returns how many were re-encrypted and the `project_id/NAME` of any no key could read. Flushes."""
+    c = _require_cipher(settings)
+    done, unreadable = 0, []
+    for row in session.scalars(sa.select(ProjectSecret)):
+        try:
+            row.ciphertext = c.rotate(row.ciphertext.encode()).decode()
+            done += 1
+        except InvalidToken:
+            unreadable.append(f"{row.project_id}/{row.name}")
+    session.flush()
+    return done, unreadable
 
 
 def environment(session: Session, project_id, settings: Settings) -> dict[str, str]:

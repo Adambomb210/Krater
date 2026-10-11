@@ -46,7 +46,9 @@ services:
     build: .
     restart: unless-stopped
     env_file: ${KRATER_ENV_FILE:-.env}
-    command: ["procrastinate", "--app=krater.worker.app.app", "worker"]
+    # Two at a time: the price-history run takes over a minute (its searches are paced for Vast's rate limit), and the
+    # compute scheduler must still run every minute. The scheduler and reconciliation share a lock, so never overlap.
+    command: ["procrastinate", "--app=krater.worker.app.app", "worker", "--concurrency=2"]
     # The Vast key, for Krater Compute (KRATER_COMPUTE_MODE=vast): mounted into the worker only, never the portal.
     # Point KRATER_VAST_KEY_FILE at the key on the host and set KRATER_VAST_API_KEY_FILE=/run/secrets/vast_api_key.
     volumes:
