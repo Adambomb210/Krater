@@ -39,6 +39,7 @@ BILLING_STATES = (
     ComputeInstanceState.PROVISIONING,
     ComputeInstanceState.RUNNING,
     ComputeInstanceState.PAUSED,
+    ComputeInstanceState.STOPPED,
 )
 
 

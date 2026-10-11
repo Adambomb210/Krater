@@ -131,6 +131,10 @@ class FakeVast:
         #: Whether any log download carried an Authorization header (it must never).
         self.log_fetch_saw_authorization = False
         self.search_bodies: list[dict[str, Any]] = []
+        #: Stopped instances whose machine's GPU someone else has rented: a start is accepted but they stay stopped.
+        self.gpu_taken: dict[int, bool] = {}
+        #: SSH keys on the account (Krater keeps none).
+        self.account_ssh_keys: list[dict[str, Any]] = []
         self._ids = itertools.count(55_000_001)
         self._failures: list[int] = []
 
@@ -235,6 +239,8 @@ class FakeVast:
                 return self._destroy(int(instance_id))
             case ("GET", ["api", "v0", "charges"]):
                 return self._charges(request)
+            case ("GET", ["api", "v0", "ssh"]):
+                return httpx.Response(200, json=list(self.account_ssh_keys))
         return httpx.Response(404, json={"success": False, "error": "not_found", "msg": path})
 
     # -- Endpoints -------------------------------------------------------------------------------------
@@ -345,7 +351,10 @@ class FakeVast:
         if state is not None:
             instance["intended_status"] = state
             instance["cur_state"] = state
-            instance["actual_status"] = "stopped" if state == "stopped" else instance["actual_status"]
+            if state == "stopped":
+                instance["actual_status"] = "stopped"
+            elif instance["actual_status"] == "stopped" and not self.gpu_taken.get(instance_id):
+                instance["actual_status"] = "running"
         if "label" in body:
             instance["label"] = body["label"]
         return httpx.Response(200, json={"success": True})

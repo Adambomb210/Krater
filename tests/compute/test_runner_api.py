@@ -74,11 +74,11 @@ def test_heartbeat_records_and_says_when_to_stop(http, machine, db_session, memb
     job, row, token = machine
 
     response = http.post("/runner/v1/heartbeat", headers=_auth(token), json={"gpu_util": 97.5, "sessions": 1, "x": 1})
-    assert response.json() == {"stop": False}
+    assert response.json() == {"stop": False, "sync": False}
     assert row.last_heartbeat == {"gpu_util": 97.5, "sessions": 1}
 
     compute_jobs.cancel_job(db_session, member, job=job, now=NOW + timedelta(minutes=6))
-    assert http.post("/runner/v1/heartbeat", headers=_auth(token), json={}).json() == {"stop": True}
+    assert http.post("/runner/v1/heartbeat", headers=_auth(token), json={}).json() == {"stop": True, "sync": False}
 
 
 def test_exit_finishes_the_job_once(http, machine) -> None:

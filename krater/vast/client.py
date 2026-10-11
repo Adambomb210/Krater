@@ -155,6 +155,16 @@ class VastClient:
                 self._sleep(wait_seconds)
         return ""
 
+    # -- Account -------------------------------------------------------------------------------------
+
+    def list_ssh_keys(self) -> list[dict[str, Any]]:
+        """SSH keys on the account. Krater keeps none: Vast may install them in every instance."""
+        data = self._request_any("GET", "/api/v0/ssh/")
+        if isinstance(data, list):
+            return data
+        keys = data.get("keys") if isinstance(data, dict) else None
+        return keys if isinstance(keys, list) else []
+
     # -- Billing ---------------------------------------------------------------------------------------
 
     def charges(self, since: datetime, until: datetime) -> list[Charge]:
@@ -177,9 +187,13 @@ class VastClient:
 
     # -- Plumbing --------------------------------------------------------------------------------------
 
+    def _request_any(self, method: str, path: str) -> Any:
+        """Like `_request`, for the few calls that answer with a bare JSON list."""
+        return self._request(method, path, allow_list=True)
+
     def _request(
-        self, method: str, path: str, *, json: dict | None = None, params: dict | None = None
-    ) -> dict[str, Any]:
+        self, method: str, path: str, *, json: dict | None = None, params: dict | None = None, allow_list: bool = False
+    ) -> Any:
         if not path.endswith("/"):
             # Vast would answer 308 and do nothing; refuse before sending.
             raise ValueError(f"Vast paths must end with a slash: {path}")
@@ -211,6 +225,8 @@ class VastClient:
             data = response.json()
         except ValueError:
             data = None
+        if allow_list and isinstance(data, list) and status < 400:
+            return data
         if not isinstance(data, dict):
             raise VastRequestFailedError(
                 f"Vast answered {status} to {method} {path} without a JSON object", status_code=status

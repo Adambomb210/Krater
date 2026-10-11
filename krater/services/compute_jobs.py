@@ -143,3 +143,73 @@ def cancel_job(session: Session, actor: Actor, *, job: ComputeJob, now: datetime
     )
     session.flush()
     return job
+
+
+# -- Boxes ---------------------------------------------------------------------------------------------------
+
+
+def _live_instance(job: ComputeJob):
+    live = [row for row in job.instances if row.is_live]
+    return live[-1] if live else None
+
+
+def _box_for(actor: Actor, job: ComputeJob) -> None:
+    if job.kind is not ComputeJobKind.BOX:
+        raise InvalidState("Only boxes can be stopped and resumed.")
+    if not (actor.is_admin or _can_launch_for(actor, job.project)):
+        raise NotAllowed("Only the project's team or an admin can do that to this box.")
+
+
+def stop_box(session: Session, actor: Actor, *, job: ComputeJob, now: datetime) -> None:
+    """Stop a running box: its runner saves /workspace, then the scheduler stops the machine (the disk is kept)."""
+    _box_for(actor, job)
+    row = _live_instance(job)
+    if job.state is not ComputeJobState.RUNNING or row is None:
+        raise InvalidState("Only a running box can be stopped.")
+    if row.stop_requested_at is None:
+        row.stop_requested_at = now
+        row.stop_reason = f"stopped by {actor.user.display_name}"
+        session.add(
+            ComputeEvent(
+                job_id=job.id, instance_id=row.id, kind="stop_requested", message=row.stop_reason, payload={}, at=now
+            )
+        )
+    session.flush()
+
+
+def resume_box(session: Session, actor: Actor, *, job: ComputeJob, now: datetime) -> None:
+    """Ask the scheduler to start a stopped box on its machine again (only works while the machine's GPU is free)."""
+    _box_for(actor, job)
+    row = _live_instance(job)
+    if job.state is not ComputeJobState.STOPPED or row is None:
+        raise InvalidState("Only a stopped box can be resumed.")
+    if job.project.status not in LAUNCHABLE_STATUSES:
+        raise InvalidState(f"A {job.project.status.value} project can't run boxes.")
+    row.start_requested_at = now
+    job.state_reason = "Resuming on the same machine."
+    session.add(
+        ComputeEvent(
+            job_id=job.id, instance_id=row.id, kind="resume_requested", message=job.state_reason, payload={}, at=now
+        )
+    )
+    session.flush()
+
+
+def move_box(session: Session, actor: Actor, *, job: ComputeJob, now: datetime) -> None:
+    """Give up a stopped box's machine and start it elsewhere from its last saved workspace. The member's choice:
+    Krater never destroys a stopped box's disk on its own before the destroy time, since it may hold newer work."""
+    from krater.compute.scheduler import MOVED_BY_MEMBER
+
+    _box_for(actor, job)
+    row = _live_instance(job)
+    if job.state is not ComputeJobState.STOPPED or row is None:
+        raise InvalidState("Only a stopped box can be moved.")
+    row.destroy_requested_at = now
+    row.destroy_reason = MOVED_BY_MEMBER
+    job.state_reason = "Moving: starting elsewhere from the last saved workspace."
+    session.add(
+        ComputeEvent(
+            job_id=job.id, instance_id=row.id, kind="move_requested", message=job.state_reason, payload={}, at=now
+        )
+    )
+    session.flush()
