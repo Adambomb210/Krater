@@ -4,14 +4,9 @@
 {% block title %}Admin{% endblock %}
 
 {% block content %}
-<div class="page-head">
-  <div>
-    <h1>Admin</h1>
-    <p class="page-subtitle">Every project with its budget, the approval policy, and the delivery of events to Quilt.</p>
-  </div>
-</div>
-
-<dl class="stats stats--compact">
+<section class="card">
+  <h1>All projects</h1>
+  <p><a href="/admin/compute">Compute settings</a>: defaults and per-project overrides for rented machines.</p>
   {% for status in statuses %}
     <div class="stat">
       <dt>{{ status.value.replace('_', ' ') | capitalize }}</dt>
