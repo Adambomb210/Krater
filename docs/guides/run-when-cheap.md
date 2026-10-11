@@ -1,69 +1,76 @@
 # Run only when compute is cheap
 
-How to make a Ganymede job run only while GPU prices stay under a number you choose, so your budget goes further. This
-uses SkyPilot and Vast.ai's **interruptible** (spot) machines. It isn't a Krater feature: you set it in your SkyPilot
-task file.
+How to make a Ganymede job wait for a GPU price you choose, so your budget goes further. Krater does the waiting and the
+renting: you set a target price, and your job starts when a Vast.ai machine at or under it is available.
 
-> **Status:** the pieces below come from SkyPilot's documentation and source. Interruptible Vast machines and automatic
-> recovery haven't been tested end to end on Ganymede yet (they're on the staging checklist). Try it on a small budget
-> first.
+> **Status:** Krater Compute is built but hasn't run on real Vast machines yet; it's switched on once the staging
+> checks pass. Try it on a small budget first.
 
 ## The idea
 
-- **Only start under your price:** `max_hourly_cost` makes SkyPilot pick only machines at or below it. It's checked
-  when a machine is chosen, not afterwards.
-- **Keep running only while the price stays under it:** Vast's interruptible machines are rented by **bidding**. If
-  someone outbids you, your machine is interrupted, so you never pay more than your bid.
-- **Carry on automatically:** launched as a **managed job**, SkyPilot relaunches after an interruption, again only on a
-  machine under your `max_hourly_cost`.
-- **Don't lose work:** interruptions stop your job mid-run, so it must save checkpoints and resume from them.
+- **Start under your price.** A job waits in the queue until an offer's full hourly cost (GPU plus your disk) is at or
+  under your **target price**. Krater never pays more than your **max price**, nor more than your project's hourly cap.
+- **Interruptible by default.** Krater rents interruptible (bid) machines, which are usually much cheaper than on-demand
+  ones. Someone can outbid you, which pauses your machine. Krater waits a few minutes, raises your bid in small steps up
+  to your max price, and if the machine stays paused, moves your job to another one.
+- **Don't lose work.** A pause or a move stops your program mid-run, so save checkpoints and resume from them.
 
-## Task file
+## Choosing a price
 
-```yaml
-# cheap-train.yaml
-resources:
-  infra: vast
-  accelerators: RTX4090:1
-  use_spot: true           # interruptible (bid) machines
-  max_hourly_cost: 0.40    # dollars per hour; only machines at or below this
+[GPU price history](/pricing/history) shows each GPU's cheapest offer and its typical range over the last day, week or
+month. A target at the cheapest price waits for the dips; one inside the typical range starts sooner. Set the max price
+a little above the target, so a bid raise can keep your machine through a short spike.
 
-setup: |
-  pip install -r requirements.txt awscli
+If nothing meets your target for a while, you choose what happens after your **max wait**: keep waiting, accept offers
+up to your max price, rent on demand up to your max price, or cancel.
 
-run: |
-  # Resume from the latest checkpoint if one exists, save a new one regularly, and upload it (see below).
-  python train.py --resume-from checkpoints/latest --checkpoint-every 15m \
-    --on-checkpoint "aws --endpoint-url $S3_ENDPOINT s3 sync checkpoints/ s3://$CHECKPOINT_BUCKET/$PROJECT/"
+## Checkpoints
+
+Krater gives every job a checkpoint directory and tells it whether it's resuming:
+
+| Variable | Meaning |
+| --- | --- |
+| `KRATER_CHECKPOINT_DIR` | Save checkpoints here. Krater restores the latest ones here before your command starts |
+| `KRATER_RESUMED` | `1` when your job is resuming after a pause or a move: load your latest checkpoint |
+| `KRATER_OUTPUT_DIR` | Put results here; uploaded when your command finishes |
+
+Krater uploads changed checkpoint files every 10 minutes and when your command exits. Write each checkpoint under a
+temporary name ending in `.tmp` and rename it when it's complete, so a half-written file is never uploaded. For example,
+with PyTorch:
+
+```python
+import os, torch
+
+ckpt_dir = os.environ.get("KRATER_CHECKPOINT_DIR", "checkpoints")
+latest = os.path.join(ckpt_dir, "latest.pt")
+if os.environ.get("KRATER_RESUMED") == "1" and os.path.exists(latest):
+    state = torch.load(latest)
+    model.load_state_dict(state["model"]); optimizer.load_state_dict(state["optimizer"]); start_step = state["step"]
+
+# every few hundred steps:
+torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": step}, latest + ".tmp")
+os.replace(latest + ".tmp", latest)
 ```
 
-Launch it as a managed job, targeting your project's workspace (the name is on your Krater project page):
+Your project has a storage quota (50 GB unless an admin set another), so keep only the checkpoints you need.
 
-```bash
-sky jobs launch -w ganymede-<your-workspace> cheap-train.yaml
-```
+## Submitting
 
-## Checkpoints: upload them yourself
-
-SkyPilot can't mount storage buckets on Vast, so your job has to copy checkpoints out itself, for example with `aws s3
-sync` or `rclone` to your own bucket, and download the latest one at startup. Keep the interval short enough that an
-interruption only costs you a few minutes.
+On your project's page, open **Compute** and choose **New job or box**: your container image, the command, the GPU
+models you accept (or a minimum amount of GPU memory), disk, target and max price, and a max runtime. Your image needs a
+POSIX shell and one of curl, wget or Python. Its own entrypoint isn't run, so put any setup in the command.
 
 ## What Krater adds on top
 
-- **Price cap:** Krater caps every launch's hourly price at your project's limit (by default $5/hour per machine;
-  an admin can set a different one per project, and the project page shows yours). A lower
-  `max_hourly_cost` of yours is kept.
-- **Autodown:** Krater forces autodown after 30 idle minutes.
-- **Budget:** when your project's spend reaches its ceiling, launches are rejected and running machines are shut down.
-  Cheap interruptible machines make the budget last longer, but it still applies.
+- **Price cap:** no machine costs more than your project's hourly cap (by default $5/hour; an admin can set another).
+- **Budget:** your job holds its expected cost while it runs, so two jobs can't spend the same dollars. When your
+  project's spend reaches its ceiling, Krater stops its machines.
+- **Clean-up:** a finished job's machine is destroyed within a minute, so nothing keeps billing.
 
 ## Things to know
 
-- **Interruptions are normal.** With a low `max_hourly_cost`, expect your job to pause and resume, sometimes for a while
-  if prices stay high. That's the trade-off for paying less.
-- **Your own bid price:** by default SkyPilot bids the machine's minimum. Setting your own bid amount isn't documented
-  for the SkyPilot version Ganymede runs yet; `max_hourly_cost` is the supported knob.
-- **Single machine only:** Vast doesn't support multi-node clusters.
-- **Checking prices:** there's no pricing page in Krater yet. `sky gpus list` works once you're signed in and targeting
-  your project workspace.
+- **Pauses are normal** with a low target. That's the trade-off for paying less. Choose on-demand for work that can't
+  checkpoint.
+- **Single machine only:** a job runs on one machine with up to 8 GPUs.
+- **Interactive work:** use a box instead of a job. It's an SSH workspace that stops itself when idle and keeps
+  `/workspace` between sessions. Add your SSH key under **SSH keys** first.

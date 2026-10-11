@@ -1,5 +1,8 @@
 # Krater handoff
 
+> **Historical.** Written for v1, when Krater ran on SkyPilot. On 2026-10-11 SkyPilot was replaced by Krater Compute
+> (`docs/compute/README.md`); the SkyPilot sections below describe code that no longer exists.
+
 Everything a fresh Claude Code session (or a human) needs to pick up Krater. Written 2026-09-27 at the end of the
 cloud session that built v1.
 

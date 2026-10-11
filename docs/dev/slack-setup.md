@@ -51,7 +51,7 @@ KRATER_SLACK_RECONCILE_INTERVAL_MINUTES=10   # default; how often the worker's p
 
 `KRATER_SLACK_MODE` defaults to `fake` (an in-memory Slack, `krater.slack.FakeSlackClient` -- no real
 workspace needed for ordinary dev/tests), and the app refuses to start with `fake` when
-`KRATER_ENV=production` (mirrors `KRATER_SKYPILOT_MODE`/`KRATER_WEAVE_MODE`). Set `KRATER_SLACK_MODE=live`
+`KRATER_ENV=production` (mirrors `KRATER_PRICING_MODE`/`KRATER_WEAVE_MODE`). Set `KRATER_SLACK_MODE=live`
 only once you actually want Krater talking to the real workspace above.
 
 ## 3. Tunneling from the maintainer's Windows machine

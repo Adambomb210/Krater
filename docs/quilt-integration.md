@@ -58,7 +58,7 @@ amendments and the completion review. The `status` is Krater's project status, f
 | `BudgetEntry` with a positive amount: `initial_approval`, an amendment that adds budget, an admin adjustment up | `record_review`, `admin_decide`, `admin_adjust_budget` | `budget.committed` | `amount_cents` (the entry's amount), `actor_sub` (the Weave sub of the entry's actor) |
 | `BudgetEntry` with a negative amount: an amendment that cuts budget, an admin adjustment down, a `reclaim` (admin, withdrawal, completion) | `record_review`, `admin_decide`, `admin_adjust_budget`, `reclaim_budget`, `withdraw` | `budget.released` | `amount_cents` (the entry's amount, capped, see below), `actor_sub` |
 | `BudgetEntry` with amount 0 (an amendment that keeps the budget) | | nothing | The row is stored as `skipped` |
-| A new `SpendSnapshot` with a different total | `skypilot_sync.sync_spend` and the final spend at teardown | `spend.recorded` | `spent_cents_total` (the cumulative total) |
+| A new `SpendSnapshot` with a different total | Krater Compute's spend loop and hourly reconciliation (`krater.compute.spend`, `krater.compute.reconcile`) | `spend.recorded` | `spent_cents_total` (the cumulative total) |
 
 Rules of the mapping:
 
@@ -176,7 +176,7 @@ path already wrote is not added again.
 ## Limits
 
 - Quilt sees the current status at the time of the backfill, not the history of statuses.
-- When spend goes down (a SkyPilot state reset), Krater sends the lower total. Quilt keeps the higher total and marks
-  the event "needs review".
+- Krater never sends a lower spend total: a reconciliation that lowers it stays in Krater's records until Quilt can
+  take a correction (patchworklabsorg/quilt#17).
 - After overspend, Quilt's remaining commitment can differ from Krater's "ceiling minus spend". The release cap keeps
   every release valid. Krater's ledger stays the source of truth for the ceiling.

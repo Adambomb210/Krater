@@ -7,7 +7,6 @@ this list covers what comes after, plus loose ends from building v1.
 
 - **Staging run on the maintainer's machine** ([dev/staging.md](dev/staging.md)). The Compose stack itself has now
   been run with stub credentials (HANDOFF section 4), so what's left needs real accounts:
-  - the SkyPilot server and oauth2-proxy with a real Weave sign-in;
   - a real Vast launch;
   - the 80% warning and 100% teardown with real spend;
   - how far `cost_report` drifts from the Vast bill. That sets the safety margin, if any, to take off the ceiling.
@@ -48,7 +47,10 @@ this list covers what comes after, plus loose ends from building v1.
 - **Multi-approval and reviewer tiers by budget size.** Already supported by `ApprovalPolicy` rows; this is a policy
   decision plus a small admin UI to edit the rows (today they're read-only in `/admin`).
 - **Mirroring Slack comments into Krater,** if linking to the channel turns out not to be enough.
-- **Reconciling spend against real Vast billing** instead of SkyPilot's catalog-based estimate.
+
+> SkyPilot was replaced by Krater Compute on 2026-10-11 (see [compute/README.md](compute/README.md)). The notes
+> below are from when Krater ran on SkyPilot; the donated-GPU idea would now need Krater Compute to rent from more than
+> Vast.
 
 ## SkyPilot
 
