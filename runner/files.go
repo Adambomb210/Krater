@@ -102,14 +102,20 @@ func (s *Syncer) Push(ctx context.Context) (int, error) {
 	}
 	sort.Strings(names)
 	pushed := 0
+	var firstErr error
 	for _, name := range names {
 		if err := s.upload(ctx, name, stamps[name].size); err != nil {
-			return pushed, fmt.Errorf("uploading %s: %w", name, err)
+			// Keep going: one refused file (the project's storage quota, say) mustn't stop the others.
+			logf("uploading %s failed: %v", name, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("uploading %s: %w", name, err)
+			}
+			continue
 		}
 		s.uploaded[name] = stamps[name]
 		pushed++
 	}
-	return pushed, nil
+	return pushed, firstErr
 }
 
 func (s *Syncer) localPath(name string) (string, error) {
