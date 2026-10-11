@@ -84,7 +84,8 @@ One round on local staging, 2026-10-11, approved by Adam (scripts: `staging/comp
 Production stays `KRATER_COMPUTE_MODE=off` until Adam turns it on: the staging round passed, and what it couldn't
 cover (uploads from a Vast host, the Cloudflare checks below) is still open. Turning it on needs, in infra: the Vast key mounted
 into the worker only (`KRATER_VAST_API_KEY_FILE`), `KRATER_VAST_MODE=live`, a production `KRATER_COMPUTE_LABEL_PREFIX`,
-`KRATER_COMPUTE_MODE=vast`, and the `krater-compute` bucket (created by the deploy's `ensure_bucket`).
+`KRATER_COMPUTE_MODE=vast`, the `krater-compute` bucket (created by the deploy's `ensure_bucket`), and for project
+secrets a Fernet key file mounted into the portal only (`KRATER_PROJECT_SECRETS_KEY_FILE`, an agenix secret).
 
 Before turning it on in production, check what the staging round (through Tailscale Funnel) can't: production sits
 behind Cloudflare. From a cloud VM (a datacenter IP, like a Vast host):
