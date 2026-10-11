@@ -148,6 +148,7 @@ class Scheduler:
         self._settle_creates(by_label)
         self._sweep(listing)
         self._watch(listing)
+        self._requeue_orphans()
         if self.runner_sha256 is None:
             logger.error(
                 "krater.compute: no runner binary at %s; not renting anything", self.settings.compute_runner_binary_path
@@ -350,7 +351,20 @@ class Scheduler:
         if seen is None:
             row.state = ComputeInstanceState.DESTROYED
             row.destroyed_at = self.now
-            if row.destroy_requested_at is None and job.is_active:
+            if row.destroy_requested_at is not None:
+                # Destroyed on an earlier pass whose check that it was gone failed (a rate limit, staging 2026-10-11).
+                _event(
+                    self.session,
+                    job,
+                    "destroyed",
+                    f"Instance {row.vast_instance_id} is gone: {row.destroy_reason or 'requested'}",
+                    now=self.now,
+                    instance=row,
+                    vast_instance_id=row.vast_instance_id,
+                )
+                if job.state is ComputeJobState.PAUSED or row.destroy_reason == MOVED_BY_MEMBER:
+                    self._requeue_moved(job)
+            elif job.is_active:
                 _event(
                     self.session,
                     job,
@@ -655,6 +669,28 @@ class Scheduler:
                 logger.warning("krater.compute: could not check the Vast account's SSH keys; no boxes this pass")
                 self._ssh_keys_on_account = True
         return self._ssh_keys_on_account
+
+    def _requeue_orphans(self) -> None:
+        """A starting, running or paused job none of whose machines may still exist goes back in the queue, so a
+        missed step (a destroy confirmed only on a later pass, say) can't leave it holding budget with nothing
+        running. A stopped box is left alone: its member chose to stop it."""
+        live = sa.select(ComputeInstance.job_id).where(
+            ComputeInstance.state.not_in([ComputeInstanceState.DESTROYED, ComputeInstanceState.CREATE_FAILED])
+        )
+        stmt = sa.select(ComputeJob).where(
+            ComputeJob.state.in_([ComputeJobState.STARTING, ComputeJobState.RUNNING, ComputeJobState.PAUSED]),
+            ComputeJob.id.not_in(live),
+        )
+        for job in list(self.session.scalars(stmt)):
+            logger.warning("krater.compute: job %s was %s with no machine; requeued", job.id, job.state.value)
+            _event(self.session, job, "requeued", "Its machine is gone; waiting for another offer.", now=self.now)
+            _requeue(
+                self.session,
+                job,
+                "Its machine is gone. Waiting for another offer; it resumes from its last checkpoint.",
+                now=self.now,
+            )
+        self.session.commit()
 
     def _requeue_moved(self, job: ComputeJob) -> None:
         _requeue(

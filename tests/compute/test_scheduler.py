@@ -431,6 +431,46 @@ def test_an_outbid_job_waits_raises_its_bid_then_moves(db_session, member, proje
     assert "KRATER_RESUMED=1" in fake.instances[new.vast_instance_id]["env"]
 
 
+def test_a_move_whose_gone_check_was_rate_limited_still_moves(db_session, member, project, client, fake) -> None:  # noqa: F811
+    """Staging, 2026-10-11: the destroy went through, the check that it was gone got a 429, and the next pass found
+    the machine gone but left the job paused with nothing running."""
+    job, row = _running_job(db_session, member, project, client, fake)
+    vast_id = row.vast_instance_id
+    fake.set_status(vast_id, "stopped")
+    _pass(db_session, client, NOW + timedelta(minutes=6))
+    deleted = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            deleted.append(request.url.path)
+        elif deleted and request.method == "GET" and f"/instances/{vast_id}/" in request.url.path:
+            return httpx.Response(429, json={"detail": "slow down"})
+        return fake.handle(request)
+
+    limited = fake.client()
+    limited._http = httpx.Client(transport=httpx.MockTransport(handler))
+    _pass(db_session, limited, NOW + timedelta(minutes=37))
+    assert vast_id not in fake.instances and row.state is not ComputeInstanceState.DESTROYED
+
+    _pass(db_session, client, NOW + timedelta(minutes=38))
+
+    assert row.state is ComputeInstanceState.DESTROYED
+    new = _instance(db_session, job)
+    assert new.attempt == 2 and job.state is ComputeJobState.STARTING
+
+
+def test_an_active_job_left_without_a_machine_is_requeued(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job, row = _running_job(db_session, member, project, client, fake)
+    row.state = ComputeInstanceState.DESTROYED  # however it happened
+    fake.instances.pop(row.vast_instance_id)
+    db_session.commit()
+
+    _pass(db_session, client, NOW + timedelta(minutes=7))
+
+    assert "requeued" in _events(db_session, job)
+    assert _instance(db_session, job).attempt == 2
+
+
 def test_a_paused_job_that_resumes_runs_again(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_job(db_session, member, project, client, fake)
     fake.set_status(row.vast_instance_id, "stopped")
