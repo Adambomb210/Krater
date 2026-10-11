@@ -90,8 +90,9 @@ def _price_history_cron() -> str:
     return f"*/{get_settings().price_history_interval_minutes} * * * *"
 
 
-#: Seconds between price-history searches: 36 searches take about 40 s.
-PRICE_HISTORY_SEARCH_PAUSE_SECONDS = 1.0
+#: Seconds between price-history searches: 36 searches take about 75 s, leaving the scheduler room under Vast's
+#: rate limit.
+PRICE_HISTORY_SEARCH_PAUSE_SECONDS = 2.0
 
 
 @app.periodic(cron=_price_history_cron())
