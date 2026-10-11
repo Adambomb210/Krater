@@ -88,6 +88,42 @@ class Settings(BaseSettings):
     # before the project page flags the mismatch to reviewers.
     budget_estimate_flag_threshold_percent: int = 20
 
+    # Krater Compute's Vast.ai account (docs/compute/). Only the worker builds a Vast client; the org key never
+    # reaches the portal or a member's machine. `fake` serves an in-memory Vast (`krater.vast.fake.FakeVast`) for
+    # dev and tests, and nothing at all in production. `live` needs the key, preferably as a file
+    # (`vast_api_key_file`, mounted into the worker alone); `vast_api_key` is for local runs.
+    vast_mode: Literal["fake", "live"] = "fake"
+    vast_api_url: str = "https://console.vast.ai"
+    vast_api_key_file: str = ""
+    vast_api_key: str = ""
+    vast_timeout_seconds: float = 30.0
+    # Krater's own Vast price history (Vast's history API is for host accounts only, and its public feed needs a
+    # data license for bulk use). Every `price_history_interval_minutes`, one search per GPU model and rental type;
+    # rows hold the min, p10 and median of GPU price plus `price_history_disk_gb` of disk, for 1-GPU offers.
+    price_history_interval_minutes: int = 10
+    price_history_disk_gb: int = 32
+    # Vast's own model names (checked against a live search on 2026-10-11).
+    price_history_gpus: list[str] = [
+        "RTX 3060",
+        "RTX 3090",
+        "RTX 4090",
+        "RTX 5060 Ti",
+        "RTX 5070 Ti",
+        "RTX 5080",
+        "RTX 5090",
+        "RTX A4000",
+        "RTX A6000",
+        "RTX 6000Ada",
+        "RTX PRO 6000 WS",
+        "L4",
+        "L40S",
+        "A100 PCIE",
+        "A100 SXM4",
+        "H100 PCIE",
+        "H100 SXM",
+        "H200",
+    ]
+
     # Slack integration (review happens in Slack; see docs/SPEC.md "Slack integration" and
     # docs/dev/slack-setup.md). `fake` is an in-memory Slack for dev and tests, mirroring `skypilot_mode`.
     slack_mode: Literal["fake", "live"] = "fake"
