@@ -54,6 +54,8 @@ still read their old `KRATER_SKYPILOT_*` names for one release.
   `KRATER_PROJECT_SECRETS_KEY_FILE`, mounted into the portal only (an agenix secret in infra), separate from the
   database and `KRATER_SECRET_KEY`; Adam to confirm. Checked against FakeVast and the Go tests, not on a rented machine.
 - **Boxes are SSH-only in v1** (decided 2026-10-11): members run Jupyter through an SSH tunnel.
+- **The `krater` command** ([cli.md](cli.md)): jobs, boxes, SSH and secrets from a terminal, signed in with
+  Weave (a public OAuth app, PKCE, copy-paste code), against Krater's `/api/v1/`.
 - **Slack notices for boxes**: when Krater stops a box (idle, or its runner went quiet), an hour before a stopped box
   is destroyed, and when it is, the project channel gets a message mentioning the box's owner. A stop the member
   asked for gets none.

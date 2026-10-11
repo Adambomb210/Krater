@@ -48,6 +48,7 @@ krater/
   web/             FastAPI app factory, routers, deps (current user, authz), templates/, static/
   worker/          procrastinate app + tasks
 runner/            the Go runner Krater starts on each rented machine (docs/compute/runner.md)
+cli/               the `krater` command members run (its own package; docs/compute/cli.md)
 alembic/           migrations
 tests/             mirrors krater/ layout
 ```
