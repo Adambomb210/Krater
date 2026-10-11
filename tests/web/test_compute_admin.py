@@ -144,3 +144,30 @@ def test_unknown_project_is_a_404(client: TestClient, login_as) -> None:
     login_as(ADMIN_SUB)
 
     assert client.get(f"/admin/compute/projects/{uuid.uuid4()}").status_code == 404
+
+
+def test_admin_sees_spend_checks_that_did_not_match(client: TestClient, login_as, create_project, db_session) -> None:
+    from datetime import UTC, datetime
+
+    from krater.models import SpendReconciliation
+
+    member = login_as(MEMBER_SUB)
+    project = create_project(member, title="Mismatched")
+    db_session.add(
+        SpendReconciliation(
+            project_id=project.id,
+            checked_at=datetime(2026, 10, 11, 13, 7, tzinfo=UTC),
+            instance_count=1,
+            estimate_microusd=64_000,
+            actual_microusd=100_000,
+            alerted=True,
+            details=[],
+        )
+    )
+    db_session.flush()
+    login_as(ADMIN_SUB)
+
+    page = client.get("/admin/compute").text
+
+    assert "Mismatched" in page
+    assert "$0.0640" in page and "$0.1000" in page

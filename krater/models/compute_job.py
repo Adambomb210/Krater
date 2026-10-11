@@ -126,6 +126,9 @@ class ComputeInstance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # when. Hourly reconciliation with Vast's charges corrects it.
     accrued_microusd: Mapped[int] = mapped_column(sa.BigInteger, nullable=False, default=0, server_default="0")
     accrued_until: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    # Vast's own charges for it at the last hourly reconciliation (`krater.compute.reconcile`).
+    charged_microusd: Mapped[int | None] = mapped_column(sa.BigInteger, nullable=True)
+    charged_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     # Set when Krater decides to destroy it; the scheduler retries until Vast confirms it's gone.
     destroy_requested_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     destroy_reason: Mapped[str | None] = mapped_column(sa.String(200), nullable=True)
@@ -144,6 +147,28 @@ class ComputeInstance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     def __repr__(self) -> str:
         return f"<ComputeInstance {self.label} vast={self.vast_instance_id} {self.state.value}>"
+
+
+class SpendReconciliation(UUIDPrimaryKeyMixin, Base):
+    """One project's hourly check of Vast's charges against Krater's estimate. Kept even when the corrected total is
+    lower than what Quilt was sent: Quilt takes increases only for now (patchworklabsorg/quilt#17)."""
+
+    __tablename__ = "spend_reconciliations"
+    __table_args__ = (sa.Index("ix_spend_reconciliations_project_id_checked_at", "project_id", "checked_at"),)
+
+    project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), sa.ForeignKey("projects.id"), nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), nullable=False)
+    instance_count: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    estimate_microusd: Mapped[int] = mapped_column(sa.BigInteger, nullable=False)
+    actual_microusd: Mapped[int] = mapped_column(sa.BigInteger, nullable=False)
+    # Whether the difference passed the project's reconciliation alert threshold.
+    alerted: Mapped[bool] = mapped_column(sa.Boolean, nullable=False)
+    # Per instance: {"vast_instance_id", "estimate_microusd", "actual_microusd"}.
+    details: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+
+    @property
+    def difference_microusd(self) -> int:
+        return self.actual_microusd - self.estimate_microusd
 
 
 class ComputeEvent(UUIDPrimaryKeyMixin, Base):
