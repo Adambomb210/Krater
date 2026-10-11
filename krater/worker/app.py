@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 import procrastinate
 
+from krater.compute import scheduler as compute_scheduler
 from krater.config import get_settings
 from krater.db import get_sessionmaker
 from krater.models import Project, ProjectRevision
@@ -143,6 +144,41 @@ def price_history_record(timestamp: int) -> None:
         )
     except Exception:
         logger.exception("krater.price_history_record failed")
+        session.rollback()
+    finally:
+        session.close()
+
+
+#: Only one scheduler pass runs at a time, so a slow pass can't overlap the next minute's and rent twice.
+COMPUTE_SCHEDULER_LOCK = "compute_scheduler"
+
+
+@app.periodic(cron="* * * * *")
+@app.task(name="compute_schedule", lock=COMPUTE_SCHEDULER_LOCK, queueing_lock=COMPUTE_SCHEDULER_LOCK)
+def compute_schedule(timestamp: int) -> None:
+    """One Krater Compute scheduler pass (`krater.compute.scheduler`). Only with `KRATER_COMPUTE_MODE=vast` and a
+    usable Vast client; otherwise nothing is rented or destroyed."""
+    settings = get_settings()
+    if settings.compute_mode != "vast":
+        return
+    client = get_vast_client()
+    if client is None:
+        return
+    session = get_sessionmaker()()
+    try:
+        result = compute_scheduler.run_pass(
+            session, client, settings, now=max(datetime.now(UTC), datetime.fromtimestamp(timestamp, tz=UTC))
+        )
+        if result.rented or result.destroyed or result.swept or result.errors:
+            logger.info(
+                "krater compute_schedule: rented %d, destroyed %d, swept %d, errors %d",
+                len(result.rented),
+                len(result.destroyed),
+                len(result.swept),
+                result.errors,
+            )
+    except Exception:
+        logger.exception("krater.compute_schedule failed")
         session.rollback()
     finally:
         session.close()

@@ -60,6 +60,13 @@ def test_production_with_compute_off_still_refuses_the_fake_price_catalog() -> N
         Settings(**{**_PRODUCTION_READY, "compute_mode": "off", "skypilot_mode": "fake"})
 
 
+def test_production_compute_on_vast_needs_the_live_vast_api() -> None:
+    with pytest.raises(ValueError, match="VAST_MODE"):
+        Settings(**{**_PRODUCTION_READY, "compute_mode": "vast", "vast_mode": "fake"})
+
+    Settings(**{**_PRODUCTION_READY, "compute_mode": "vast", "vast_mode": "live"})
+
+
 def test_production_rejects_a_short_skypilot_policy_token() -> None:
     with pytest.raises(ValueError, match="SKYPILOT_POLICY_TOKEN"):
         Settings(**{**_PRODUCTION_READY, "skypilot_policy_token": "too-short"})

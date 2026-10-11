@@ -54,11 +54,16 @@ class Settings(BaseSettings):
     weave_group_admin: str = "krater-admins"
 
     # Which compute layer launches members' machines. `skypilot` runs the SkyPilot integration below
-    # (workspaces, the reconcile job, the launch-policy endpoint). `off` launches nothing: Krater still runs
+    # (workspaces, the reconcile job, the launch-policy endpoint). `vast` runs Krater Compute: the worker rents
+    # Vast machines itself (`krater.compute`, docs/compute/). `off` launches nothing: Krater still runs
     # proposals, review, budgets, Slack, the gallery and Quilt events, but provisions no workspaces, runs no
     # reconcile, answers 404 on the launch-policy endpoint and shows no launch instructions. Production
-    # runs `off` until Krater Compute (its own Vast layer) replaces SkyPilot.
-    compute_mode: Literal["off", "skypilot"] = "skypilot"
+    # runs `off` until Krater Compute is ready.
+    compute_mode: Literal["off", "skypilot", "vast"] = "skypilot"
+    # Every instance Krater rents is labelled `<prefix><job>-<attempt>`. The scheduler destroys any instance on the
+    # account with this prefix that it has no record of, so give each Krater (staging, production) sharing a Vast
+    # account its own prefix, and never start another tool's labels with it.
+    compute_label_prefix: str = "krater-job-"
 
     # SkyPilot integration. See docs/skypilot-integration.md and docs/dev/skypilot-spike.md.
     # `fake` uses an in-memory SkyPilot for dev and tests; `live` talks to a real API server over REST.
@@ -159,6 +164,8 @@ class Settings(BaseSettings):
             if self.skypilot_mode == "fake":
                 # Even with compute off: the budget estimator's GPU prices come from SkyPilot's catalog.
                 raise ValueError("KRATER_SKYPILOT_MODE cannot be 'fake' when KRATER_ENV=production")
+            if self.compute_mode == "vast" and self.vast_mode != "live":
+                raise ValueError("KRATER_VAST_MODE must be 'live' when KRATER_COMPUTE_MODE=vast in production")
             if self.slack_mode == "fake":
                 raise ValueError("KRATER_SLACK_MODE cannot be 'fake' when KRATER_ENV=production")
             if self.s3_mode == "fake":

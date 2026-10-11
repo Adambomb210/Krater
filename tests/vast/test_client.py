@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -284,7 +285,7 @@ def test_usd_to_microusd_rounds_half_up() -> None:
     assert usd_to_microusd(Decimal("0.05888888888888889")) == 58_889
 
 
-def test_get_vast_client_picks_up_a_new_key_without_a_restart(tmp_path, monkeypatch, caplog) -> None:
+def test_get_vast_client_picks_up_a_new_key_without_a_restart(tmp_path, monkeypatch) -> None:
     import krater.vast as vast_package
     from krater.config import get_settings
 
@@ -293,9 +294,10 @@ def test_get_vast_client_picks_up_a_new_key_without_a_restart(tmp_path, monkeypa
     monkeypatch.setattr(get_settings(), "vast_mode", "live")
     monkeypatch.setattr(get_settings(), "vast_api_key_file", str(key_file))
 
-    with caplog.at_level("ERROR", logger="krater.vast"):
+    # Asserted on the logger itself: the app's logging setup (other tests) can stop caplog seeing krater.* records.
+    with patch.object(vast_package.logger, "error") as log_error:
         assert vast_package.get_vast_client() is None
-    assert "no Vast API key" in caplog.text
+    assert "no Vast API key" in log_error.call_args.args[0]
 
     key_file.write_text("first-key", encoding="utf-8")
     first = vast_package.get_vast_client()

@@ -90,3 +90,40 @@ class QuiltOutboxState(enum.StrEnum):
 class ApprovalStage(enum.StrEnum):
     PROPOSAL = "proposal"
     COMPLETION = "completion"
+
+
+class ComputeJobKind(enum.StrEnum):
+    JOB = "job"  # runs a command and ends
+    BOX = "box"  # keeps a workspace open (SSH, Jupyter) until idle
+
+
+class ComputeJobState(enum.StrEnum):
+    """Where a Krater Compute job is. See docs/compute/scheduler.md for the transitions."""
+
+    QUEUED = "queued"  # waiting for an offer at or under its target price (and for budget)
+    STARTING = "starting"  # an instance is being created or is pulling the image
+    RUNNING = "running"
+    PAUSED = "paused"  # its interruptible instance was outbid
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ComputeEscalation(enum.StrEnum):
+    """What a job does once it has waited `max_wait_minutes` for an offer at its target price."""
+
+    KEEP_WAITING = "keep_waiting"
+    RAISE_BID = "raise_bid"  # accept offers up to the max price
+    ON_DEMAND = "on_demand"  # rent on demand, up to the max price
+    CANCEL = "cancel"
+
+
+class ComputeInstanceState(enum.StrEnum):
+    """One rented Vast instance. A job has one per attempt."""
+
+    CREATING = "creating"  # row written, create call sent; no Vast id known yet
+    PROVISIONING = "provisioning"  # Vast id known; pulling the image (disk billed, GPU not yet)
+    RUNNING = "running"
+    PAUSED = "paused"  # outbid: not running, but not stopped by Krater either
+    DESTROYED = "destroyed"  # destroyed and confirmed gone (or never existed)
+    CREATE_FAILED = "create_failed"  # Vast refused the create, or it never appeared
