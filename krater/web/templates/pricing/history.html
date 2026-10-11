@@ -3,17 +3,19 @@
 {% block title %}GPU price history{% endblock %}
 
 {% block content %}
-<section class="card">
-  <div class="page-header">
+<div class="page-head">
+  <div>
+    <a class="back-link" href="/pricing">&larr; GPU pricing</a>
     <h1>GPU price history</h1>
+    <p class="page-subtitle">
+      What a 1-GPU machine with {{ disk_gb }} GB of disk costs per hour on Vast, sampled by Krater every hour. Pick a
+      job's target from the line: a target at the cheapest price waits for the dips; one inside the band starts sooner.
+    </p>
   </div>
-  <p class="muted">
-    What a 1-GPU machine with {{ disk_gb }} GB of disk costs per hour on Vast, sampled by Krater every 10 minutes.
-    Pick a job's target from the line: a target at the cheapest price waits for the dips; one inside the band starts
-    sooner.
-  </p>
+</div>
 
-  <form method="get" action="/pricing/history" class="form form--inline filter-bar" data-role="pricing-filter-form">
+<section class="card">
+  <form method="get" action="/pricing/history" class="filter-bar" data-role="pricing-filter-form">
     <div class="field">
       <label for="history-gpu">GPU</label>
       <select id="history-gpu" name="gpu" data-role="auto-submit">
@@ -49,17 +51,34 @@
     </figure>
     <details>
       <summary>Show as a table</summary>
-      <table class="table">
-        <thead><tr><th scope="col">Sampled</th><th scope="col">Cheapest</th><th scope="col">10th percentile</th><th scope="col">Median</th></tr></thead>
-        <tbody>
-          {% for p in points | reverse %}
-            <tr><td>{{ p.at.strftime("%Y-%m-%d %H:%M UTC") }}</td><td>{{ p.min_microusd | rate }}</td><td>{{ p.p10_microusd | rate }}</td><td>{{ p.median_microusd | rate }}</td></tr>
-          {% endfor %}
-        </tbody>
-      </table>
+      <div class="table-scroll">
+        <table class="table">
+          <thead>
+            <tr>
+              <th scope="col">Sampled</th>
+              <th scope="col" class="num">Cheapest</th>
+              <th scope="col" class="num">10th percentile</th>
+              <th scope="col" class="num">Median</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for p in points | reverse %}
+              <tr>
+                <td class="nowrap">{{ p.at.strftime("%Y-%m-%d %H:%M UTC") }}</td>
+                <td class="num">{{ p.min_microusd | rate }}</td>
+                <td class="num">{{ p.p10_microusd | rate }}</td>
+                <td class="num">{{ p.median_microusd | rate }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
     </details>
   {% else %}
-    <p class="muted">Not enough samples for {{ gpu }} yet.</p>
+    <div class="empty-state">
+      <p class="empty-state__title">Not enough samples for {{ gpu }} yet.</p>
+      <p>Krater samples Vast every hour while compute is on.</p>
+    </div>
   {% endif %}
 </section>
 {% endblock %}

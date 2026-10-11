@@ -3,15 +3,19 @@
 {% block title %}{{ job.name }}{% endblock %}
 
 {% block content %}
-<section class="card">
-  <p><a href="/projects/{{ project.id }}/compute">All jobs of {{ project.title or "this project" }}</a></p>
-  <h1>{{ job.name }}</h1>
-  <p>
-    <span class="badge badge--compute-{{ job.state.value }}">{{ job.state.value }}</span>
-    {% if job.state_reason %}{{ job.state_reason }}{% endif %}
-  </p>
+<div class="page-head">
+  <div>
+    <a class="back-link" href="/projects/{{ project.id }}/compute">&larr; Compute for {{ project.title or "this project" }}</a>
+    <h1>{{ job.name }} <span class="badge badge--compute-{{ job.state.value }}">{{ job.state.value }}</span></h1>
+    {% if job.state_reason %}<p class="page-subtitle">{{ job.state_reason }}</p>{% endif %}
+  </div>
+</div>
 
-  <dl class="summary-list">
+<div class="layout-split">
+<div class="stack">
+<section class="card">
+  <h2>{{ "Box" if job.kind.value == "box" else "Job" }}</h2>
+  <dl class="details">
     <dt>Kind</dt><dd>{{ "Box (SSH workspace)" if job.kind.value == "box" else "Job" }}</dd>
     <dt>Image</dt><dd><code>{{ job.image }}</code></dd>
     {% if job.command %}<dt>Command</dt><dd><code>{{ job.command }}</code></dd>{% endif %}
@@ -29,56 +33,22 @@
     </dd>
     <dt>Spent</dt><dd>{{ job.spend_cents | dollars }}{% if job.exit_code is not none %}; exit code {{ job.exit_code }}{% endif %}</dd>
   </dl>
-
-  {% if instance %}
-    <h2>Machine</h2>
-    <dl class="summary-list">
-      <dt>GPU</dt><dd>{{ instance.gpu_name }} at {{ instance.full_microusd | rate }} ({{ "bid" if instance.interruptible else "on demand" }})</dd>
-      <dt>State</dt><dd>{{ instance.state.value }}</dd>
-      {% if job.kind.value == "box" and instance.ssh_host and instance.ssh_port %}
-        <dt>SSH</dt><dd><code>ssh -p {{ instance.ssh_port }} root@{{ instance.ssh_host }}</code>, or <code>krater ssh {{ job.id }}</code></dd>
-        <dt>Jupyter</dt><dd>If you start Jupyter in the box, reach it through an SSH tunnel: <code>ssh -L 8888:localhost:8888 -p {{ instance.ssh_port }} root@{{ instance.ssh_host }}</code></dd>
-      {% endif %}
-      {% if instance.last_synced_at %}<dt>Workspace saved</dt><dd>{{ instance.last_synced_at.strftime("%Y-%m-%d %H:%M UTC") }}</dd>{% endif %}
-    </dl>
-  {% endif %}
-
-  <div class="action-row">
-    {% if can_stop %}
-      <form method="post" action="/projects/{{ project.id }}/compute/{{ job.id }}/stop">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button type="submit" class="button">Stop box</button>
-      </form>
-    {% endif %}
-    {% if can_resume %}
-      <form method="post" action="/projects/{{ project.id }}/compute/{{ job.id }}/resume">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button type="submit" class="button button--primary">Resume box</button>
-      </form>
-      <form method="post" action="/projects/{{ project.id }}/compute/{{ job.id }}/move">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button type="submit" class="button">Start it elsewhere from the saved workspace</button>
-      </form>
-    {% endif %}
-    {% if can_cancel %}
-      <form method="post" action="/projects/{{ project.id }}/compute/{{ job.id }}/cancel">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button type="submit" class="button button--danger">Cancel</button>
-      </form>
-    {% endif %}
-  </div>
 </section>
 
 {% if can_read_files %}
 <section class="card" id="output">
-  <h2>Output</h2>
+  <div class="card-head">
+    <h2>Output</h2>
+    {% if log and not files_error %}
+      <a class="muted" href="/projects/{{ project.id }}/compute/{{ job.id }}/files/logs/attempt-{{ log.attempt }}.log">Download the whole log</a>
+    {% endif %}
+  </div>
   {% if files_error %}
     <p class="muted">Krater's storage didn't answer, so the output can't be shown right now.</p>
   {% elif log %}
     <p class="muted">
       What the command printed{% if job.attempts > 1 %} on attempt {{ log.attempt }}{% endif %}, saved every minute while it
       runs{% if log.truncated %}; the end of {{ log.size_bytes | filesize }}{% endif %}.
-      <a href="/projects/{{ project.id }}/compute/{{ job.id }}/files/logs/attempt-{{ log.attempt }}.log">Download the whole log</a>.
     </p>
     <pre class="log">{{ log.text }}</pre>
   {% elif job.kind.value == "box" %}
@@ -96,18 +66,20 @@
     after you click it. From a terminal: <code>krater download {{ job.id }}</code>.
   </p>
   {% if files %}
-    <table class="table">
-      <thead><tr><th scope="col">Kind</th><th scope="col">File</th><th scope="col">Size</th></tr></thead>
-      <tbody>
-        {% for file in files %}
-          <tr>
-            <td>{{ {"outputs": "output", "checkpoints": "checkpoint", "logs": "log"}[file.area] }}</td>
-            <td><a href="/projects/{{ project.id }}/compute/{{ job.id }}/files/{{ file.area }}/{{ file.name }}">{{ file.name }}</a></td>
-            <td>{{ file.size_bytes | filesize }}</td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    <div class="table-scroll">
+      <table class="table">
+        <thead><tr><th scope="col">File</th><th scope="col">Kind</th><th scope="col" class="num">Size</th></tr></thead>
+        <tbody>
+          {% for file in files %}
+            <tr>
+              <td><a href="/projects/{{ project.id }}/compute/{{ job.id }}/files/{{ file.area }}/{{ file.name }}">{{ file.name }}</a></td>
+              <td>{{ {"outputs": "output", "checkpoints": "checkpoint", "logs": "log"}[file.area] }}</td>
+              <td class="num">{{ file.size_bytes | filesize }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   {% elif not files_error %}
     <p class="muted">None yet.</p>
   {% endif %}
@@ -117,16 +89,70 @@
 <section class="card">
   <h2>What happened</h2>
   {% if events %}
-    <table class="table">
-      <thead><tr><th scope="col">When</th><th scope="col">Event</th></tr></thead>
-      <tbody>
-        {% for event in events %}
-          <tr><td>{{ event.at.strftime("%Y-%m-%d %H:%M UTC") }}</td><td>{{ event.message }}</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    <div class="table-scroll">
+      <table class="table">
+        <thead><tr><th scope="col">When</th><th scope="col">Event</th></tr></thead>
+        <tbody>
+          {% for event in events %}
+            <tr><td class="nowrap">{{ event.at.strftime("%Y-%m-%d %H:%M UTC") }}</td><td>{{ event.message }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   {% else %}
     <p class="muted">Nothing yet.</p>
   {% endif %}
 </section>
+</div>
+
+<aside class="stack" aria-label="Machine and actions">
+  {% if instance %}
+    <section class="card">
+      <h2>Machine</h2>
+      <dl class="details">
+        <dt>GPU</dt><dd>{{ instance.gpu_name }}</dd>
+        <dt>Price</dt><dd>{{ instance.full_microusd | rate }} ({{ "bid" if instance.interruptible else "on demand" }})</dd>
+        <dt>State</dt><dd>{{ instance.state.value }}</dd>
+        {% if instance.last_synced_at %}<dt>Workspace saved</dt><dd>{{ instance.last_synced_at.strftime("%Y-%m-%d %H:%M UTC") }}</dd>{% endif %}
+      </dl>
+      {% if job.kind.value == "box" and instance.ssh_host and instance.ssh_port %}
+        <h3>Connect</h3>
+        <p><code>ssh -p {{ instance.ssh_port }} root@{{ instance.ssh_host }}</code></p>
+        <p class="muted">Or <code>krater ssh {{ job.id }}</code>. For Jupyter, start it in the box and tunnel to it:
+          <code>ssh -L 8888:localhost:8888 -p {{ instance.ssh_port }} root@{{ instance.ssh_host }}</code></p>
+      {% endif %}
+    </section>
+  {% endif %}
+
+  {% if can_stop or can_resume or can_cancel %}
+    <section class="card">
+      <h2>Actions</h2>
+      <div class="action-row">
+        {% if can_stop %}
+          <form method="post" action="/projects/{{ project.id }}/compute/{{ job.id }}/stop">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="button">Stop box</button>
+          </form>
+        {% endif %}
+        {% if can_resume %}
+          <form method="post" action="/projects/{{ project.id }}/compute/{{ job.id }}/resume">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="button button--primary">Resume box</button>
+          </form>
+          <form method="post" action="/projects/{{ project.id }}/compute/{{ job.id }}/move">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="button">Start it elsewhere from the saved workspace</button>
+          </form>
+        {% endif %}
+        {% if can_cancel %}
+          <form method="post" action="/projects/{{ project.id }}/compute/{{ job.id }}/cancel">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="button button--danger">Cancel</button>
+          </form>
+        {% endif %}
+      </div>
+    </section>
+  {% endif %}
+</aside>
+</div>
 {% endblock %}

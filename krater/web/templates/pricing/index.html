@@ -3,10 +3,21 @@
 {% block title %}GPU pricing{% endblock %}
 
 {% block content %}
-<section class="card">
-  <div class="page-header">
+<div class="page-head">
+  <div>
     <h1>GPU pricing</h1>
+    <p class="page-subtitle">
+      {% if refreshed_at %}Last updated {{ refreshed_at.strftime("%b") }} {{ refreshed_at.day }}, {{ refreshed_at.strftime("%Y %H:%M UTC") }}.{% else %}Prices haven't been refreshed yet.{% endif %}
+    </p>
   </div>
+  {% if show_history %}
+    <div class="page-actions">
+      <a class="button" href="/pricing/history">Live Vast price history</a>
+    </div>
+  {% endif %}
+</div>
+
+<section class="card">
 
   <p class="policy-note">
     These are <strong>estimates from a public catalog of Vast prices</strong> (SkyPilot's), not live quotes:
@@ -17,20 +28,13 @@
     (the catalog doesn't list spot prices for every GPU).
   </p>
 
-  {% if show_history %}
-    <p><a href="/pricing/history">Live Vast price history</a>: what Krater actually sees on Vast, every 10 minutes.</p>
-  {% endif %}
-
-  {% if refreshed_at %}
-    <p class="muted">Last updated {{ refreshed_at.strftime("%b") }} {{ refreshed_at.day }}, {{ refreshed_at.strftime("%Y %H:%M UTC") }}.</p>
-  {% else %}
-    <p class="muted">Prices haven't been refreshed yet.</p>
-  {% endif %}
-
   {% if not rows and not refreshed_at %}
-    <p class="muted">No pricing data yet. Once the daily refresh runs (or a manual one is triggered), GPU types and prices will show up here.</p>
+    <div class="empty-state">
+      <p class="empty-state__title">No pricing data yet.</p>
+      <p>Once the daily refresh runs (or a manual one is triggered), GPU types and prices will show up here.</p>
+    </div>
   {% else %}
-    <form method="get" action="/pricing" class="form form--inline filter-bar" data-role="pricing-filter-form">
+    <form method="get" action="/pricing" class="filter-bar" data-role="pricing-filter-form">
       <div class="field">
         <label for="gpu">GPU type</label>
         <select id="gpu" name="gpu" data-role="auto-submit">
@@ -52,7 +56,7 @@
     </form>
 
     {% if not rows %}
-      <p class="muted">No pricing matches this filter.</p>
+      <div class="empty-state"><p>No pricing matches this filter.</p></div>
     {% else %}
       {% set has_spot = rows | selectattr("spot_min_cents") | list %}
       <div class="table-scroll">
