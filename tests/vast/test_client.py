@@ -282,3 +282,25 @@ def test_usd_to_microusd_rounds_half_up() -> None:
     assert usd_to_microusd(Decimal("0.0587")) == 58_700
     assert usd_to_microusd(Decimal("0.0000005")) == 1
     assert usd_to_microusd(Decimal("0.05888888888888889")) == 58_889
+
+
+def test_get_vast_client_picks_up_a_new_key_without_a_restart(tmp_path, monkeypatch, caplog) -> None:
+    import krater.vast as vast_package
+    from krater.config import get_settings
+
+    key_file = tmp_path / "vast_api_key"
+    monkeypatch.setattr(vast_package, "_cached", None)
+    monkeypatch.setattr(get_settings(), "vast_mode", "live")
+    monkeypatch.setattr(get_settings(), "vast_api_key_file", str(key_file))
+
+    with caplog.at_level("ERROR", logger="krater.vast"):
+        assert vast_package.get_vast_client() is None
+    assert "no Vast API key" in caplog.text
+
+    key_file.write_text("first-key", encoding="utf-8")
+    first = vast_package.get_vast_client()
+    assert first is not None and first is vast_package.get_vast_client()
+
+    key_file.write_text("rotated-key", encoding="utf-8")
+    second = vast_package.get_vast_client()
+    assert second is not None and second is not first
