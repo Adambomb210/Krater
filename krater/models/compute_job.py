@@ -137,6 +137,10 @@ class ComputeInstance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     runner_token_hash: Mapped[str | None] = mapped_column(sa.String(64), nullable=True, unique=True)
     runner_started_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     runner_starts: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0, server_default="0")
+    # How many starts the runner must have reported to count as running now: 1 at first, one more after each pause
+    # (Vast restarts the container on resume). Counted, not timed: the runner usually reports before the scheduler's
+    # next pass even notices the machine is running.
+    runner_starts_needed: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=1, server_default="1")
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     last_heartbeat: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # Set when Krater decides to destroy it; the scheduler retries until Vast confirms it's gone.

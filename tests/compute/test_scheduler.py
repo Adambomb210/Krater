@@ -561,6 +561,51 @@ def test_after_a_pause_the_runner_must_start_again(db_session, member, project, 
     assert row.runner_starts == 2
 
 
+def test_a_runner_that_reports_before_the_scheduler_sees_running_counts(
+    db_session, member, project, client, fake
+) -> None:  # noqa: F811
+    """The usual order: the container starts, the runner reports within seconds, and only the next pass sees Vast's
+    `running`."""
+    job = _submit(db_session, member, project)
+    _pass(db_session, client)
+    row = _instance(db_session, job)
+    fake.set_status(row.vast_instance_id, "running")
+    _runner_starts(db_session, fake, row, NOW + timedelta(seconds=30))  # still `provisioning` in Krater
+
+    for minute in range(1, 21):
+        if minute % 10 == 0:
+            _beat(db_session, row, NOW + timedelta(minutes=minute))
+        _pass(db_session, client, NOW + timedelta(minutes=minute))
+
+    assert job.state is ComputeJobState.RUNNING
+
+
+def test_a_start_from_before_a_pause_does_not_count_after_it(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job, row = _running_job(db_session, member, project, client, fake)
+    fake.set_status(row.vast_instance_id, "stopped")
+    _pass(db_session, client, NOW + timedelta(minutes=6))  # paused: the runner must start again
+    fake.set_status(row.vast_instance_id, "running")
+    _pass(db_session, client, NOW + timedelta(minutes=8))  # resumed, but no new start
+
+    _pass(db_session, client, NOW + timedelta(minutes=17))
+    assert job.state is ComputeJobState.RUNNING
+    _pass(db_session, client, NOW + timedelta(minutes=18))
+    assert job.state is ComputeJobState.FAILED and "never started" in job.state_reason
+
+
+def test_a_runner_restart_reported_before_the_resume_is_seen_counts(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job, row = _running_job(db_session, member, project, client, fake)
+    fake.set_status(row.vast_instance_id, "stopped")
+    _pass(db_session, client, NOW + timedelta(minutes=6))
+    fake.set_status(row.vast_instance_id, "running")
+    _runner_starts(db_session, fake, row, NOW + timedelta(minutes=7))  # before the pass that sees the resume
+
+    for minute in range(8, 25):
+        _pass(db_session, client, NOW + timedelta(minutes=minute))
+
+    assert job.state is ComputeJobState.RUNNING
+
+
 def test_no_runner_binary_means_nothing_is_rented(db_session, member, project, client, fake) -> None:  # noqa: F811
     job = _submit(db_session, member, project)
 
