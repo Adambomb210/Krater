@@ -52,3 +52,16 @@ def test_compute_schedule_runs_a_pass(monkeypatch) -> None:
         args, _ = mock_scheduler.run_pass.call_args
         assert args[0] is session and args[1] is mock_client.return_value
         session.close.assert_called_once()
+
+
+def test_compute_reconcile_runs_hourly_under_the_scheduler_lock(monkeypatch) -> None:
+    from krater.worker.app import compute_reconcile
+
+    periodic_task = app.periodic_registry.periodic_tasks[("compute_reconcile", "")]
+    assert periodic_task.cron == "7 * * * *"
+    assert compute_reconcile.lock == COMPUTE_SCHEDULER_LOCK
+
+    monkeypatch.setattr(get_settings(), "compute_mode", "off")
+    with patch("krater.worker.app.compute_reconciler") as mock_reconciler:
+        compute_reconcile.func(timestamp=1_791_700_000)
+        mock_reconciler.run.assert_not_called()

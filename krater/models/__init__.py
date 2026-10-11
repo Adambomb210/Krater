@@ -3,7 +3,7 @@
 from krater.models.approval_policy import ApprovalPolicy
 from krater.models.audit_event import AuditEvent
 from krater.models.budget_entry import BudgetEntry
-from krater.models.compute_job import ComputeEvent, ComputeInstance, ComputeJob
+from krater.models.compute_job import ComputeEvent, ComputeInstance, ComputeJob, SpendReconciliation
 from krater.models.compute_settings import ComputeSettings, ProjectComputeSettings
 from krater.models.enums import (
     ApprovalStage,
@@ -58,6 +58,7 @@ __all__ = [
     "RevisionKind",
     "RevisionOutcome",
     "SlackNotification",
+    "SpendReconciliation",
     "SpendSnapshot",
     "SpendSource",
     "User",

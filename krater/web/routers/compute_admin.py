@@ -7,12 +7,13 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
+import sqlalchemy as sa
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
 from krater.db import get_session
-from krater.models import Project
+from krater.models import Project, SpendReconciliation
 from krater.services import compute_settings
 from krater.services.actor import Actor
 from krater.services.errors import NotFound, ValidationFailed
@@ -75,6 +76,15 @@ def _global_page(request: Request, db_session: Session, *, errors=None, posted=N
         {
             "rows": _field_rows(policy.values(), posted),
             "overrides": overrides,
+            "mismatches": [
+                (check, db_session.get(Project, check.project_id))
+                for check in db_session.scalars(
+                    sa.select(SpendReconciliation)
+                    .where(SpendReconciliation.alerted.is_(True))
+                    .order_by(SpendReconciliation.checked_at.desc())
+                    .limit(20)
+                )
+            ],
             "errors": errors or {},
             "reason": reason,
         },

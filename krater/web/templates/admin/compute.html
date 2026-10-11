@@ -55,4 +55,35 @@
     <p class="muted">Every project follows the defaults.</p>
   {% endif %}
 </section>
+<section class="card">
+  <h2>Spend checks that didn't match</h2>
+  <p class="muted">
+    Every hour Krater compares its spend estimate with what Vast charged. These differed by more than the
+    reconciliation alert threshold. Krater now uses Vast's figure.
+  </p>
+  {% if mismatches %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th scope="col">Checked</th>
+          <th scope="col">Project</th>
+          <th scope="col">Krater's estimate</th>
+          <th scope="col">Vast charged</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for check, project in mismatches %}
+          <tr>
+            <td>{{ check.checked_at.strftime("%Y-%m-%d %H:%M UTC") }}</td>
+            <td><a href="/projects/{{ project.id }}">{{ project.title or "Untitled proposal" }}</a></td>
+            <td>${{ "%.4f" | format(check.estimate_microusd / 1000000) }}</td>
+            <td>${{ "%.4f" | format(check.actual_microusd / 1000000) }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">None.</p>
+  {% endif %}
+</section>
 {% endblock %}

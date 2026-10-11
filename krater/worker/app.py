@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 import procrastinate
 
+from krater.compute import reconcile as compute_reconciler
 from krater.compute import scheduler as compute_scheduler
 from krater.config import get_settings
 from krater.db import get_sessionmaker
@@ -146,6 +147,34 @@ def compute_schedule(timestamp: int) -> None:
             )
     except Exception:
         logger.exception("krater.compute_schedule failed")
+        session.rollback()
+    finally:
+        session.close()
+
+
+@app.periodic(cron="7 * * * *")
+@app.task(name="compute_reconcile", lock=COMPUTE_SCHEDULER_LOCK)
+def compute_reconcile(timestamp: int) -> None:
+    """Hourly: replace Krater Compute's spend estimate with Vast's own charges (`krater.compute.reconcile`). Shares
+    the scheduler's lock, since both write instance estimates."""
+    del timestamp
+    settings = get_settings()
+    if settings.compute_mode != "vast":
+        return
+    client = get_vast_client()
+    if client is None:
+        return
+    session = get_sessionmaker()()
+    try:
+        result = compute_reconciler.run(session, client, settings, now=datetime.now(UTC))
+        logger.info(
+            "krater compute_reconcile: %d projects, %d alerts, %d unknown sources",
+            result.projects,
+            result.alerts,
+            len(result.unknown_sources),
+        )
+    except Exception:
+        logger.exception("krater.compute_reconcile failed")
         session.rollback()
     finally:
         session.close()
