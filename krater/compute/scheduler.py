@@ -46,7 +46,7 @@ from krater.models import (
     Project,
 )
 from krater.models.compute_job import ACTIVE_JOB_STATES, FINISHED_JOB_STATES
-from krater.services import budget, budget_alerts, compute_settings
+from krater.services import audit, budget, budget_alerts, compute_jobs, compute_settings
 from krater.services.compute_settings import ComputePolicy
 from krater.services.launch_rules import LAUNCHABLE_STATUSES, hourly_cap_cents
 from krater.vast import (
@@ -577,6 +577,25 @@ class Scheduler:
         saved = "saved" if synced else "not confirmed saved"
         job.state_reason = f"Stopped ({reason}); /workspace {saved}. Resume it to carry on."
         _event(self.session, job, "stopped", f"Stopped the box: {reason}.", now=self.now, instance=row, synced=synced)
+        if not reason.startswith(compute_jobs.MEMBER_STOP_PREFIX):
+            self._box_notice(compute_jobs.AUDIT_BOX_STOPPED, job, reason=reason, synced=synced)
+
+    def _box_notice(self, action: str, job: ComputeJob, **details) -> None:
+        """An audit event the Slack sync posts to the project channel, mentioning the box's owner."""
+        policy = self._policy(job.project)
+        audit.record(
+            self.session,
+            None,
+            action,
+            project=job.project,
+            payload={
+                "job_id": str(job.id),
+                "job_name": job.name,
+                "owner_id": str(job.submitter_id),
+                "destroy_after_hours": policy.box_destroy_hours,
+                **details,
+            },
+        )
 
     def _watch_stopped(
         self,
@@ -638,6 +657,7 @@ class Scheduler:
                 now=self.now,
             )
             self._destroy(row, "stopped too long")
+            self._box_notice(compute_jobs.AUDIT_BOX_DESTROYED, job)
         elif stopped_for >= destroy_after - DESTROY_WARNING and not self._has_event(job, "destroy_soon"):
             _event(
                 self.session,
@@ -647,6 +667,8 @@ class Scheduler:
                 now=self.now,
                 instance=row,
             )
+            destroy_at = (row.stopped_at or self.now) + destroy_after
+            self._box_notice(compute_jobs.AUDIT_BOX_DESTROY_SOON, job, destroy_at=destroy_at.isoformat())
 
     def _has_event(self, job: ComputeJob, kind: str) -> bool:
         return (

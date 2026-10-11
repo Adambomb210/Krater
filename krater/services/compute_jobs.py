@@ -26,6 +26,12 @@ from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
 from krater.services.launch_rules import LAUNCHABLE_STATUSES
 
 MICROUSD_PER_CENT = 10_000
+#: How a stop the member asked for is described; a stop Krater decided on (idle, a silent runner) gets a Slack notice.
+MEMBER_STOP_PREFIX = "stopped by "
+#: `actor=None` audit events about a member's box, posted to the project channel by `krater.services.slack_notify`.
+AUDIT_BOX_STOPPED = "compute_box_stopped"
+AUDIT_BOX_DESTROY_SOON = "compute_box_destroy_soon"
+AUDIT_BOX_DESTROYED = "compute_box_destroyed"
 _IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._\-/:@]*$")
 
 
@@ -168,7 +174,7 @@ def stop_box(session: Session, actor: Actor, *, job: ComputeJob, now: datetime) 
         raise InvalidState("Only a running box can be stopped.")
     if row.stop_requested_at is None:
         row.stop_requested_at = now
-        row.stop_reason = f"stopped by {actor.user.display_name}"
+        row.stop_reason = f"{MEMBER_STOP_PREFIX}{actor.user.display_name}"
         session.add(
             ComputeEvent(
                 job_id=job.id, instance_id=row.id, kind="stop_requested", message=row.stop_reason, payload={}, at=now

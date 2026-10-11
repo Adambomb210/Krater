@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
+from krater.config import get_settings
 from krater.models import (
     AuditEvent,
     Project,
@@ -33,6 +35,7 @@ from krater.models import (
 )
 from krater.services.actor import GROUP_REVIEWER
 from krater.services.budget_alerts import AUDIT_BUDGET_TEARDOWN, AUDIT_BUDGET_WARNING
+from krater.services.compute_jobs import AUDIT_BOX_DESTROY_SOON, AUDIT_BOX_DESTROYED, AUDIT_BOX_STOPPED
 from krater.services.slack_membership import slack_id_for
 from krater.slack.client import SlackClient
 from krater.slack.errors import SlackError, SlackRequestFailedError
@@ -394,6 +397,57 @@ def sync_budget_notifications(session: Session, slack_client: SlackClient) -> No
         session.flush()
 
 
+BOX_NOTICES = (AUDIT_BOX_STOPPED, AUDIT_BOX_DESTROY_SOON, AUDIT_BOX_DESTROYED)
+
+
+def _box_message(session: Session, slack_client: SlackClient, event: AuditEvent, project: Project):
+    payload = event.payload or {}
+    owner = session.get(User, uuid.UUID(payload["owner_id"])) if payload.get("owner_id") else None
+    slack_id = slack_id_for(session, slack_client, owner) if owner is not None else None
+    who = f"<@{slack_id}>" if slack_id else _escape_mrkdwn(owner.display_name if owner else "Someone")
+    name = _escape_mrkdwn(payload.get("job_name", "a box"))
+    link = f"{get_settings().base_url.rstrip('/')}/projects/{project.id}/compute/{payload.get('job_id', '')}"
+    hours = payload.get("destroy_after_hours")
+    if event.action == AUDIT_BOX_STOPPED:
+        saved = "/workspace is saved" if payload.get("synced") else "/workspace may not have saved"
+        text = (
+            f":zzz: *Box stopped*: {who}, your box *{name}* stopped ({_escape_mrkdwn(payload.get('reason', ''))}); "
+            f"{saved}. <{link}|Resume it> within {hours} hours, or Krater destroys it."
+        )
+    elif event.action == AUDIT_BOX_DESTROY_SOON:
+        at = payload.get("destroy_at", "")[:16].replace("T", " ")
+        text = (
+            f":hourglass_flowing_sand: *Box destroyed soon*: {who}, your stopped box *{name}* will be destroyed at "
+            f"{at} UTC unless you <{link}|resume it>."
+        )
+    else:
+        text = (
+            f":wastebasket: *Box destroyed*: {who}, your box *{name}* was stopped for {hours} hours and is gone. "
+            "Its last saved /workspace is kept."
+        )
+    plain = re.sub(r"<[^|>]*\|([^>]*)>", r"\1", text)  # links as their words, for the notification
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}], plain
+
+
+def sync_box_notifications(session: Session, slack_client: SlackClient) -> None:
+    """Post every not-yet-posted box notice (stopped by Krater, destroyed soon, destroyed) to its project's channel,
+    mentioning the box's owner, once each (`SlackNotification`)."""
+    already_posted = sa.select(SlackNotification.audit_event_id)
+    stmt = sa.select(AuditEvent).where(
+        AuditEvent.action.in_(BOX_NOTICES),
+        AuditEvent.project_id.is_not(None),
+        AuditEvent.id.not_in(already_posted),
+    )
+    for event in session.scalars(stmt):
+        project = session.get(Project, event.project_id)
+        if project is None or project.slack_channel_id is None:
+            continue
+        blocks, text = _box_message(session, slack_client, event, project)
+        slack_client.post_message(project.slack_channel_id, blocks=blocks, text=text)
+        session.add(SlackNotification(audit_event_id=event.id))
+        session.flush()
+
+
 def sync_missed_archives(session: Session, slack_client: SlackClient) -> None:
     """Archive the channel of any `completed`/`withdrawn` project whose immediate archive (deferred from
     the web request/Slack action that finished it) never ran -- `docs/SPEC.md`: "archive channels of
@@ -413,6 +467,7 @@ def reconcile(session: Session, slack_client: SlackClient, weave_client: WeaveCl
     steps = (
         ("sync_reviewer_invites", lambda: sync_reviewer_invites(session, slack_client, weave_client)),
         ("sync_budget_notifications", lambda: sync_budget_notifications(session, slack_client)),
+        ("sync_box_notifications", lambda: sync_box_notifications(session, slack_client)),
         ("sync_missed_archives", lambda: sync_missed_archives(session, slack_client)),
     )
     for name, step in steps:

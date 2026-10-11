@@ -325,3 +325,40 @@ def test_a_failing_ssh_key_check_refuses_boxes_but_not_jobs(db_session, member, 
 
     assert box.state is ComputeJobState.QUEUED
     assert job.state is ComputeJobState.STARTING
+
+
+def _notices(db_session, action):
+    from krater.models import AuditEvent
+
+    return db_session.scalars(sa.select(AuditEvent).where(AuditEvent.action == action)).all()
+
+
+def test_an_idle_stop_and_the_destroy_are_noticed_for_slack_but_a_members_stop_is_not(
+    db_session, member, project, client, fake
+) -> None:  # noqa: F811
+    job, row = _running_box(db_session, member, project, client, fake)
+    for minute in range(3, 35):
+        _beat(db_session, row, minute)
+        _pass(db_session, client, NOW + timedelta(minutes=minute))
+    runner_api.synced(db_session, row, now=NOW + timedelta(minutes=34, seconds=30))
+    _pass(db_session, client, NOW + timedelta(minutes=35))
+
+    (stopped,) = _notices(db_session, compute_jobs.AUDIT_BOX_STOPPED)
+    assert stopped.payload["job_name"] == job.name and stopped.payload["synced"] is True
+    assert "idle" in stopped.payload["reason"]
+
+    _pass(db_session, client, NOW + timedelta(minutes=35, hours=23, seconds=30))
+    (soon,) = _notices(db_session, compute_jobs.AUDIT_BOX_DESTROY_SOON)
+    assert soon.payload["destroy_at"].startswith("2026")
+    _pass(db_session, client, NOW + timedelta(minutes=36, hours=24))
+    assert len(_notices(db_session, compute_jobs.AUDIT_BOX_DESTROYED)) == 1
+
+
+def test_a_box_the_member_stops_gets_no_notice(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job, row = _running_box(db_session, member, project, client, fake)
+    compute_jobs.stop_box(db_session, member, job=job, now=NOW + timedelta(minutes=3))
+    runner_api.synced(db_session, row, now=NOW + timedelta(minutes=3, seconds=10))
+    _pass(db_session, client, NOW + timedelta(minutes=4))
+
+    assert job.state is ComputeJobState.STOPPED
+    assert _notices(db_session, compute_jobs.AUDIT_BOX_STOPPED) == []
