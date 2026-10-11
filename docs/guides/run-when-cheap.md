@@ -3,8 +3,8 @@
 How to make a Ganymede job wait for a GPU price you choose, so your budget goes further. Krater does the waiting and the
 renting: you set a target price, and your job starts when a Vast.ai machine at or under it is available.
 
-> **Status:** Krater Compute is built but hasn't run on real Vast machines yet; it's switched on once the staging
-> checks pass. Try it on a small budget first.
+> **Status:** Krater Compute passed its first staging run on real Vast machines (2026-10-11) and is switched on in
+> production separately. Try it on a small budget first.
 
 ## The idea
 
@@ -56,6 +56,13 @@ os.replace(latest + ".tmp", latest)
 
 Your project has a storage quota (50 GB unless an admin set another), so keep only the checkpoints you need.
 
+## Secrets
+
+If your job needs a token (Hugging Face, Weights & Biases), add it under **Secrets** on your project's Compute page.
+Every job and box of the project gets it as an environment variable (`HF_TOKEN`, say); in a box, log-in shells
+have it. Nobody can read a value back on the page, but the machine's host could, so use a token you can limit and
+revoke, never your main account password.
+
 ## Submitting
 
 On your project's page, open **Compute** and choose **New job or box**: your container image, the command, the GPU
@@ -75,4 +82,5 @@ POSIX shell and one of curl, wget or Python. Its own entrypoint isn't run, so pu
   checkpoint.
 - **Single machine only:** a job runs on one machine with up to 8 GPUs.
 - **Interactive work:** use a box instead of a job. It's an SSH workspace that stops itself when idle and keeps
-  `/workspace` between sessions. Add your SSH key under **SSH keys** first.
+  `/workspace` between sessions. Add your SSH key under **SSH keys** first. For Jupyter, start it in the box and
+  tunnel to it: `ssh -L 8888:localhost:8888 -p <port> root@<host>`, then open `http://localhost:8888`.

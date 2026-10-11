@@ -11,7 +11,7 @@ import pytest
 import sqlalchemy as sa
 
 from krater.compute import scheduler
-from krater.config import Settings
+from krater.config import Settings, get_settings
 from krater.models import (
     ComputeEscalation,
     ComputeEvent,
@@ -62,7 +62,9 @@ def _token(fake, row) -> str:
 def _runner_starts(db_session, fake, row, now):
     from krater.compute import runner_api
 
-    runner_api.start(db_session, runner_api.authenticate(db_session, _token(fake, row)), now=now)
+    runner_api.start(
+        db_session, runner_api.authenticate(db_session, _token(fake, row)), now=now, settings=get_settings()
+    )
 
 
 def _beat(db_session, row, now):

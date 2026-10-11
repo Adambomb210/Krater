@@ -4,7 +4,8 @@ The runner authenticates with its instance's token (`KRATER_JOB_TOKEN`, generate
 Krater keeps only its sha256). A token works only while its instance is live and not being destroyed, so a moved
 job's old machine is locked out. With it the runner can:
 
-- `start`: say it started, and learn its command, whether this is a restart, and its timings;
+- `start`: say it started, and learn its command, whether this is a restart, its timings and its project's secrets
+  (`krater.services.project_secrets`: they reach the machine only this way, never in Vast's create request);
 - `heartbeat`: report GPU use and open sessions, and learn whether to stop;
 - `exit`: report the command's exit code (the scheduler destroys the machine on its next pass);
 - `checkpoints`: list, download and upload its own job's checkpoints and outputs, through presigned URLs.
@@ -18,16 +19,17 @@ import hashlib
 import math
 import re
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
+from krater.config import Settings
 from krater.models import ComputeEvent, ComputeInstance, ComputeJob, ComputeJobKind, ComputeJobState
 from krater.models.compute_job import ACTIVE_JOB_STATES
-from krater.services import ssh_keys
+from krater.services import project_secrets, ssh_keys
 from krater.services.errors import NotAllowed, ValidationFailed
 from krater.storage import ObjectStore
 
@@ -85,9 +87,11 @@ class StartInfo:
     ssh_keys: tuple[str, ...] = ()
     heartbeat_seconds: int = HEARTBEAT_SECONDS
     checkpoint_sync_seconds: int = CHECKPOINT_SYNC_SECONDS
+    # The project's secrets, name -> value. Never logged or shown (kept out of the repr).
+    secrets: dict[str, str] = field(default_factory=dict, repr=False)
 
 
-def start(session: Session, instance: ComputeInstance, *, now: datetime) -> StartInfo:
+def start(session: Session, instance: ComputeInstance, *, now: datetime, settings: Settings) -> StartInfo:
     """The runner started (again). A restart on the same machine (Vast restarts the container after a pause) or a
     later attempt on another one is a resume: the member's code should restore its last checkpoint."""
     job = instance.job
@@ -107,6 +111,7 @@ def start(session: Session, instance: ComputeInstance, *, now: datetime) -> Star
     )
     session.flush()
     keys = tuple(ssh_keys.authorized_keys_for(session, job.submitter_id)) if job.kind is ComputeJobKind.BOX else ()
+    secrets_env = project_secrets.environment(session, job.project_id, settings)
     return StartInfo(
         job_id=str(job.id),
         attempt=instance.attempt,
@@ -114,6 +119,7 @@ def start(session: Session, instance: ComputeInstance, *, now: datetime) -> Star
         command=job.command,
         kind=job.kind.value,
         ssh_keys=keys,
+        secrets=secrets_env,
     )
 
 

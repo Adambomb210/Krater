@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from krater.compute import runner_api
+from krater.config import get_settings
 from krater.models import ComputeEvent, ComputeInstanceState, ComputeJobKind, ComputeJobState
 from krater.services import compute_jobs, ssh_keys
 from tests.compute.test_scheduler import NOW, _instance, _pass, _submit, _token
@@ -33,7 +34,7 @@ def _running_box(db_session, member, project, client, fake):  # noqa: F811
         ports={"22/tcp": [{"HostIp": "0.0.0.0", "HostPort": "41022"}]},
     )
     instance = runner_api.authenticate(db_session, _token(fake, row))
-    runner_api.start(db_session, instance, now=NOW + timedelta(minutes=1))
+    runner_api.start(db_session, instance, now=NOW + timedelta(minutes=1), settings=get_settings())
     _pass(db_session, client, NOW + timedelta(minutes=2))
     return job, row
 
@@ -81,7 +82,7 @@ def test_the_box_records_where_to_ssh_and_gets_its_owners_keys(db_session, membe
     job, row = _running_box(db_session, member, project, client, fake)
 
     assert (row.ssh_host, row.ssh_port) == ("198.51.100.7", 41022)
-    info = runner_api.start(db_session, row, now=NOW + timedelta(minutes=3))
+    info = runner_api.start(db_session, row, now=NOW + timedelta(minutes=3), settings=get_settings())
     assert info.ssh_keys == (text,)
 
 
@@ -155,7 +156,7 @@ def test_resume_restarts_the_same_machine_and_the_runner_must_start_again(
 
     assert row.state is ComputeInstanceState.RUNNING and job.state is ComputeJobState.RUNNING
     assert row.runner_starts_needed == row.runner_starts + 1
-    runner_api.start(db_session, row, now=NOW + timedelta(minutes=12, seconds=20))
+    runner_api.start(db_session, row, now=NOW + timedelta(minutes=12, seconds=20), settings=get_settings())
     for minute in range(13, 25):
         _beat(db_session, row, minute, sessions=1)
         _pass(db_session, client, NOW + timedelta(minutes=minute))
@@ -254,7 +255,7 @@ def test_max_runtime_counts_running_time_only(db_session, member, project, clien
     _pass(db_session, client)
     row = _instance(db_session, job)
     fake.set_status(row.vast_instance_id, "running")
-    runner_api.start(db_session, row, now=NOW + timedelta(minutes=1))
+    runner_api.start(db_session, row, now=NOW + timedelta(minutes=1), settings=get_settings())
     for minute in range(2, 63):
         _beat(db_session, row, minute, sessions=1)
         _pass(db_session, client, NOW + timedelta(minutes=minute))
@@ -267,7 +268,7 @@ def test_max_runtime_counts_running_time_only(db_session, member, project, clien
     compute_jobs.resume_box(db_session, member, job=job, now=later)
     _pass(db_session, client, later + timedelta(minutes=1))
     _pass(db_session, client, later + timedelta(minutes=2))
-    runner_api.start(db_session, row, now=later + timedelta(minutes=2, seconds=10))
+    runner_api.start(db_session, row, now=later + timedelta(minutes=2, seconds=10), settings=get_settings())
     _beat(db_session, row, 11 * 60 + 3, sessions=1)
     _pass(db_session, client, later + timedelta(minutes=3))
 
@@ -279,7 +280,7 @@ def test_a_box_at_its_max_runtime_is_stopped_not_destroyed(db_session, member, p
     _pass(db_session, client)
     row = _instance(db_session, job)
     fake.set_status(row.vast_instance_id, "running")
-    runner_api.start(db_session, row, now=NOW + timedelta(minutes=1))
+    runner_api.start(db_session, row, now=NOW + timedelta(minutes=1), settings=get_settings())
     for minute in range(2, 34):
         _beat(db_session, row, minute, sessions=1)
         _pass(db_session, client, NOW + timedelta(minutes=minute))

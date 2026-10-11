@@ -24,6 +24,7 @@ from krater.models.gpu_price import GpuPrice
 from krater.models.gpu_price_sample import GpuPriceSample
 from krater.models.project import Project
 from krater.models.project_revision import ProjectRevision
+from krater.models.project_secret import ProjectSecret
 from krater.models.quilt_outbox import QuiltOutbox
 from krater.models.review import Review
 from krater.models.slack_notification import SlackNotification
@@ -50,6 +51,7 @@ __all__ = [
     "Project",
     "ProjectComputeSettings",
     "ProjectRevision",
+    "ProjectSecret",
     "ProjectStatus",
     "QuiltOutbox",
     "QuiltOutboxState",

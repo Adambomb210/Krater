@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -30,6 +32,7 @@ type fakeKrater struct {
 	kind      string
 	sshKeys   []string
 	syncAt    int // answer sync on this heartbeat (0 = never)
+	secrets   map[string]string
 	refuse    string
 	synced    int
 
@@ -86,7 +89,8 @@ func (f *fakeKrater) handle(w http.ResponseWriter, r *http.Request) {
 			kind = "job"
 		}
 		f.writeJSON(w, map[string]any{"job_id": "j1", "attempt": 1, "resumed": f.resumed, "command": f.command,
-			"kind": kind, "ssh_keys": f.sshKeys, "heartbeat_seconds": 1, "checkpoint_sync_seconds": 3600})
+			"kind": kind, "ssh_keys": f.sshKeys, "heartbeat_seconds": 1, "checkpoint_sync_seconds": 3600,
+			"secrets": f.secrets})
 	case path == "/runner/v1/heartbeat":
 		f.heartbeats = append(f.heartbeats, body)
 		f.writeJSON(w, map[string]any{
@@ -368,5 +372,68 @@ func TestOneRefusedFileDoesNotStopTheOthers(t *testing.T) {
 
 	if n != 1 || err == nil || string(f.objects["checkpoints/b.pt"]) != "b" {
 		t.Errorf("Push = %d, %v; objects %v", n, err, keys(f.objects))
+	}
+}
+
+func TestAJobGetsTheProjectSecretsInItsEnvironmentAndTheLogNeverShowsThem(t *testing.T) {
+	f := newFakeKrater(t)
+	f.secrets = map[string]string{"HF_TOKEN": "hf_s3cret", "KRATER_JOB_TOKEN": "spoofed", "bad-name": "x"}
+	f.command = `test "$HF_TOKEN" = hf_s3cret && test "$KRATER_JOB_TOKEN" != spoofed && test -z "$(env | grep bad-name)"`
+	var logged strings.Builder
+	log.SetOutput(&logged)
+	defer log.SetOutput(os.Stderr)
+
+	code, err := Run(context.Background(), f.cfg(t), http.DefaultClient, http.DefaultClient, noGPU)
+
+	if err != nil || code != 0 {
+		t.Fatalf("Run = %d, %v; want 0: the command didn't see the secret as expected", code, err)
+	}
+	if strings.Contains(logged.String(), "hf_s3cret") {
+		t.Errorf("a secret value reached the runner's log")
+	}
+	if !strings.Contains(logged.String(), "1 project secrets") {
+		t.Errorf("log: %s", logged.String())
+	}
+}
+
+func TestABoxGetsAShellProfileWithItsSecrets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "profile.d", "krater-secrets.sh")
+	value := `it's "quoted" $HOME`
+
+	if err := writeSecretsProfile(path, map[string]string{"HF_TOKEN": value}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("profile: %v, mode %v", err, info.Mode())
+	}
+	out, err := exec.Command("sh", "-c", `. "$1"; printf %s "$HF_TOKEN"`, "sh", path).Output()
+	if err != nil || string(out) != value {
+		t.Errorf("sourced value = %q, %v; want %q", out, err, value)
+	}
+	// No secrets left (one was deleted): the file goes.
+	if err := writeSecretsProfile(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("the profile is still there: %v", err)
+	}
+}
+
+func TestANonRootImageGetsItsDirectoriesUnderTmp(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can create anything; run as a non-root user to check the fallback")
+	}
+	locked := filepath.Join(t.TempDir(), "locked")
+	os.Mkdir(locked, 0o500)
+	base := t.TempDir()
+
+	dir, err := usableDir(filepath.Join(locked, "checkpoints"), base)
+
+	if err != nil || dir != filepath.Join(base, "krater", "checkpoints") {
+		t.Fatalf("usableDir = %q, %v", dir, err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("not created: %v", err)
 	}
 }

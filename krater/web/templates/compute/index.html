@@ -45,4 +45,65 @@
     <p class="muted">No jobs yet.</p>
   {% endif %}
 </section>
+
+<section class="card" id="secrets">
+  <h2>Secrets</h2>
+  <p class="muted">
+    Values your jobs and boxes need, such as a Hugging Face token, as environment variables. Krater stores them
+    encrypted and hands them to each machine when it starts; nobody can read a value back here. The machine's host can
+    still see them, so use tokens you can limit and revoke. Up to {{ max_secrets }} per project.
+  </p>
+  {% if secrets %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th scope="col">Name</th>
+          <th scope="col">Updated</th>
+          {% if can_manage_secrets %}<th scope="col"><span class="visually-hidden">Delete</span></th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for secret in secrets %}
+          <tr>
+            <td><code>{{ secret.name }}</code></td>
+            <td>{{ secret.updated_at.strftime("%Y-%m-%d %H:%M") }} UTC</td>
+            {% if can_manage_secrets %}
+              <td>
+                <form method="post" action="/projects/{{ project.id }}/compute/secrets/{{ secret.name }}/delete">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                  <button type="submit" class="button">Delete</button>
+                </form>
+              </td>
+            {% endif %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">No secrets yet.</p>
+  {% endif %}
+
+  {% if can_manage_secrets %}
+    {% if secrets_enabled %}
+      <form method="post" action="/projects/{{ project.id }}/compute/secrets" class="form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="field">
+          <label for="secret-name">Name</label>
+          <input type="text" id="secret-name" name="name" maxlength="64" placeholder="HF_TOKEN" autocomplete="off"
+                 value="{{ posted.name or '' }}">
+          <p class="field-hint">Capital letters, digits and underscores. Saving an existing name replaces its value.</p>
+          {% if errors.name %}<p class="field-error">{{ errors.name }}</p>{% endif %}
+        </div>
+        <div class="field">
+          <label for="secret-value">Value</label>
+          <input type="password" id="secret-value" name="value" autocomplete="off">
+          {% if errors.value %}<p class="field-error">{{ errors.value }}</p>{% endif %}
+        </div>
+        <button type="submit" class="button button--primary">Save secret</button>
+      </form>
+    {% else %}
+      <p class="muted">Secrets aren't set up on this Krater yet: an admin needs to add an encryption key.</p>
+    {% endif %}
+  {% endif %}
+</section>
 {% endblock %}

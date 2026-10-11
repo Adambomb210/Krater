@@ -48,7 +48,9 @@ reads; it needs no server or credentials.
 **Turning compute on** later takes, in the infra module: the Vast key mounted into the worker only
 (`KRATER_VAST_API_KEY_FILE`), `KRATER_VAST_MODE=live`, `KRATER_COMPUTE_MODE=vast`, and a production
 `KRATER_COMPUTE_LABEL_PREFIX` (production refuses the default, since the scheduler destroys unknown instances with its
-prefix). The deploy's `ensure_bucket` creates the `krater-compute` bucket for checkpoints.
+prefix). The deploy's `ensure_bucket` creates the `krater-compute` bucket for checkpoints. Project secrets also need
+`KRATER_PROJECT_SECRETS_KEY_FILE`: a Fernet key file (an agenix secret) mounted into the portal only. Without it the
+feature is off. Losing the key loses every stored secret, so back it up with the other agenix secrets.
 
 ## 1. Before the first deploy
 

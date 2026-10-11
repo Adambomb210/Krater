@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     vast_api_key_file: str = ""
     vast_api_key: str = ""
     vast_timeout_seconds: float = 30.0
+    # Project secrets (an HF_TOKEN a job needs) are stored encrypted with these Fernet keys
+    # (`krater.services.project_secrets`): a file of one key per line, newest first, so a key can be rotated. Keep it
+    # apart from the database and KRATER_SECRET_KEY. Without a key, project secrets are switched off.
+    # `project_secrets_key` (comma-separated) is for local runs.
+    project_secrets_key_file: str = ""
+    project_secrets_key: str = ""
     # Krater's own Vast price history (Vast's history API is for host accounts only, and its public feed needs a
     # data license for bulk use). Every `price_history_interval_minutes`, one search per GPU model and rental type;
     # rows hold the min, p10 and median of GPU price plus `price_history_disk_gb` of disk, for 1-GPU offers.

@@ -240,3 +240,99 @@ def test_the_chart_needs_two_points() -> None:
     )
     assert 'aria-label="RTX &amp; co"' in svg
     assert svg.count("<polyline") == 1 and svg.count("<polygon") == 1
+
+
+# -- Project secrets -------------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def secrets_key(monkeypatch) -> None:
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setattr(get_settings(), "project_secrets_key", Fernet.generate_key().decode())
+
+
+def test_the_team_saves_a_secret_and_never_sees_it_again(
+    client: TestClient, login_as, project, db_session, secrets_key
+) -> None:
+    from krater.services import project_secrets
+
+    login_as(MEMBER_SUB)
+    page = client.get(f"/projects/{project.id}/compute")
+    assert "Save secret" in page.text
+
+    response = client.post(
+        f"/projects/{project.id}/compute/secrets",
+        data={"name": "HF_TOKEN", "value": "hf_abc123", "csrf_token": get_csrf_token(page.text)},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert project_secrets.environment(db_session, project.id, get_settings()) == {"HF_TOKEN": "hf_abc123"}
+    shown = client.get(f"/projects/{project.id}/compute").text
+    assert "HF_TOKEN" in shown and "hf_abc123" not in shown
+
+
+def test_a_bad_secret_name_is_shown_again_without_its_value(client: TestClient, login_as, project, secrets_key) -> None:
+    login_as(MEMBER_SUB)
+    page = client.get(f"/projects/{project.id}/compute")
+
+    response = client.post(
+        f"/projects/{project.id}/compute/secrets",
+        data={"name": "KRATER_JOB_TOKEN", "value": "hf_abc123", "csrf_token": get_csrf_token(page.text)},
+    )
+
+    assert response.status_code == 422
+    assert "used by Krater" in response.text
+    assert "hf_abc123" not in response.text
+
+
+def test_reviewers_see_secret_names_but_cannot_change_them(
+    client: TestClient, login_as, project, db_session, secrets_key
+) -> None:
+    from krater.services import project_secrets
+
+    member = login_as(MEMBER_SUB)
+    project_secrets.set_secret(
+        db_session, actor_for(member), project=project, name="HF_TOKEN", value="v", settings=get_settings()
+    )
+    login_as(REVIEWER_SUB)
+    page = client.get(f"/projects/{project.id}/compute")
+    assert "HF_TOKEN" in page.text and "Save secret" not in page.text
+
+    token = get_csrf_token(page.text)
+    set_response = client.post(
+        f"/projects/{project.id}/compute/secrets", data={"name": "X", "value": "v", "csrf_token": token}
+    )
+    delete_response = client.post(f"/projects/{project.id}/compute/secrets/HF_TOKEN/delete", data={"csrf_token": token})
+
+    assert set_response.status_code == 403 and delete_response.status_code == 403
+    assert [s.name for s in project_secrets.list_secrets(db_session, project)] == ["HF_TOKEN"]
+
+
+def test_the_team_deletes_a_secret(client: TestClient, login_as, project, db_session, secrets_key) -> None:
+    from krater.services import project_secrets
+
+    member = login_as(MEMBER_SUB)
+    project_secrets.set_secret(
+        db_session, actor_for(member), project=project, name="HF_TOKEN", value="v", settings=get_settings()
+    )
+    page = client.get(f"/projects/{project.id}/compute")
+
+    response = client.post(
+        f"/projects/{project.id}/compute/secrets/HF_TOKEN/delete",
+        data={"csrf_token": get_csrf_token(page.text)},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert project_secrets.list_secrets(db_session, project) == []
+
+
+def test_without_a_key_the_page_says_secrets_are_off(client: TestClient, login_as, project) -> None:
+    login_as(MEMBER_SUB)
+
+    page = client.get(f"/projects/{project.id}/compute")
+
+    assert "Secrets aren't set up on this Krater yet" in page.text
+    assert "Save secret" not in page.text

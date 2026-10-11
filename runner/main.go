@@ -21,10 +21,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -43,22 +45,47 @@ type Config struct {
 	WorkspaceDir  string
 	Home          string
 	ProcNet       string
+	// Where a box's login shells read the project's secrets from.
+	SecretsProfile string
 }
 
 func configFromEnv() (Config, error) {
 	cfg := Config{
-		RunnerURL:     os.Getenv("KRATER_RUNNER_URL"),
-		Token:         os.Getenv("KRATER_JOB_TOKEN"),
-		CheckpointDir: envOr("KRATER_CHECKPOINT_DIR", "/krater/checkpoints"),
-		OutputDir:     envOr("KRATER_OUTPUT_DIR", "/krater/outputs"),
-		WorkspaceDir:  envOr("KRATER_WORKSPACE_DIR", "/workspace"),
-		Home:          envOr("HOME", "/root"),
-		ProcNet:       "/proc/net",
+		RunnerURL:      os.Getenv("KRATER_RUNNER_URL"),
+		Token:          os.Getenv("KRATER_JOB_TOKEN"),
+		CheckpointDir:  envOr("KRATER_CHECKPOINT_DIR", "/krater/checkpoints"),
+		OutputDir:      envOr("KRATER_OUTPUT_DIR", "/krater/outputs"),
+		WorkspaceDir:   envOr("KRATER_WORKSPACE_DIR", "/workspace"),
+		Home:           envOr("HOME", "/root"),
+		ProcNet:        "/proc/net",
+		SecretsProfile: "/etc/profile.d/krater-secrets.sh",
 	}
 	if cfg.RunnerURL == "" || cfg.Token == "" {
 		return cfg, errors.New("KRATER_RUNNER_URL and KRATER_JOB_TOKEN must be set")
 	}
 	return cfg, nil
+}
+
+// SetupFailed is the exit code the runner reports when it can't prepare the machine (it couldn't make its
+// directories), so Krater ends the job at once instead of waiting for a heartbeat deadline.
+const SetupFailed = 125
+
+// usableDir makes `dir` and returns it or, when the image's user may not create it (a non-root USER can't make
+// /krater), the same name under `fallbackBase`.
+func usableDir(dir, fallbackBase string) (string, error) {
+	err := os.MkdirAll(dir, 0o755)
+	if err == nil {
+		return dir, nil
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		return "", err
+	}
+	alt := filepath.Join(fallbackBase, "krater", filepath.Base(dir))
+	if err := os.MkdirAll(alt, 0o755); err != nil {
+		return "", fmt.Errorf("can't create %s or %s: %w", dir, alt, err)
+	}
+	logf("this user can't create %s; using %s", dir, alt)
+	return alt, nil
 }
 
 func envOr(name, fallback string) string {
@@ -98,10 +125,13 @@ func Run(ctx context.Context, cfg Config, apiHTTP, storageHTTP *http.Client, gpu
 	}
 	logf("job %s, attempt %d, resumed=%v", info.JobID, info.Attempt, info.Resumed)
 
-	for _, dir := range []string{cfg.CheckpointDir, cfg.OutputDir} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return -1, err
+	for _, dir := range []*string{&cfg.CheckpointDir, &cfg.OutputDir} {
+		usable, err := usableDir(*dir, os.TempDir())
+		if err != nil {
+			_ = api.Exit(ctx, SetupFailed)
+			return SetupFailed, err
 		}
+		*dir = usable
 	}
 	checkpoints := NewSyncer(api, "checkpoints", cfg.CheckpointDir, storageHTTP)
 	outputs := NewSyncer(api, "outputs", cfg.OutputDir, storageHTTP)
@@ -112,14 +142,24 @@ func Run(ctx context.Context, cfg Config, apiHTTP, storageHTTP *http.Client, gpu
 	}
 
 	if info.Kind == "box" {
+		if cfg.SecretsProfile != "" {
+			if err := writeSecretsProfile(cfg.SecretsProfile, info.Secrets); err != nil {
+				logf("could not write the project's secrets for login shells: %v", err)
+			} else if n := len(secretEnv(info.Secrets)); n > 0 {
+				logf("%d project secrets for login shells", n)
+			}
+		}
 		if err := writeAuthorizedKeys(cfg.Home, info.SSHKeys); err != nil {
 			logf("could not write authorized_keys: %v", err)
 		} else {
 			logf("installed %d SSH keys", len(info.SSHKeys))
 		}
-		if err := os.MkdirAll(cfg.WorkspaceDir, 0o755); err != nil {
-			return -1, err
+		workspaceDir, err := usableDir(cfg.WorkspaceDir, os.TempDir())
+		if err != nil {
+			_ = api.Exit(ctx, SetupFailed)
+			return SetupFailed, err
 		}
+		cfg.WorkspaceDir = workspaceDir
 		workspace := NewSyncer(api, "workspace", cfg.WorkspaceDir, storageHTTP)
 		if n, err := workspace.Restore(ctx); err != nil {
 			logf("restoring /workspace failed: %v", err)
@@ -136,7 +176,11 @@ func Run(ctx context.Context, cfg Config, apiHTTP, storageHTTP *http.Client, gpu
 
 	cmd := exec.Command("sh", "-c", info.Command)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	cmd.Env = append(os.Environ(),
+	secrets := secretEnv(info.Secrets)
+	if len(secrets) > 0 {
+		logf("%d project secrets in the command's environment", len(secrets))
+	}
+	cmd.Env = append(append(os.Environ(), secrets...),
 		"KRATER_RESUMED="+boolEnv(info.Resumed),
 		"KRATER_CHECKPOINT_DIR="+cfg.CheckpointDir,
 		"KRATER_OUTPUT_DIR="+cfg.OutputDir,
