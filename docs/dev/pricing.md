@@ -145,3 +145,14 @@ basis/margin to price. The computed breakdown (including which `refreshed_at` sn
 what gets stored on `ProjectRevision.budget_estimate` when the submitter used the estimator, and it's
 recomputed again, from scratch, at draft-save time — a tampered rate in a resubmitted form changes
 nothing.
+
+## Estimator: Krater's own Vast samples first
+
+Once Krater Compute's worker has a Vast key, it samples Vast every 10 minutes (`krater.services.price_history`). The
+estimator uses those samples instead of the catalog for a GPU that has at least a day of them in the last 7 days: the
+rate is the median of the samples' median full hourly prices (32 GB of disk included) for the chosen basis (`spot` =
+interruptible bids, `on_demand`), a typical price rather than the catalog's cheapest spot offer. Catalog names are
+matched to Vast's ignoring spaces and dashes, with Vast's `SXM`/`PCIE`/`NVL` variants counting as the catalog's GPU
+(never `Ti`, which is a different card). The stored estimate records `rate_source` (`krater_samples` or `catalog`);
+estimates stored before that field read as the catalog. With production compute off and no key in the worker, there
+are no samples and the estimator keeps using the catalog.
