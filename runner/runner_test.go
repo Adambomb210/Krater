@@ -27,6 +27,11 @@ type fakeKrater struct {
 	resumed   bool
 	partBytes int64
 	stopAfter int // heartbeats before answering stop (0 = never)
+	kind      string
+	sshKeys   []string
+	syncAt    int // answer sync on this heartbeat (0 = never)
+	refuse    string
+	synced    int
 
 	mu         sync.Mutex
 	objects    map[string][]byte // "area/name" -> content
@@ -76,11 +81,21 @@ func (f *fakeKrater) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "/runner/v1/start":
 		f.starts++
+		kind := f.kind
+		if kind == "" {
+			kind = "job"
+		}
 		f.writeJSON(w, map[string]any{"job_id": "j1", "attempt": 1, "resumed": f.resumed, "command": f.command,
-			"kind": "job", "heartbeat_seconds": 1, "checkpoint_sync_seconds": 1})
+			"kind": kind, "ssh_keys": f.sshKeys, "heartbeat_seconds": 1, "checkpoint_sync_seconds": 3600})
 	case path == "/runner/v1/heartbeat":
 		f.heartbeats = append(f.heartbeats, body)
-		f.writeJSON(w, map[string]any{"stop": f.stopAfter > 0 && len(f.heartbeats) >= f.stopAfter})
+		f.writeJSON(w, map[string]any{
+			"stop": f.stopAfter > 0 && len(f.heartbeats) >= f.stopAfter,
+			"sync": f.syncAt > 0 && len(f.heartbeats) == f.syncAt,
+		})
+	case path == "/runner/v1/synced":
+		f.synced++
+		f.writeJSON(w, map[string]any{"ok": true})
 	case path == "/runner/v1/exit":
 		f.exitCodes = append(f.exitCodes, int(body["exit_code"].(float64)))
 		f.writeJSON(w, map[string]any{"state": "done"})
@@ -97,6 +112,11 @@ func (f *fakeKrater) handle(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/upload"):
 		area := strings.Split(path, "/")[4]
 		name := body["name"].(string)
+		if name == f.refuse {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			f.writeJSON(w, map[string]any{"error": "quota"})
+			return
+		}
 		size := int64(body["size"].(float64))
 		key := area + "/" + name
 		if size <= f.partBytes {
@@ -286,4 +306,67 @@ func keys(m map[string][]byte) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func TestABoxInstallsKeysCountsSessionsAndSavesItsWorkspaceWhenAsked(t *testing.T) {
+	f := newFakeKrater(t)
+	f.kind = "box"
+	f.sshKeys = []string{"ssh-ed25519 AAAAC3Nza", "evil\nssh-rsa injected", "ssh-ed25519 AAAA with-comment"}
+	f.syncAt = 2
+	f.objects["workspace/notes.txt"] = []byte("old notes")
+	cfg := f.cfg(t)
+	cfg.Home = t.TempDir()
+	cfg.WorkspaceDir = t.TempDir()
+	cfg.ProcNet = t.TempDir()
+	// One established SSH session (local port 22 = 0x0016, state 01) and one listening socket.
+	os.WriteFile(filepath.Join(cfg.ProcNet, "tcp"), []byte(
+		"  sl  local_address rem_address   st\n"+
+			"   0: 00000000:0016 00000000:0000 0A\n"+
+			"   1: 0100007F:0016 0200007F:D431 01\n"), 0o644)
+	ctx, cancel := context.WithTimeout(context.Background(), 3500*time.Millisecond)
+	defer cancel()
+	go func() {
+		// The member edits a file while the box runs.
+		time.Sleep(500 * time.Millisecond)
+		os.WriteFile(filepath.Join(cfg.WorkspaceDir, "notes.txt"), []byte("new notes"), 0o644)
+	}()
+
+	code, err := Run(ctx, cfg, http.DefaultClient, http.DefaultClient, noGPU)
+
+	if err != nil || code != 0 {
+		t.Fatalf("Run = %d, %v", code, err)
+	}
+	keys, _ := os.ReadFile(filepath.Join(cfg.Home, ".ssh", "authorized_keys"))
+	if string(keys) != "ssh-ed25519 AAAAC3Nza\n" {
+		t.Errorf("authorized_keys = %q", keys)
+	}
+	info, _ := os.Stat(filepath.Join(cfg.Home, ".ssh", "authorized_keys"))
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("authorized_keys mode %v", info.Mode().Perm())
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.heartbeats[0]["sessions"] != 1.0 {
+		t.Errorf("first heartbeat %v", f.heartbeats[0])
+	}
+	if f.synced != 1 || string(f.objects["workspace/notes.txt"]) != "new notes" {
+		t.Errorf("synced %d, workspace %q", f.synced, f.objects["workspace/notes.txt"])
+	}
+}
+
+func TestOneRefusedFileDoesNotStopTheOthers(t *testing.T) {
+	f := newFakeKrater(t)
+	cfg := f.cfg(t)
+	os.MkdirAll(cfg.CheckpointDir, 0o755)
+	os.WriteFile(filepath.Join(cfg.CheckpointDir, "a.pt"), []byte("a"), 0o644)
+	os.WriteFile(filepath.Join(cfg.CheckpointDir, "b.pt"), []byte("b"), 0o644)
+	api := &API{BaseURL: f.server.URL, Token: f.token, HTTP: http.DefaultClient}
+	s := NewSyncer(api, "checkpoints", cfg.CheckpointDir, http.DefaultClient)
+	f.refuse = "a.pt"
+
+	n, err := s.Push(context.Background())
+
+	if n != 1 || err == nil || string(f.objects["checkpoints/b.pt"]) != "b" {
+		t.Errorf("Push = %d, %v; objects %v", n, err, keys(f.objects))
+	}
 }

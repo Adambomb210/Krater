@@ -21,13 +21,20 @@ type API struct {
 
 // StartInfo is Krater's answer to /start.
 type StartInfo struct {
-	JobID                 string `json:"job_id"`
-	Attempt               int    `json:"attempt"`
-	Resumed               bool   `json:"resumed"`
-	Command               string `json:"command"`
-	Kind                  string `json:"kind"`
-	HeartbeatSeconds      int    `json:"heartbeat_seconds"`
-	CheckpointSyncSeconds int    `json:"checkpoint_sync_seconds"`
+	JobID                 string   `json:"job_id"`
+	Attempt               int      `json:"attempt"`
+	Resumed               bool     `json:"resumed"`
+	Command               string   `json:"command"`
+	Kind                  string   `json:"kind"`
+	SSHKeys               []string `json:"ssh_keys"`
+	HeartbeatSeconds      int      `json:"heartbeat_seconds"`
+	CheckpointSyncSeconds int      `json:"checkpoint_sync_seconds"`
+}
+
+// Reply is Krater's answer to a heartbeat.
+type Reply struct {
+	Stop bool `json:"stop"` // the job has ended
+	Sync bool `json:"sync"` // save /workspace and confirm: Krater is about to stop the box
 }
 
 // RemoteFile is one stored checkpoint or output.
@@ -99,13 +106,25 @@ func (a *API) Start(ctx context.Context) (*StartInfo, error) {
 
 // Heartbeat reports the machine's state; it returns true when Krater wants the job stopped.
 func (a *API) Heartbeat(ctx context.Context, beat map[string]any) (bool, error) {
-	var out struct {
-		Stop bool `json:"stop"`
-	}
-	if err := a.post(ctx, "/heartbeat", beat, &out); err != nil {
+	reply, err := a.HeartbeatReply(ctx, beat)
+	if err != nil {
 		return false, err
 	}
-	return out.Stop, nil
+	return reply.Stop, nil
+}
+
+// HeartbeatReply reports the machine's state and returns all of Krater's answer.
+func (a *API) HeartbeatReply(ctx context.Context, beat map[string]any) (*Reply, error) {
+	var out Reply
+	if err := a.post(ctx, "/heartbeat", beat, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Synced confirms /workspace was saved.
+func (a *API) Synced(ctx context.Context) error {
+	return a.post(ctx, "/synced", nil, nil)
 }
 
 // Exit reports the command's exit code.

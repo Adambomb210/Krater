@@ -28,6 +28,22 @@ The runner then:
    `/krater/outputs`) when the command exits;
 6. reports the exit code. The scheduler destroys the machine on its next pass.
 
+## Boxes
+
+A box launches in Vast's SSH mode (`runtype: ssh_direct`): Vast's own init runs sshd and is the main process, and the
+bootstrap runs as its startup script, starting the runner in the background. The runner then:
+
+1. writes the box owner's SSH keys (from `/start`) as the whole of `~/.ssh/authorized_keys` (0600, `.ssh` 0700);
+2. restores `/workspace` (`$KRATER_WORKSPACE_DIR`) from the job's stored workspace;
+3. sends a heartbeat every minute with GPU use and the number of established connections to port 22, read from
+   `/proc/net/tcp` and `tcp6`;
+4. saves `/workspace` every 10 minutes, and when a heartbeat reply says `sync` (Krater is about to stop the box),
+   then confirms with `POST /runner/v1/synced`.
+
+Pending the paid check: that Vast runs the startup script in SSH mode, what Vast itself puts in authorized_keys, the
+22/tcp mapping, and what it does with a `JUPYTER_TOKEN` Krater sets. Krater refuses to start boxes while the Vast
+account has any SSH keys, since Vast may install them in every instance.
+
 ## What a member's job sees
 
 | Variable | Meaning |

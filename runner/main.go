@@ -40,6 +40,9 @@ type Config struct {
 	Token         string
 	CheckpointDir string
 	OutputDir     string
+	WorkspaceDir  string
+	Home          string
+	ProcNet       string
 }
 
 func configFromEnv() (Config, error) {
@@ -48,6 +51,9 @@ func configFromEnv() (Config, error) {
 		Token:         os.Getenv("KRATER_JOB_TOKEN"),
 		CheckpointDir: envOr("KRATER_CHECKPOINT_DIR", "/krater/checkpoints"),
 		OutputDir:     envOr("KRATER_OUTPUT_DIR", "/krater/outputs"),
+		WorkspaceDir:  envOr("KRATER_WORKSPACE_DIR", "/workspace"),
+		Home:          envOr("HOME", "/root"),
+		ProcNet:       "/proc/net",
 	}
 	if cfg.RunnerURL == "" || cfg.Token == "" {
 		return cfg, errors.New("KRATER_RUNNER_URL and KRATER_JOB_TOKEN must be set")
@@ -105,8 +111,25 @@ func Run(ctx context.Context, cfg Config, apiHTTP, storageHTTP *http.Client, gpu
 		logf("restored %d checkpoint files", n)
 	}
 
+	if info.Kind == "box" {
+		if err := writeAuthorizedKeys(cfg.Home, info.SSHKeys); err != nil {
+			logf("could not write authorized_keys: %v", err)
+		} else {
+			logf("installed %d SSH keys", len(info.SSHKeys))
+		}
+		if err := os.MkdirAll(cfg.WorkspaceDir, 0o755); err != nil {
+			return -1, err
+		}
+		workspace := NewSyncer(api, "workspace", cfg.WorkspaceDir, storageHTTP)
+		if n, err := workspace.Restore(ctx); err != nil {
+			logf("restoring /workspace failed: %v", err)
+		} else if n > 0 {
+			logf("restored %d workspace files", n)
+		}
+		runBox(ctx, api, info, workspace, gpu, cfg.ProcNet)
+		return 0, nil
+	}
 	if info.Command == "" {
-		// A box with nothing to run: keep reporting until Krater stops it.
 		heartbeatLoop(ctx, api, seconds(info.HeartbeatSeconds, 60), gpu, nil)
 		return 0, nil
 	}
