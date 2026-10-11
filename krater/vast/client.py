@@ -10,6 +10,10 @@ Rules learned on the live API (2026-10-11 spike; see docs/compute/vast-api.md), 
   instance). `create_instance` returns the id alone and no response body ever reaches a log or an exception.
 - Log downloads (`result_url`) live on another host: they're fetched **without** the Authorization header.
 - The org key is sent only as `Authorization: Bearer`, never in a URL.
+- Searches count against a **daily quota of rows** (20,000 for the staging account, reset at 00:00 UTC). Every search
+  answer carries `x-ratelimit-limit/remaining/reset`; the client keeps the latest as `search_quota`, and a 429 with
+  `search_quota_exceeded` raises `VastSearchQuotaError` with the reset time. The worker shares one client, so the
+  scheduler and price history see the same numbers.
 
 Only Krater's worker builds one of these: the portal never holds the Vast key.
 """
@@ -20,7 +24,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -30,9 +34,10 @@ from krater.vast.errors import (
     VastRateLimitedError,
     VastRedirectError,
     VastRequestFailedError,
+    VastSearchQuotaError,
     VastUnavailableError,
 )
-from krater.vast.types import Charge, CreateInstance, Instance, Offer, OfferQuery
+from krater.vast.types import Charge, CreateInstance, Instance, Offer, OfferQuery, SearchQuota
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +70,8 @@ class VastClient:
         # A separate client so nothing configured on the API client (headers, auth) can reach the log host.
         self._logs_http = logs_http_client if logs_http_client is not None else httpx.Client(timeout=timeout_seconds)
         self._sleep = sleep
+        #: The latest search quota Vast reported; `None` until the first search answers.
+        self.search_quota: SearchQuota | None = None
 
     def __repr__(self) -> str:
         return f"VastClient(base_url={self._base_url!r})"
@@ -73,8 +80,41 @@ class VastClient:
 
     def search_offers(self, query: OfferQuery) -> list[Offer]:
         """Offers matching `query`, cheapest `dph_total` first. Vast returns at most 512 per search."""
-        data = self._request("POST", "/api/v0/bundles/", json=query.to_body())
+        data = self._request("POST", "/api/v0/bundles/", json=query.to_body(), on_response=self._note_search_quota)
         return [Offer.from_json(raw) for raw in data.get("offers") or ()]
+
+    def _note_search_quota(self, response: httpx.Response) -> None:
+        """Keep the quota a search answer reports; on `search_quota_exceeded`, raise `VastSearchQuotaError`."""
+        headers = response.headers
+        try:
+            quota = SearchQuota(
+                limit=int(headers["x-ratelimit-limit"]),
+                remaining=int(headers["x-ratelimit-remaining"]),
+                reset_at=datetime.fromtimestamp(int(headers["x-ratelimit-reset"]), tz=UTC),
+            )
+        except (KeyError, ValueError, OverflowError):
+            quota = None
+        if quota is not None:
+            self.search_quota = quota
+        if response.status_code != 429:
+            return
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict) and body.get("error") == "search_quota_exceeded":
+            if quota is None:
+                retry_after = body.get("retry_after")
+                seconds = int(retry_after) if isinstance(retry_after, int | float) else 3600
+                quota = SearchQuota(
+                    limit=int(body.get("limit") or 0),
+                    remaining=0,
+                    reset_at=datetime.fromtimestamp(time.time() + seconds, tz=UTC),
+                )
+            self.search_quota = SearchQuota(limit=quota.limit, remaining=0, reset_at=quota.reset_at)
+            raise VastSearchQuotaError(
+                f"Vast's daily search quota is used up until {quota.reset_at:%H:%M} UTC", reset_at=quota.reset_at
+            )
 
     # -- Instances -------------------------------------------------------------------------------------
 
@@ -192,7 +232,14 @@ class VastClient:
         return self._request(method, path, allow_list=True)
 
     def _request(
-        self, method: str, path: str, *, json: dict | None = None, params: dict | None = None, allow_list: bool = False
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict | None = None,
+        params: dict | None = None,
+        allow_list: bool = False,
+        on_response: Callable[[httpx.Response], None] | None = None,
     ) -> Any:
         if not path.endswith("/"):
             # Vast would answer 308 and do nothing; refuse before sending.
@@ -211,6 +258,8 @@ class VastClient:
         except httpx.HTTPError as exc:
             raise VastUnavailableError(f"could not reach Vast for {method} {path}: {type(exc).__name__}") from exc
 
+        if on_response is not None:
+            on_response(response)
         status = response.status_code
         if 300 <= status < 400:
             raise VastRedirectError(

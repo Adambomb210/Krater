@@ -28,6 +28,11 @@ minute (`compute_schedule`), under a procrastinate lock so passes never overlap,
    performance per dollar). After `max_wait_minutes` the job does what the member chose: keep waiting, accept up to
    its max price, switch to on demand up to its max price, or cancel.
 
+   Searches are paced (`search_pacing.py`), because Vast counts their rows against a daily quota
+   ([vast-api.md](vast-api.md)): 64 rows each, and a search that keeps finding nothing runs 1, 1, 2, 4, 8, then
+   every 15 minutes (an escalation is a new search, so it runs at once). Under a quarter of the quota left, every
+   15 minutes; with none left, none until the reset at 00:00 UTC, and the job's reason says so.
+
 Every price limit is also capped by the project's hourly cap. A rental needs budget for at least one hour, under
 the project's row lock; it then holds the cost of its max runtime (or whatever is left), so two jobs can't spend
 the same dollars.

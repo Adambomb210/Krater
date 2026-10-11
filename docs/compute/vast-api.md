@@ -61,7 +61,8 @@ $0.019 in all.
   `actual_status` was still empty; Vast showed `running` 30–60 s later.
 - **Charges are current while a machine runs**, as the spike found: the watchdog saw them rise every minute.
 - **Rate limit:** 36 searches in about 4 s got a 429 after 33. Paced at 1 s, a scheduler call at the same minute
-  still got one. Price history now waits 2 s between searches, and the scheduler retries on its next pass.
+  still got one. Price history now waits 2 s between searches, and the scheduler retries on its next pass. (Some of
+  these may have been the daily quota below.)
 - **A natural pause happened** after 8 minutes on a $0.0294 bid. A paused instance reads `actual_status: exited`,
   `intended_status: stopped`, `cur_state` and `next_state: stopped`, and keeps its `status_msg`. Raising the bid
   every minute up to the job's max ($0.0778, 2.6× the first bid) didn't bring it back within 30 minutes, so Krater
@@ -70,6 +71,34 @@ $0.019 in all.
   for directories it can't create, and the job passed.
 - **SSH mode** (boxes): see `runner.md`. A stop takes Vast about a minute to show (`exited`); a start on the same
   machine came back in under a minute.
+
+## The daily search quota (found 2026-10-11, round 2)
+
+Searches (`POST /api/v0/bundles/`) count against a **daily quota of rows**: 20,000 for the staging account. When
+it's used up, every search answers
+
+```
+429 {"error": "search_quota_exceeded", "msg": "Daily search row quota exhausted", "retry_after": 21527,
+     "limit": 20000, "remaining": 0}
+```
+
+with `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset` (a Unix time: 00:00 UTC) and `retry-after`
+headers, until the reset. Listing, creating and destroying instances still work; finding an offer doesn't, so Krater
+can't start anything. Staging used its quota up by 18:00 UTC: price history (36 searches every 10 minutes, about 500
+rows a run) plus scheduler searches of up to 512 rows a minute per waiting job. 20,000 rows is about 14 a minute.
+
+What Krater does about it:
+
+- The client keeps the latest `x-ratelimit-*` numbers (`VastClient.search_quota`; the worker shares one client) and
+  raises `VastSearchQuotaError`, with the reset time, for the quota 429.
+- The scheduler asks for 64 rows a search, and backs off a search that keeps finding nothing: 1, 1, 2, 4, 8, then
+  every 15 minutes (`krater/compute/search_pacing.py`). Under a quarter of the quota left, every 15 minutes; with
+  none left, no searches until the reset, and waiting jobs say so.
+- Price history runs only with compute on, hourly, and stops a run when less than half the quota is left.
+
+Still to check at a reset: whether the quota counts the rows returned or the `limit` asked for, and whether price
+filters (`min_bid`, `dph_total`) and `order` by `min_bid` work in a search. If they do, a search can ask only for
+offers under the job's price, and a job waiting for a low price costs almost nothing.
 
 ## Not checked live yet
 

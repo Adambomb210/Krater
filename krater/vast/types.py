@@ -141,6 +141,26 @@ class Offer:
 
 
 @dataclass(frozen=True)
+class SearchQuota:
+    """Vast's daily quota of search rows (staging, 2026-10-11: 20,000 a day for the account, reset at 00:00 UTC),
+    from the `x-ratelimit-*` headers of a search answer. Once `remaining` reaches 0, every search answers 429
+    `search_quota_exceeded` until `reset_at`, so Krater can't find offers and rents nothing."""
+
+    limit: int
+    remaining: int
+    reset_at: datetime
+
+    def exhausted(self, now: datetime) -> bool:
+        return self.remaining <= 0 and now < self.reset_at
+
+    def fraction_left(self, now: datetime) -> float:
+        """What's left of the quota, 1.0 once the reset has passed."""
+        if now >= self.reset_at or self.limit <= 0:
+            return 1.0
+        return max(self.remaining, 0) / self.limit
+
+
+@dataclass(frozen=True)
 class OfferQuery:
     """A search for offers. Turned into Vast's filter body by `to_body`; sorted by `dph_total` ascending
     server-side, which (at the job's own `disk_gb`) is the same order as `Offer.full_hourly` for on-demand."""

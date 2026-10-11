@@ -157,3 +157,16 @@ def test_searches_are_paced(db_session: Session) -> None:
 
     assert len(fake.search_bodies) == 4
     assert pauses == [1.0, 1.0, 1.0]  # between searches, not before the first
+
+
+def test_a_run_leaves_half_the_search_quota_to_the_scheduler(db_session: Session) -> None:
+    # Price history used up Vast's daily quota of search rows on staging (2026-10-11), and then the scheduler
+    # couldn't find an offer for anything.
+    fake = FakeVast()
+    fake.set_search_quota(100, remaining=52)
+
+    result = price_history.record(db_session, fake.client(), gpu_names=["RTX 3060", "RTX 4090"], disk_gb=32, now=NOW)
+
+    assert result.stopped_early is True
+    assert result.written == 1
+    assert len(fake.search_bodies) == 1

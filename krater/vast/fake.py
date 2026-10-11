@@ -139,6 +139,8 @@ class FakeVast:
         self.account_ssh_keys: list[dict[str, Any]] = []
         self._ids = itertools.count(55_000_001)
         self._failures: list[int] = []
+        #: Vast's daily search-row quota, off until `set_search_quota`: (limit, rows left, reset as a Unix time).
+        self.search_quota: tuple[int, int, int] | None = None
 
     # -- Wiring ----------------------------------------------------------------------------------------
 
@@ -183,6 +185,11 @@ class FakeVast:
                 "items": items,
             }
         )
+
+    def set_search_quota(self, limit: int, *, remaining: int | None = None, reset_at: int = 1_791_763_200) -> None:
+        """Count search rows against a daily quota, as the live API does: each answer carries `x-ratelimit-*` headers
+        and costs the rows it returns; with none left, searches answer 429 `search_quota_exceeded`."""
+        self.search_quota = (limit, limit if remaining is None else remaining, reset_at)
 
     def fail_next(self, status_code: int, times: int = 1) -> None:
         """Answer the next `times` API requests with `status_code` (429, 500, ...) and do nothing else."""
@@ -249,6 +256,19 @@ class FakeVast:
 
     def _search(self, body: dict[str, Any]) -> httpx.Response:
         self.search_bodies.append(body)
+        if self.search_quota is not None and self.search_quota[1] <= 0:
+            limit, _, reset_at = self.search_quota
+            return httpx.Response(
+                429,
+                headers=self._quota_headers(),
+                json={
+                    "error": "search_quota_exceeded",
+                    "msg": "Daily search row quota exhausted",
+                    "retry_after": 3600,
+                    "limit": limit,
+                    "remaining": 0,
+                },
+            )
         storage = float(body.get("allocated_storage", DEFAULT_ALLOCATED_STORAGE))
         results = []
         for offer in self.offers.values():
@@ -261,7 +281,16 @@ class FakeVast:
             results.append(priced)
         results.sort(key=lambda o: o["dph_total"])
         limit = min(int(body.get("limit", 64)), SEARCH_RESULT_CAP)
-        return httpx.Response(200, json={"offers": results[:limit]})
+        if self.search_quota is not None:
+            quota_limit, left, reset_at = self.search_quota
+            self.search_quota = (quota_limit, max(left - len(results[:limit]), 0), reset_at)
+        return httpx.Response(200, headers=self._quota_headers(), json={"offers": results[:limit]})
+
+    def _quota_headers(self) -> dict[str, str]:
+        if self.search_quota is None:
+            return {}
+        limit, left, reset_at = self.search_quota
+        return {"x-ratelimit-limit": str(limit), "x-ratelimit-remaining": str(left), "x-ratelimit-reset": str(reset_at)}
 
     def _create(self, offer_id: int, body: dict[str, Any]) -> httpx.Response:
         offer = self.offers.get(offer_id)

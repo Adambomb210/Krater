@@ -17,6 +17,7 @@ from krater.vast.errors import (
     VastRateLimitedError,
     VastRedirectError,
     VastRequestFailedError,
+    VastSearchQuotaError,
     VastUnavailableError,
 )
 from krater.vast.fake import FakeVast
@@ -28,6 +29,7 @@ from krater.vast.types import (
     Offer,
     OfferQuery,
     RentalType,
+    SearchQuota,
     microusd_to_usd,
     usd_to_microusd,
 )
@@ -43,11 +45,13 @@ __all__ = [
     "Offer",
     "OfferQuery",
     "RentalType",
+    "SearchQuota",
     "VastClient",
     "VastError",
     "VastRateLimitedError",
     "VastRedirectError",
     "VastRequestFailedError",
+    "VastSearchQuotaError",
     "VastUnavailableError",
     "build_vast_client",
     "get_vast_client",

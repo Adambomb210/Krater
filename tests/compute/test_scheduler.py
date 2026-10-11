@@ -11,6 +11,7 @@ import pytest
 import sqlalchemy as sa
 
 from krater.compute import scheduler
+from krater.compute.search_pacing import SearchPacer
 from krater.config import Settings, get_settings
 from krater.models import (
     ComputeEscalation,
@@ -268,6 +269,69 @@ def test_after_max_wait_a_job_can_cancel(db_session, member, project, client) ->
 
 
 # -- Lost creates and the sweep ----------------------------------------------------------------------------
+
+
+# -- Vast's daily search quota (staging, 2026-10-11) ----------------------------------------------------
+
+
+def _paced_pass(db_session, client, pacer, now) -> scheduler.PassResult:
+    return scheduler.run_pass(db_session, client, SETTINGS, now=now, runner_sha256=RUNNER_SHA, pacer=pacer)
+
+
+def test_searches_ask_for_a_limited_number_of_rows(db_session, member, project, client, fake) -> None:  # noqa: F811
+    _submit(db_session, member, project, target_microusd=50_000)
+
+    _pass(db_session, client)
+
+    assert fake.search_bodies[0]["limit"] == scheduler.SEARCH_LIMIT
+
+
+def test_a_waiting_job_is_searched_for_less_and_less_often(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job = _submit(db_session, member, project, target_microusd=50_000)
+    pacer = SearchPacer()
+
+    searched = []
+    for minute in range(10):
+        before = len(fake.search_bodies)
+        _paced_pass(db_session, client, pacer, NOW + timedelta(minutes=minute, seconds=2))
+        if len(fake.search_bodies) > before:
+            searched.append(minute)
+
+    assert searched == [0, 1, 2, 4, 8]
+    assert job.state is ComputeJobState.QUEUED
+    assert "cheapest now $0.0638/h" in job.state_reason  # the reason from its last search stays
+
+
+def test_an_escalated_job_searches_at_once(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job = _submit(
+        db_session, member, project, target_microusd=40_000, max_wait_minutes=3, on_max_wait=ComputeEscalation.RAISE_BID
+    )
+    pacer = SearchPacer()
+    for minute in range(3):  # searched at 0, 1 and 2; the next would be at 4
+        _paced_pass(db_session, client, pacer, NOW + timedelta(minutes=minute, seconds=2))
+    assert job.state is ComputeJobState.QUEUED
+
+    _paced_pass(db_session, client, pacer, NOW + timedelta(minutes=3, seconds=2))
+
+    assert job.state is ComputeJobState.STARTING
+
+
+def test_with_the_search_quota_used_up_jobs_wait_for_the_reset(db_session, member, project, client, fake) -> None:  # noqa: F811
+    fake.set_search_quota(20_000, remaining=0, reset_at=int(datetime(2026, 10, 12, tzinfo=UTC).timestamp()))
+    job = _submit(db_session, member, project)
+    pacer = SearchPacer()
+
+    result = _paced_pass(db_session, client, pacer, NOW)
+
+    assert result.errors == 0
+    assert job.state is ComputeJobState.QUEUED
+    assert "search quota is used up until 00:00 UTC" in job.state_reason
+    _paced_pass(db_session, client, pacer, NOW + timedelta(minutes=5))
+    assert len(fake.search_bodies) == 1  # nothing more is asked of Vast until the reset
+
+    fake.set_search_quota(20_000, reset_at=int(datetime(2026, 10, 13, tzinfo=UTC).timestamp()))
+    _paced_pass(db_session, client, pacer, datetime(2026, 10, 12, 0, 1, tzinfo=UTC))
+    assert job.state is ComputeJobState.STARTING
 
 
 def _timing_out_client(fake: FakeVast) -> VastClient:

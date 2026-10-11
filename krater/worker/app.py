@@ -15,6 +15,7 @@ from krater.compute import launch as compute_launch
 from krater.compute import reconcile as compute_reconciler
 from krater.compute import scheduler as compute_scheduler
 from krater.compute import storage_cleanup as compute_storage
+from krater.compute.search_pacing import SearchPacer
 from krater.config import get_settings
 from krater.db import get_sessionmaker
 from krater.models import Project, ProjectRevision
@@ -80,14 +81,19 @@ def pricing_refresh(timestamp: int) -> None:
 
 # --------------------------------------------------------------------------------------------------
 # Krater Compute: Krater's own Vast price history. See `krater.services.price_history`. Only the worker
-# holds a Vast client; without a usable one (no key, or the fake in production) this does nothing.
+# holds a Vast client; without a usable one (no key, or the fake in production), or with compute off, this does
+# nothing: its searches count against the same daily quota the scheduler needs.
 # --------------------------------------------------------------------------------------------------
 
 
 def _price_history_cron() -> str:
-    """`*/N * * * *` from `price_history_interval_minutes`, built at import time: a change
-    takes effect when the worker restarts."""
-    return f"*/{get_settings().price_history_interval_minutes} * * * *"
+    """The cron for `price_history_interval_minutes` (a divisor of 60, or whole hours), built at import time: a
+    change takes effect when the worker restarts. Runs at 5 past, away from the hourly tasks."""
+    minutes = get_settings().price_history_interval_minutes
+    if minutes >= 60:
+        hours = minutes // 60
+        return "5 * * * *" if hours == 1 else f"5 */{hours} * * *"
+    return f"*/{minutes} * * * *"
 
 
 #: Seconds between price-history searches: 36 searches take about 75 s, leaving the scheduler room under Vast's
@@ -99,10 +105,12 @@ PRICE_HISTORY_SEARCH_PAUSE_SECONDS = 2.0
 @app.task(name="price_history_record")
 def price_history_record(timestamp: int) -> None:
     """Sample Vast's prices for the tracked GPU models. Fails soft: a failed run leaves a gap in the history."""
+    settings = get_settings()
+    if settings.compute_mode != "vast":
+        return
     client = get_vast_client()
     if client is None:
         return
-    settings = get_settings()
     session = get_sessionmaker()()
     try:
         result = price_history.record(
@@ -128,6 +136,9 @@ def price_history_record(timestamp: int) -> None:
         session.close()
 
 
+#: The scheduler's memory of when it last searched for what (`krater.compute.search_pacing`), for this process.
+SEARCH_PACER = SearchPacer()
+
 #: Only one scheduler pass runs at a time, so a slow pass can't overlap the next minute's and rent twice.
 COMPUTE_SCHEDULER_LOCK = "compute_scheduler"
 
@@ -151,6 +162,7 @@ def compute_schedule(timestamp: int) -> None:
             settings,
             now=max(datetime.now(UTC), datetime.fromtimestamp(timestamp, tz=UTC)),
             runner_sha256=compute_launch.runner_sha256(settings.compute_runner_binary_path),
+            pacer=SEARCH_PACER,
         )
         if result.rented or result.destroyed or result.swept or result.errors:
             logger.info(

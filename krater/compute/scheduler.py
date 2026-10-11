@@ -14,7 +14,8 @@ Each pass, in order:
    max runtime and destroys the instances of finished jobs.
 5. **Start** queued jobs, oldest first: search offers for the job's shape, choose the cheapest at or under its
    target (or its max, after `max_wait_minutes`, as the member chose), hold its budget under the project's row
-   lock, then rent.
+   lock, then rent. Searches are paced (`krater.compute.search_pacing`): Vast's daily quota of search rows is small,
+   and a job that keeps finding nothing is searched for less and less often.
 
 Every destroy is confirmed with `show_instance(...) is None`; until then the row keeps `destroy_requested_at` and
 the next pass tries again. The pass commits as it goes (a rental's row must be durable before Vast is called), so
@@ -34,6 +35,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from krater.compute import launch, offers, runner_api, spend
+from krater.compute.search_pacing import SearchPacer
 from krater.config import Settings
 from krater.models import (
     ComputeEscalation,
@@ -58,6 +60,7 @@ from krater.vast import (
     VastError,
     VastRedirectError,
     VastRequestFailedError,
+    VastSearchQuotaError,
     VastUnavailableError,
     microusd_to_usd,
     usd_to_microusd,
@@ -77,6 +80,9 @@ IDLE_CPU_PERCENT = 10
 DESTROY_WARNING = timedelta(hours=1)
 #: `destroy_reason` of a box the member asked to start again elsewhere.
 MOVED_BY_MEMBER = "moved by member"
+#: Rows a scheduler search asks for, cheapest first: plenty to choose from, and each row counts against Vast's daily
+#: search quota.
+SEARCH_LIMIT = 64
 
 
 @dataclass
@@ -111,6 +117,10 @@ def _requeue(session: Session, job: ComputeJob, reason: str, *, now: datetime) -
     job.hold_cents = 0
 
 
+def _quota_reason(reset_at: datetime) -> str:
+    return f"Waiting: Vast's daily search quota is used up until {reset_at:%H:%M} UTC. Krater searches again then."
+
+
 def _finish(job: ComputeJob, state: ComputeJobState, reason: str, *, now: datetime) -> None:
     job.state = state
     job.state_reason = reason
@@ -120,7 +130,14 @@ def _finish(job: ComputeJob, state: ComputeJobState, reason: str, *, now: dateti
 
 class Scheduler:
     def __init__(
-        self, session: Session, client: VastClient, settings: Settings, *, now: datetime, runner_sha256: str | None
+        self,
+        session: Session,
+        client: VastClient,
+        settings: Settings,
+        *,
+        now: datetime,
+        runner_sha256: str | None,
+        pacer: SearchPacer | None = None,
     ) -> None:
         self.session = session
         self.client = client
@@ -133,6 +150,10 @@ class Scheduler:
         self.result = PassResult()
         self._policies: dict = {}
         self._ssh_keys_on_account: bool | None = None
+        # Without the worker's pacer (tests, one-off passes), every queued job is searched for.
+        self.pacer = pacer if pacer is not None else SearchPacer()
+        self._searched: set[str] = set()
+        self._rented_from: set[str] = set()
 
     # -- Entry point -----------------------------------------------------------------------------------
 
@@ -748,16 +769,25 @@ class Scheduler:
         stmt = sa.select(ComputeJob).where(ComputeJob.state == ComputeJobState.QUEUED).order_by(ComputeJob.queued_at)
         searches: dict[tuple, list[Offer]] = {}
         taken: set[int] = set()
-        for job in list(self.session.scalars(stmt)):
-            try:
-                stop = self._start_one(job, searches, taken)
-            except VastError:
-                logger.exception("krater.compute: starting job %s failed", job.id)
-                self.result.errors += 1
-                stop = True
-            self.session.commit()
-            if stop:
-                return
+        try:
+            for job in list(self.session.scalars(stmt)):
+                try:
+                    stop = self._start_one(job, searches, taken)
+                except VastSearchQuotaError as exc:
+                    logger.warning("krater.compute: %s; not searching until then", exc)
+                    job.state_reason = _quota_reason(exc.reset_at)
+                    stop = True
+                except VastError:
+                    logger.exception("krater.compute: starting job %s failed", job.id)
+                    self.result.errors += 1
+                    stop = True
+                self.session.commit()
+                if stop:
+                    return
+        finally:
+            for key in self._searched:
+                self.pacer.searched(key, now=self.now, rented=key in self._rented_from)
+            self.pacer.forget_old(self.now)
 
     def _plan(self, job: ComputeJob) -> tuple[RentalType, int] | None:
         """(rental type, price limit) for this pass, after any escalation. `None` cancels the job."""
@@ -805,10 +835,20 @@ class Scheduler:
             disk_gb=job.disk_gb,
             min_reliability=policy.reliability_floor,
             min_direct_ports=1 if job.kind is ComputeJobKind.BOX else 0,
+            limit=SEARCH_LIMIT,
         )
         key = json.dumps(query.to_body(), sort_keys=True)
+        # The price is part of what's paced: an escalated job (a higher limit) searches at once.
+        pace_key = f"{key}|{rental_type}|{limit}"
         if key not in searches:
+            quota = self.client.search_quota
+            if quota is not None and quota.exhausted(self.now):
+                job.state_reason = _quota_reason(quota.reset_at)
+                return False
+            if not self.pacer.due(pace_key, now=self.now, quota=quota):
+                return False  # it keeps the reason from its last search
             searches[key] = self.client.search_offers(query)
+        self._searched.add(pace_key)
         found = searches[key]
         choice = offers.choose(
             found,
@@ -844,6 +884,7 @@ class Scheduler:
             )
             return False
         run_cents = math.ceil(choice.full_microusd * job.max_runtime_minutes / 60 / MICROUSD_PER_CENT)
+        self._rented_from.add(pace_key)
         return self._rent(job, choice, hold_cents=min(run_cents, available), taken=taken)
 
     def _held_cents(self, project: Project, *, exclude: ComputeJob) -> int:
@@ -967,6 +1008,12 @@ class Scheduler:
 
 
 def run_pass(
-    session: Session, client: VastClient, settings: Settings, *, now: datetime, runner_sha256: str | None
+    session: Session,
+    client: VastClient,
+    settings: Settings,
+    *,
+    now: datetime,
+    runner_sha256: str | None,
+    pacer: SearchPacer | None = None,
 ) -> PassResult:
-    return Scheduler(session, client, settings, now=now, runner_sha256=runner_sha256).run()
+    return Scheduler(session, client, settings, now=now, runner_sha256=runner_sha256, pacer=pacer).run()

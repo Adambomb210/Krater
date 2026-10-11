@@ -8,6 +8,8 @@ key, so bodies are not safe to log.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 
 class VastError(Exception):
     """Base class for every error raised by `krater.vast`."""
@@ -19,6 +21,15 @@ class VastUnavailableError(VastError):
 
 class VastRateLimitedError(VastUnavailableError):
     """Vast answered 429. Back off before the next call."""
+
+
+class VastSearchQuotaError(VastRateLimitedError):
+    """Vast's daily quota of search rows is used up (429 `search_quota_exceeded`): no search works until
+    `reset_at`. Other calls (listing, creating, destroying) still do."""
+
+    def __init__(self, message: str, *, reset_at: datetime) -> None:
+        super().__init__(message)
+        self.reset_at = reset_at
 
 
 class VastRequestFailedError(VastError):
