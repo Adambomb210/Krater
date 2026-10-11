@@ -26,6 +26,7 @@ from krater.web.routers import (
     account,
     admin,
     auth,
+    compute,
     compute_admin,
     gallery,
     pages,
@@ -103,6 +104,7 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(account.router)
     app.include_router(compute_admin.router)
+    app.include_router(compute.router)
     app.include_router(runner.router)
     app.include_router(gallery.router)
     app.include_router(pricing.router)
