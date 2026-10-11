@@ -7,8 +7,8 @@ spend is the sum of its jobs, written as a `SpendSnapshot` (`vast_estimate`) whe
 the budget alerts and Quilt's `spend.recorded` events keep working as before.
 
 The estimate leaves out bandwidth, which Vast bills per GB used; hourly reconciliation with Vast's own charges
-corrects it. The estimate only ever grows here: a correction downwards stays in Krater's records and is not sent to
-Quilt until Quilt can take one (patchworklabsorg/quilt#17).
+corrects it. The estimate only ever grows here; only reconciliation lowers a total (from a finished machine's final
+charges), and Quilt gets that as `spend.corrected`.
 """
 
 from __future__ import annotations
@@ -89,13 +89,17 @@ def project_compute_spend_cents(session: Session, project: Project) -> int:
     return int(total or 0)
 
 
-def record_snapshots(session: Session, project_ids: set[uuid.UUID], *, now: datetime) -> None:
-    """Write a `vast_estimate` snapshot for each project whose compute spend grew past its latest snapshot, and queue
-    the matching Quilt event."""
+def record_snapshots(
+    session: Session, project_ids: set[uuid.UUID], *, now: datetime, allow_lower: bool = False
+) -> None:
+    """Write a `vast_estimate` snapshot for each project whose compute spend changed from its latest snapshot, and
+    queue the matching Quilt event. Only a rise, unless `allow_lower` (reconciliation, after finished machines' final
+    charges came in under the estimate)."""
     for project_id in sorted(project_ids):
         project = session.get(Project, project_id)
         total = project_compute_spend_cents(session, project)
-        if total <= budget.latest_spend_cents(session, project):
+        latest = budget.latest_spend_cents(session, project)
+        if total == latest or (total < latest and not allow_lower):
             continue
         session.add(
             SpendSnapshot(

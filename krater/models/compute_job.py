@@ -182,8 +182,7 @@ class ComputeInstance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class SpendReconciliation(UUIDPrimaryKeyMixin, Base):
-    """One project's hourly check of Vast's charges against Krater's estimate. Kept even when the corrected total is
-    lower than what Quilt was sent: Quilt takes increases only for now (patchworklabsorg/quilt#17)."""
+    """One project's hourly check of Vast's charges against Krater's estimate."""
 
     __tablename__ = "spend_reconciliations"
     __table_args__ = (sa.Index("ix_spend_reconciliations_project_id_checked_at", "project_id", "checked_at"),)

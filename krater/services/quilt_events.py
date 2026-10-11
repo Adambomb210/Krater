@@ -12,7 +12,8 @@ and adds only the difference:
 - a change of title, status, requested amount or link -> `submission.updated`, with the changed fields;
 - each `BudgetEntry` not yet reported -> `budget.committed` (a positive amount) or `budget.released` (a
   negative one), in ledger order;
-- a change of the latest `SpendSnapshot` -> `spend.recorded`, with the cumulative total.
+- a higher latest `SpendSnapshot` -> `spend.recorded`, with the cumulative total; a lower one (only Krater
+  Compute's reconciliation with Vast's charges lowers a total) -> `spend.corrected`, with a reason.
 
 Because it is a diff, calling it again changes nothing, and the backfill (`backfill_all`) is the same
 function run over every project. Event ids are uuid5 values from the source rows, so the backfill and the
@@ -57,6 +58,10 @@ SUBMISSION_UPDATED = "submission.updated"
 BUDGET_COMMITTED = "budget.committed"
 BUDGET_RELEASED = "budget.released"
 SPEND_RECORDED = "spend.recorded"
+SPEND_CORRECTED = "spend.corrected"
+
+#: Why a total went down. Only reconciliation with Vast's final charges lowers one (`krater.compute.reconcile`).
+SPEND_CORRECTION_REASON = "Reconciled with Vast's charges for machines that have finished."
 
 #: The namespace of every Krater event id. Never change it: Quilt matches retries and the backfill by id.
 EVENT_ID_NAMESPACE = uuid.UUID("6f1d2c1e-4b7a-5f0e-9c3d-2a8b7e6f5d40")
@@ -84,7 +89,7 @@ class _Replay:
     updated_count: int = 0
     remaining_cents: int = 0  # Quilt's remaining commitment: committed - released - spend drawdown
     spend_total_cents: int | None = None  # the last total sent
-    spend_high_cents: int = 0  # Quilt keeps the highest total it has seen
+    spend_high_cents: int = 0  # Quilt's spend total: the highest recorded, or the last corrected
     overspend_cents: int = 0  # spend above the commitment; Quilt's next commitment covers it first
     reported_ids: frozenset[uuid.UUID] = frozenset()
 
@@ -128,6 +133,22 @@ def _replay(session: Session, external_id: str) -> _Replay:
                 replay.remaining_cents -= drawdown
                 replay.overspend_cents += increase - drawdown
                 replay.spend_high_cents = total
+            replay.spend_total_cents = total
+        elif row.type == SPEND_CORRECTED:
+            # Quilt's rules (its docs/patch-api.md): up is like `spend.recorded`; down by D takes D off the overspend
+            # first, and gives the rest back to the remaining commitment.
+            total = data["spent_cents_total"]
+            change = total - replay.spend_high_cents
+            if change > 0:
+                drawdown = min(change, replay.remaining_cents)
+                replay.remaining_cents -= drawdown
+                replay.overspend_cents += change - drawdown
+            elif change < 0:
+                cut = -change
+                from_overspend = min(cut, replay.overspend_cents)
+                replay.overspend_cents -= from_overspend
+                replay.remaining_cents += cut - from_overspend
+            replay.spend_high_cents = total
             replay.spend_total_cents = total
     replay.reported_ids = frozenset(reported)
     return replay
@@ -268,14 +289,27 @@ def sync_project(session: Session, project: Project) -> None:
         .order_by(SpendSnapshot.taken_at.desc())
         .limit(1)
     ).first()
-    last_sent = replay.spend_total_cents if replay.spend_total_cents is not None else 0
-    if spend is not None and spend.estimated_spend_cents != last_sent:
+    # Compared with Quilt's total: `spend.recorded` can only raise it, `spend.corrected` (with a reason) lowers it.
+    if spend is not None and spend.estimated_spend_cents > replay.spend_high_cents:
         _enqueue(
             session,
             event_uuid=event_id("spend", spend.id),
             type=SPEND_RECORDED,
             external_id=external_id,
             data={"external_id": external_id, "spent_cents_total": spend.estimated_spend_cents},
+            occurred_at=spend.taken_at,
+        )
+    elif spend is not None and spend.estimated_spend_cents < replay.spend_high_cents:
+        _enqueue(
+            session,
+            event_uuid=event_id("spend", spend.id),
+            type=SPEND_CORRECTED,
+            external_id=external_id,
+            data={
+                "external_id": external_id,
+                "spent_cents_total": spend.estimated_spend_cents,
+                "reason": SPEND_CORRECTION_REASON,
+            },
             occurred_at=spend.taken_at,
         )
     session.flush()
@@ -442,6 +476,7 @@ __all__ = [
     "BUDGET_COMMITTED",
     "BUDGET_RELEASED",
     "EVENT_ID_NAMESPACE",
+    "SPEND_CORRECTED",
     "SPEND_RECORDED",
     "SUBMISSION_CREATED",
     "SUBMISSION_UPDATED",

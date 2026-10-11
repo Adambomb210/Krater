@@ -6,10 +6,10 @@ per project in `spend_reconciliations`. A destroyed instance takes Vast's figure
 higher, since charges for a running machine may lag, and a lower estimate would make the budget stop late. A
 difference past the project's reconciliation alert threshold writes an `AuditEvent` for admins.
 
-A corrected total above the project's latest snapshot becomes a new `vast_estimate` snapshot (and a Quilt
-`spend.recorded` event). A lower one stays in Krater's records only: Quilt takes increases only until
-patchworklabsorg/quilt#17. Charges for an instance with Krater's label prefix that Krater has no row for are logged
-as an alert too: something rented outside the scheduler.
+A corrected total becomes a new `vast_estimate` snapshot: a higher one goes to Quilt as `spend.recorded`, a lower
+one (finished machines charged less than estimated) as `spend.corrected`. Charges for a machine whose create Vast
+answered without confirming are counted against that create's job (found by label). Charges for any other instance
+with Krater's label prefix are logged as an alert: something rented outside the scheduler.
 """
 
 from __future__ import annotations
@@ -25,7 +25,15 @@ from sqlalchemy.orm import Session
 
 from krater.compute import spend
 from krater.config import Settings
-from krater.models import AuditEvent, ComputeInstance, ComputeJob, Project, SpendReconciliation
+from krater.models import (
+    AuditEvent,
+    ComputeEvent,
+    ComputeInstance,
+    ComputeInstanceState,
+    ComputeJob,
+    Project,
+    SpendReconciliation,
+)
 from krater.services import audit, compute_settings
 from krater.vast import VastClient, usd_to_microusd
 
@@ -70,6 +78,7 @@ def run(session: Session, client: VastClient, settings: Settings, *, now: dateti
             charge.amount
         )
         labels[charge.instance_id] = charge.label
+    rows.extend(_adopt_unconfirmed(session, labels, now=now))
 
     known = set(
         session.scalars(
@@ -148,9 +157,47 @@ def run(session: Session, client: VastClient, settings: Settings, *, now: dateti
         result.projects += 1
 
     session.flush()
-    spend.record_snapshots(session, set(by_project), now=now)
+    spend.record_snapshots(session, set(by_project), now=now, allow_lower=True)
     session.commit()
     return result
+
+
+def _adopt_unconfirmed(session: Session, labels: dict[int, str | None], *, now: datetime) -> list[ComputeInstance]:
+    """Give charges for a machine Vast rented although it answered the create without confirming (staging,
+    2026-10-11) to that create's row, found by its unique label, so they count against its job. The row stays
+    `create_failed`, so the scheduler's sweep still destroys the machine if it's somehow still there."""
+    by_label = {label: instance_id for instance_id, label in labels.items() if label}
+    if not by_label:
+        return []
+    rows = list(
+        session.scalars(
+            sa.select(ComputeInstance).where(
+                ComputeInstance.vast_instance_id.is_(None),
+                ComputeInstance.state == ComputeInstanceState.CREATE_FAILED,
+                ComputeInstance.label.in_(list(by_label)),
+            )
+        )
+    )
+    for row in rows:
+        row.vast_instance_id = by_label[row.label]
+        row.destroyed_at = row.destroyed_at or now
+        session.add(
+            ComputeEvent(
+                job_id=row.job_id,
+                instance_id=row.id,
+                kind="charges_found",
+                message=(
+                    f"Vast charged for instance {row.vast_instance_id} from a create it didn't confirm; counted here."
+                ),
+                payload={"vast_instance_id": row.vast_instance_id},
+                at=now,
+            )
+        )
+        logger.warning(
+            "krater.compute: charges for %s found by label %s; counted against its job", row.vast_instance_id, row.label
+        )
+    session.flush()
+    return rows
 
 
 def _resum_jobs(session: Session, job_ids: set[uuid.UUID]) -> None:
