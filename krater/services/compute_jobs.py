@@ -23,7 +23,7 @@ from krater.models import (
 from krater.models.compute_job import FINISHED_JOB_STATES
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
-from krater.services.launch_policy import LAUNCHABLE_STATUSES
+from krater.services.launch_rules import LAUNCHABLE_STATUSES
 
 MICROUSD_PER_CENT = 10_000
 _IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._\-/:@]*$")

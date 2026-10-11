@@ -141,4 +141,4 @@ def test_next_minute_counts_running_gpu_and_paused_disk(db_session, member, proj
 
     assert spend.next_minute_cents(db_session, project) == 1  # ceil($0.0638 / 60)
     assert scheduler.MICROUSD_PER_CENT == spend.MICROUSD_PER_CENT
-    assert SETTINGS.skypilot_budget_warn_percent == 80
+    assert SETTINGS.budget_warn_percent == 80

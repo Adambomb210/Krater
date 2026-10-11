@@ -14,9 +14,8 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from krater.models import GpuPrice
+from krater.pricing.catalog import FakeCatalog, GpuOffer, LiveCatalog
 from krater.services.errors import ValidationFailed
-from krater.skypilot.client import SkyPilotClient
-from krater.skypilot.types import GpuOffer
 
 #: `estimate_cost`'s `basis` values: which of a `GpuPrice` row's rates to price the estimate at.
 BASIS_ON_DEMAND = "on_demand"
@@ -89,12 +88,12 @@ def aggregate_offers(offers: list[GpuOffer]) -> list[_Aggregate]:
     return aggregates
 
 
-def refresh_prices(session: Session, client: SkyPilotClient) -> int:
+def refresh_prices(session: Session, client: LiveCatalog | FakeCatalog) -> int:
     """Fetch the current catalog, aggregate it, and atomically replace every `GpuPrice` row. Returns
     the number of `(accelerator, count)` groups written.
 
     **Fails soft**: `client.list_gpu_prices()` (and `aggregate_offers`) run to completion *before* any
-    database write, so a `SkyPilotError` from a bad fetch/parse propagates straight to the caller
+    database write, so a `CatalogError` from a bad fetch/parse propagates straight to the caller
     without touching existing rows -- the periodic task and CLI both leave last refresh's prices (and
     their `refreshed_at`) in place on failure. The delete + inserts below happen in the caller's own
     transaction (this only flushes; the caller commits), so a crash mid-write rolls back to the old

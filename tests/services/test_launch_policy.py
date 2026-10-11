@@ -17,7 +17,7 @@ from krater.services import budget, launch_policy
 from krater.services.actor import Actor
 from krater.skypilot_policy.envelope import PolicyRequest, PolicyUser
 
-SETTINGS = Settings(skypilot_autodown_idle_minutes=30, skypilot_max_hourly_cost_cents=500)
+SETTINGS = Settings(skypilot_autodown_idle_minutes=30, compute_max_hourly_cost_cents=500)
 
 
 def _request(

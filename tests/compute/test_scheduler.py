@@ -27,7 +27,7 @@ from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
 from krater.vast import FakeVast, VastClient
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
-SETTINGS = Settings(compute_mode="vast", skypilot_max_hourly_cost_cents=500)
+SETTINGS = Settings(compute_mode="vast", compute_max_hourly_cost_cents=500)
 # Disk is 32 GB everywhere. RTX 3060 offers: 1001 bids $0.055 + $0.0088 disk = $0.0638/h (cheapest),
 # 1003 $0.066 + $0.0066 = $0.0726/h, 1002 $0.0495 + $0.0351 = $0.0846/h.
 CHEAPEST_3060_FULL = 63_767

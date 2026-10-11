@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from krater.skypilot import SkyPilotUnavailableError
+from krater.pricing.catalog import CatalogError
 from krater.worker.app import app, pricing_refresh
 
 
@@ -21,7 +21,7 @@ def test_pricing_refresh_is_registered_as_a_periodic_task() -> None:
 def test_pricing_refresh_calls_through_to_the_service_function() -> None:
     with (
         patch("krater.worker.app.refresh_prices") as mock_refresh_prices,
-        patch("krater.worker.app.get_skypilot_client") as mock_get_client,
+        patch("krater.worker.app.get_price_catalog") as mock_get_client,
         patch("krater.worker.app.get_sessionmaker") as mock_get_sessionmaker,
     ):
         fake_session = mock_get_sessionmaker.return_value.return_value
@@ -37,8 +37,8 @@ def test_pricing_refresh_calls_through_to_the_service_function() -> None:
 
 def test_pricing_refresh_fails_soft_on_a_source_error() -> None:
     with (
-        patch("krater.worker.app.refresh_prices", side_effect=SkyPilotUnavailableError("down")),
-        patch("krater.worker.app.get_skypilot_client"),
+        patch("krater.worker.app.refresh_prices", side_effect=CatalogError("down")),
+        patch("krater.worker.app.get_price_catalog"),
         patch("krater.worker.app.get_sessionmaker") as mock_get_sessionmaker,
     ):
         fake_session = mock_get_sessionmaker.return_value.return_value

@@ -54,7 +54,7 @@ def pricing_index(
             "sort": sort if sort in _SORT_LABELS else pricing.DEFAULT_SORT,
             "sort_labels": _SORT_LABELS,
             "refreshed_at": pricing.last_refreshed_at(db_session),
-            "cap_cents": settings.skypilot_max_hourly_cost_cents,
+            "cap_cents": settings.compute_max_hourly_cost_cents,
         },
     )
 

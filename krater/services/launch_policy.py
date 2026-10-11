@@ -17,8 +17,9 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from krater.config import Settings
-from krater.models import Project, ProjectStatus
+from krater.models import Project
 from krater.services import budget
+from krater.services.launch_rules import LAUNCHABLE_STATUSES, hourly_cap_cents  # noqa: F401 (re-exported)
 from krater.skypilot_policy.envelope import PolicyRequest
 
 #: `request_name` values that actually reserve/consume compute, and so are the only ones subject to
@@ -61,9 +62,6 @@ ENFORCED_REQUEST_NAMES = frozenset(
 
 #: Project statuses in which compute launches are allowed. Draft/pending/changes-requested projects
 #: haven't been funded yet; completed/withdrawn ones no longer have live budget to spend.
-LAUNCHABLE_STATUSES = frozenset(
-    {ProjectStatus.APPROVED, ProjectStatus.PENDING_COMPLETION_REVIEW, ProjectStatus.COMPLETION_CHANGES_REQUESTED}
-)
 
 # SkyPilot 0.13.0's `skypilot_config.to_dict()` only fills in `active_workspace` when the user (or their
 # local config) explicitly set one -- see docs/dev/skypilot-spike.md Surprise #2. `-w default` is a
@@ -161,14 +159,6 @@ def _num_nodes(task: dict[str, Any]) -> int:
     if isinstance(value, int) and not isinstance(value, bool) and value > 1:
         return value
     return 1
-
-
-def hourly_cap_cents(project: Project, settings: Settings) -> int:
-    """The hourly price cap for one launch into `project`: its own `max_hourly_cost_cents` if an admin set
-    one, otherwise the global default (`settings.skypilot_max_hourly_cost_cents`)."""
-    if project.max_hourly_cost_cents is not None:
-        return project.max_hourly_cost_cents
-    return settings.skypilot_max_hourly_cost_cents
 
 
 def per_node_cap_dollars(task: dict[str, Any], cap_cents: int) -> float:

@@ -25,7 +25,7 @@ from krater.models import ComputeEscalation, ComputeJob, ComputeJobKind, Project
 from krater.services import compute_jobs, users
 from krater.services.compute_jobs import JobSpec
 from krater.services.errors import DomainError
-from krater.services.launch_policy import hourly_cap_cents
+from krater.services.launch_rules import hourly_cap_cents
 from krater.vast import usd_to_microusd
 
 

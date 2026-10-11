@@ -20,6 +20,7 @@ _PRODUCTION_READY: dict = {
     "weave_mode": "live",
     "weave_client_secret": "weave-client-secret",
     "skypilot_mode": "live",
+    "pricing_mode": "live",
     "skypilot_policy_token": "x" * 32,
     "slack_mode": "live",
     "slack_signing_secret": "slack-signing-secret",
@@ -55,9 +56,26 @@ def test_production_with_compute_off_needs_no_skypilot_policy_token() -> None:
 
 
 def test_production_with_compute_off_still_refuses_the_fake_price_catalog() -> None:
-    """The budget estimator's GPU prices come from SkyPilot's catalog even with compute off."""
-    with pytest.raises(ValueError, match="SKYPILOT_MODE"):
-        Settings(**{**_PRODUCTION_READY, "compute_mode": "off", "skypilot_mode": "fake"})
+    """The budget estimator's GPU prices come from the public catalog even with compute off."""
+    with pytest.raises(ValueError, match="PRICING_MODE"):
+        Settings(**{**_PRODUCTION_READY, "compute_mode": "off", "pricing_mode": "fake"})
+
+
+def test_renamed_settings_still_read_their_old_env_names(monkeypatch) -> None:
+    """A deploy can update Krater before its env file: the SKYPILOT_ names keep working for one release."""
+    monkeypatch.setenv("KRATER_SKYPILOT_MODE", "live")
+    monkeypatch.setenv("KRATER_SKYPILOT_MAX_HOURLY_COST_CENTS", "750")
+    monkeypatch.setenv("KRATER_SKYPILOT_BUDGET_WARN_PERCENT", "70")
+
+    settings = Settings()
+
+    assert (settings.pricing_mode, settings.compute_max_hourly_cost_cents, settings.budget_warn_percent) == (
+        "live",
+        750,
+        70,
+    )
+    monkeypatch.setenv("KRATER_COMPUTE_MAX_HOURLY_COST_CENTS", "900")
+    assert Settings().compute_max_hourly_cost_cents == 900  # the new name wins
 
 
 def test_production_compute_on_vast_needs_the_live_vast_api() -> None:
