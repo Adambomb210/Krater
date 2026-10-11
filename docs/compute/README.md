@@ -39,13 +39,15 @@ Refused while the Vast account has SSH keys.
 **Member UI**. `/projects/{id}/compute`: jobs and boxes, the submit form beside current prices, a job page with SSH
 details, stop/resume/move/cancel and an event log.
 
+**SkyPilot removed.** Its code, compose services, policy endpoint, reconcile task and project columns are gone. The
+public GPU catalog behind `/pricing` and the budget estimator stays (`krater/pricing/catalog.py`), and renamed settings
+still read their old `KRATER_SKYPILOT_*` names for one release.
+
 **Staging helpers**. `python -m krater.compute.submit` (queue, list, cancel from a shell) and
 `scripts/dev/compute_watchdog.py` (the independent backstop for a paid test).
 
 ## Still to do on this branch
 
-- Remove SkyPilot (code, compose services, the policy endpoint, the reconcile task, the project columns), keeping the
-  public GPU catalog the budget estimator reads until Krater's own samples replace it.
 - Not built, and needing a decision: project secrets (such as `HF_TOKEN`) encrypted at rest, and where that key lives;
   a member CLI, which needs an auth design; Slack messages for box idle and destroy warnings (they are events only).
 

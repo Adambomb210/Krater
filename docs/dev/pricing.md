@@ -1,6 +1,6 @@
 # GPU pricing: source, refresh, and how the estimator uses it
 
-> Krater no longer runs SkyPilot (removed on 2026-10-11), but `/pricing` and the budget estimator
+> Krater no longer runs SkyPilot (Krater Compute replaced it on 2026-10-11), but `/pricing` and the budget estimator
 > still read SkyPilot's public Vast catalog CSV, now through `krater/pricing/catalog.py`. The "why" below is kept as
 > written; its references to the SkyPilot integration and spike docs are history (see git).
 

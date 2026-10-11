@@ -4,9 +4,9 @@ Guidance for Claude Code (and humans) working in this repo.
 
 ## What this is
 
-Krater is the Project Ganymede portal (Patchwork Labs): proposal review, compute budget allocation/enforcement, and a
-public gallery. **Read `docs/SPEC.md` before changing behavior.** Integration contracts live in
-`docs/weave-integration.md` (sign-in and roles) and
+Krater is the Project Ganymede portal (Patchwork Labs): proposal review, compute budget allocation/enforcement, running
+members' compute on Vast.ai (Krater Compute), and a public gallery. **Read `docs/SPEC.md` before changing behavior.** Integration contracts live in
+`docs/weave-integration.md` (sign-in and roles), `docs/compute/` (renting machines and enforcing budgets) and
 `docs/quilt-integration.md` (submission and budget events to Quilt).
 
 ## Stack
@@ -29,7 +29,7 @@ uv run uvicorn krater.web.app:create_app --factory --reload   # web
 uv run procrastinate --app=krater.worker.app.app worker        # worker
 uv run pytest                             # tests (TEST_DATABASE_URL, see tests/conftest.py)
 uv run ruff check . && uv run ruff format --check .
-docker compose up --build                 # full stack: portal, worker, db
+docker compose up --build                 # full stack: portal, worker, db, storage
 ```
 
 ## Layout
@@ -43,8 +43,11 @@ krater/
   weave/           WeaveClient protocol: OIDC sign-in, directory API, role mapping, dev stub
   quilt/           Quilt patch API client and the outbox sender (the only code that knows Quilt's URLs)
   vast/            Vast.ai client and its in-memory fake (the only code that knows Vast's URLs; worker only)
+  compute/         Krater Compute: scheduler, spend, reconciliation, runner API, launch (docs/compute/)
+  pricing/         the public GPU price catalog behind /pricing and the budget estimator
   web/             FastAPI app factory, routers, deps (current user, authz), templates/, static/
   worker/          procrastinate app + tasks
+runner/            the Go runner Krater starts on each rented machine (docs/compute/runner.md)
 alembic/           migrations
 tests/             mirrors krater/ layout
 ```

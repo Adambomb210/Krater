@@ -152,7 +152,8 @@ The gate prefers Weave's `slack_member` from the fresh directory record. When We
 
 Do it in Weave: remove their Krater roles or their access to the Krater app, and revoke their tokens. The next action
 they take in Krater is refused straight away: actions never use the directory cache. Pages they already have open
-can keep showing what they could see for up to 60 seconds.
+can keep showing what they could see for up to 60 seconds. Their boxes keep their SSH keys until the box stops; an
+admin can cancel them from the project's Compute page.
 
 ## Stub mode
 

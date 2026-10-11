@@ -39,11 +39,16 @@ onto alastor takes a merge in `patchworklabsorg/infra`, then `nix flake update p
 Backups are a `krater-backup` timer (03:30 UTC) writing to `/var/lib/krater/backups`. Restore as in section 4, with
 `docker exec -i krater-db` in place of `docker compose ... exec -T db`, user and database `krater`.
 
-**No compute in this release.** Krater runs proposals, review, budgets, Slack, the gallery and Quilt events, and
-rents no machines (`KRATER_COMPUTE_MODE=off`, its only mode until Krater Compute). With nothing launched, the 80% and
-100% budget alerts never fire. `KRATER_PRICING_MODE=live` (or its old name, `KRATER_SKYPILOT_MODE`) fetches the public
-GPU catalog the budget estimator reads; it needs no server or credentials. Krater Compute's release adds the settings
-for renting machines.
+**Compute off (the first deploy).** Krater ships to production with `KRATER_COMPUTE_MODE=off`: proposals, review,
+budgets, Slack, the gallery and Quilt events, but no rented machines, until the paid checks in
+[compute/README.md](../compute/README.md) pass. With nothing launched, the 80% and 100% budget alerts never fire.
+`KRATER_PRICING_MODE=live` (or its old name, `KRATER_SKYPILOT_MODE`) fetches the public GPU catalog the budget estimator
+reads; it needs no server or credentials.
+
+**Turning compute on** later takes, in the infra module: the Vast key mounted into the worker only
+(`KRATER_VAST_API_KEY_FILE`), `KRATER_VAST_MODE=live`, `KRATER_COMPUTE_MODE=vast`, and a production
+`KRATER_COMPUTE_LABEL_PREFIX` (production refuses the default, since the scheduler destroys unknown instances with its
+prefix). The deploy's `ensure_bucket` creates the `krater-compute` bucket for checkpoints.
 
 ## 1. Before the first deploy
 
@@ -51,8 +56,8 @@ for renting machines.
 
   | Name | Serves | Setting |
   | --- | --- | --- |
-  | `krater.example.org` | the portal and Slack's endpoint | `KRATER_DOMAIN` |
-  | `storage.krater.example.org` | screenshot uploads and thumbnails | `KRATER_S3_DOMAIN` |
+  | `krater.example.org` | the portal, Slack's endpoint and the runner API | `KRATER_DOMAIN` |
+  | `storage.krater.example.org` | screenshot uploads and thumbnails, machines' checkpoints | `KRATER_S3_DOMAIN` |
 
   Leave `KRATER_S3_DOMAIN` unset if storage lives with a hosted provider (R2, B2 or S3). Its `*.localhost` default keeps
   that site unserved.
@@ -62,6 +67,9 @@ for renting machines.
     `openid profile email groups roles slack directory`.
   - A Weave superadmin creates the roles `member`, `reviewer` and `admin` on it, and gives you `member` and `admin`.
 - **Slack:** the app's interactivity URL is `https://<KRATER_DOMAIN>/slack/interactions` ([slack-setup.md](slack-setup.md)).
+- **Vast** (compute on only): the production API key, in a file only root can read, mounted into the worker alone
+  (compose: `KRATER_VAST_KEY_FILE` on the host, `KRATER_VAST_API_KEY_FILE=/run/secrets/vast_api_key`). Keep the
+  account free of SSH keys: Krater refuses to start boxes while it has any.
 
 ## 2. The env file
 
@@ -109,6 +117,8 @@ itself starts at boot. `migrate` runs once per `up` and is safe to re-run.
 ### Check it
 
 - `https://<KRATER_DOMAIN>/` loads with a valid certificate, and you can sign in with Weave in a real browser.
+- With compute on: from outside, `curl -sI https://<KRATER_DOMAIN>/runner/v1/krater-runner` returns `200`. Rented
+  machines download the runner from there, so never firewall it.
 - Upload a screenshot to a completed project. If it fails, check `KRATER_S3_PUBLIC_ENDPOINT_URL` ([storage.md](storage.md)).
 - `ls "$KRATER_BACKUP_DIR"` shows a `krater-*.dump` from the first run of `db-backup`.
 
@@ -125,6 +135,7 @@ Not covered by `db-backup`:
 
 - **Screenshots** (the `krater_storage_data` volume). They're user uploads that can't be recreated. Back up the volume,
   or move to a hosted provider (open question 1 in SPEC).
+- **Checkpoints and outputs** (the `krater-compute` bucket, same volume as screenshots).
 
 ### Restore
 
@@ -158,7 +169,8 @@ docker compose --env-file "$KRATER_ENV_FILE" exec -T db   pg_dump --format=custo
 
 ## 6. Not covered yet
 
-- **Alerting.** Nothing tells anyone when the worker fails. At least watch `docker compose logs worker` and the `db-backup` logs until a monitor exists.
+- **Alerting.** Nothing tells anyone when the worker's compute scheduler fails. With compute on, it enforces budgets.
+  At least watch `docker compose logs worker` and the `db-backup` logs until a monitor exists.
 - **Off-machine backup copies** and a screenshot volume backup (section 4).
 - **The NixOS module has never run on NixOS.** It evaluates and its units build (in a `nixos/nix` container), and
   the image builds from a GitHub commit for arm64, but nothing has started on alastor yet.

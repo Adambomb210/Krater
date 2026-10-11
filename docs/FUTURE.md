@@ -42,9 +42,9 @@ this list covers what comes after, plus loose ends from building v1.
   decision plus a small admin UI to edit the rows (today they're read-only in `/admin`).
 - **Mirroring Slack comments into Krater,** if linking to the channel turns out not to be enough.
 
-> SkyPilot was dropped on 2026-10-11; Krater Compute, Krater's own Vast layer, replaces it in its own release. The
-> notes below are from when Krater ran on SkyPilot; the donated-GPU idea would now need Krater Compute to rent from
-> more than Vast.
+> SkyPilot was replaced by Krater Compute on 2026-10-11 (see [compute/README.md](compute/README.md)). The notes
+> below are from when Krater ran on SkyPilot; the donated-GPU idea would now need Krater Compute to rent from more than
+> Vast.
 
 ## SkyPilot
 
