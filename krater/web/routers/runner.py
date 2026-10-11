@@ -19,6 +19,7 @@ from krater.compute import runner_api
 from krater.config import Settings, get_settings
 from krater.db import get_session
 from krater.models import ComputeInstance
+from krater.services import compute_settings
 from krater.services.errors import NotAllowed, ValidationFailed
 from krater.storage import StorageError, get_compute_store
 
@@ -113,7 +114,14 @@ async def begin_upload(area: str, request: Request, db_session: Annotated[Sessio
     return _files(
         request,
         db_session,
-        lambda instance: runner_api.begin_upload(get_compute_store(), instance, area, str(body.get("name", "")), size),
+        lambda instance: runner_api.begin_upload(
+            get_compute_store(),
+            instance,
+            area,
+            str(body.get("name", "")),
+            size,
+            quota_bytes=compute_settings.effective_policy(db_session, instance.job.project).storage_quota_gb * 1024**3,
+        ),
     )
 
 

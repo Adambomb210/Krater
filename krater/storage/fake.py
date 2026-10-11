@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import itertools
 
-from krater.storage.types import ListedObject, ObjectMeta, PresignedPost
+from krater.storage.types import ListedObject, MultipartUpload, ObjectMeta, PresignedPost
 
 
 class FakeObjectStore:
@@ -50,8 +50,8 @@ class FakeObjectStore:
         self._objects.pop(key, None)
         self._content.pop(key, None)
 
-    def presign_put(self, key: str, *, expires: int = 300) -> str:
-        return f"fake://krater-storage/{key}?put&expires={expires}"
+    def presign_put(self, key: str, *, content_length: int, expires: int = 300) -> str:
+        return f"fake://krater-storage/{key}?put&length={content_length}&expires={expires}"
 
     def list_prefix(self, prefix: str) -> list[ListedObject]:
         return [
@@ -65,8 +65,24 @@ class FakeObjectStore:
         self.multipart_uploads[upload_id] = key
         return upload_id
 
-    def presign_upload_part(self, key: str, *, upload_id: str, part_number: int, expires: int = 300) -> str:
-        return f"fake://krater-storage/{key}?uploadId={upload_id}&partNumber={part_number}&expires={expires}"
+    def list_multipart_uploads(self, prefix: str) -> list[MultipartUpload]:
+        return [
+            MultipartUpload(key=key, upload_id=upload_id, initiated=None)
+            for upload_id, key in sorted(self.multipart_uploads.items())
+            if key.startswith(prefix)
+        ]
+
+    def abort_multipart_upload(self, key: str, *, upload_id: str) -> None:
+        if self.multipart_uploads.get(upload_id) == key:
+            del self.multipart_uploads[upload_id]
+
+    def presign_upload_part(
+        self, key: str, *, upload_id: str, part_number: int, content_length: int, expires: int = 300
+    ) -> str:
+        return (
+            f"fake://krater-storage/{key}?uploadId={upload_id}&partNumber={part_number}"
+            f"&length={content_length}&expires={expires}"
+        )
 
     def complete_multipart_upload(self, key: str, *, upload_id: str, parts: list[tuple[int, str]]) -> None:
         if self.multipart_uploads.pop(upload_id, None) != key:

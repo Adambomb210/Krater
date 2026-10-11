@@ -45,6 +45,8 @@ class ComputeSettings(Base):
     runner_start_minutes: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     # ...and one whose runner stops sending heartbeats for this long.
     heartbeat_timeout_minutes: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    # Checkpoints and outputs a project's machines may keep in Krater's storage, in GB.
+    storage_quota_gb: Mapped[int] = mapped_column(sa.Integer, nullable=False)
 
     updated_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now(), onupdate=sa.func.now()
@@ -72,6 +74,7 @@ class ProjectComputeSettings(Base):
     reconcile_alert_percent: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     runner_start_minutes: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     heartbeat_timeout_minutes: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    storage_quota_gb: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
 
     updated_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now(), onupdate=sa.func.now()

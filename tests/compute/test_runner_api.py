@@ -115,8 +115,11 @@ def test_small_uploads_get_one_url_and_big_ones_get_parts(http, machine, store) 
     )
 
     prefix = f"projects/{job.project_id}/jobs/{job.id}/checkpoints/"
-    assert small.json()["url"].startswith(f"fake://krater-storage/{prefix}s.pt?put")
+    assert small.json()["url"].startswith(f"fake://krater-storage/{prefix}s.pt?put&length=10&")
     assert len(big.json()["parts"]) == 3
+    # Each part URL is signed for its own size; the last one is the remainder.
+    assert f"length={runner_api.PART_BYTES}&" in big.json()["parts"][0]
+    assert "partNumber=3&length=1&" in big.json()["parts"][2]
     assert big.json()["part_bytes"] == runner_api.PART_BYTES
     done = http.post(
         "/runner/v1/files/checkpoints/complete",
@@ -177,3 +180,43 @@ def test_runner_sha256_follows_the_file(tmp_path) -> None:
     binary.write_bytes(b"two!")
     assert launch.runner_sha256(str(binary)) != first
     assert len(first) == 64
+
+
+def test_uploads_must_fit_the_projects_storage_quota(http, machine, store, db_session, admin) -> None:  # noqa: F811
+    from krater.services import compute_settings
+
+    job, row, token = machine
+    compute_settings.set_project_overrides(
+        db_session, admin, project=job.project, overrides={"storage_quota_gb": 1}, reason="small"
+    )
+    gb = 1024**3
+    prefix = f"projects/{job.project_id}/jobs/{job.id}/checkpoints/"
+    store.put(prefix + "old.pt", content_type="application/octet-stream", size_bytes=gb - 100)
+
+    too_big = http.post(
+        "/runner/v1/files/checkpoints/upload", headers=_auth(token), json={"name": "new.pt", "size": 101}
+    )
+    replacing = http.post(
+        "/runner/v1/files/checkpoints/upload", headers=_auth(token), json={"name": "old.pt", "size": gb}
+    )
+
+    assert too_big.status_code == 422 and "quota" in too_big.json()["error"]
+    assert replacing.status_code == 200  # replacing a file counts only the difference
+
+
+def test_unfinished_uploads_are_aborted_only_once_their_job_has_ended(http, machine, store, db_session, member) -> None:  # noqa: F811
+    from krater.compute import storage_cleanup
+    from krater.services import compute_jobs
+
+    job, row, token = machine
+    size = runner_api.PART_BYTES + 1
+    http.post("/runner/v1/files/checkpoints/upload", headers=_auth(token), json={"name": "big.pt", "size": size})
+    store.create_multipart_upload("projects/not-a-project/stray")
+
+    assert storage_cleanup.abort_abandoned_uploads(db_session, store, now=NOW + timedelta(minutes=10)) == 1
+    assert len(store.multipart_uploads) == 1  # the running job's upload is kept
+
+    compute_jobs.cancel_job(db_session, member, job=job, now=NOW + timedelta(minutes=10))
+    assert storage_cleanup.abort_abandoned_uploads(db_session, store, now=NOW + timedelta(minutes=30)) == 0
+    assert storage_cleanup.abort_abandoned_uploads(db_session, store, now=NOW + timedelta(minutes=71)) == 1
+    assert store.multipart_uploads == {}
