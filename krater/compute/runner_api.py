@@ -25,8 +25,9 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from krater.models import ComputeEvent, ComputeInstance, ComputeJob, ComputeJobState
+from krater.models import ComputeEvent, ComputeInstance, ComputeJob, ComputeJobKind, ComputeJobState
 from krater.models.compute_job import ACTIVE_JOB_STATES
+from krater.services import ssh_keys
 from krater.services.errors import NotAllowed, ValidationFailed
 from krater.storage import ObjectStore
 
@@ -40,7 +41,7 @@ MAX_UPLOAD_BYTES = 500 * 1024**3
 #: Presigned URLs live this long: a 64 MB part on a slow link still makes it.
 URL_EXPIRES_SECONDS = 3600
 
-AREAS = ("checkpoints", "outputs")
+AREAS = ("checkpoints", "outputs", "workspace")
 _NAME_RE = re.compile(r"^[A-Za-z0-9._\-][A-Za-z0-9._\-/]{0,511}$")
 
 
@@ -80,6 +81,8 @@ class StartInfo:
     resumed: bool
     command: str | None
     kind: str
+    # A box's authorized_keys: its submitter's SSH keys, as `type base64` lines.
+    ssh_keys: tuple[str, ...] = ()
     heartbeat_seconds: int = HEARTBEAT_SECONDS
     checkpoint_sync_seconds: int = CHECKPOINT_SYNC_SECONDS
 
@@ -103,23 +106,45 @@ def start(session: Session, instance: ComputeInstance, *, now: datetime) -> Star
         runner_starts=instance.runner_starts,
     )
     session.flush()
+    keys = tuple(ssh_keys.authorized_keys_for(session, job.submitter_id)) if job.kind is ComputeJobKind.BOX else ()
     return StartInfo(
-        job_id=str(job.id), attempt=instance.attempt, resumed=resumed, command=job.command, kind=job.kind.value
+        job_id=str(job.id),
+        attempt=instance.attempt,
+        resumed=resumed,
+        command=job.command,
+        kind=job.kind.value,
+        ssh_keys=keys,
     )
 
 
 _HEARTBEAT_FIELDS = {"gpu_util": (int, float), "cpu_util": (int, float), "sessions": int, "phase": str}
 
 
-def heartbeat(session: Session, instance: ComputeInstance, payload: dict[str, Any], *, now: datetime) -> bool:
-    """Record a heartbeat. Returns whether the runner should stop (its job has ended)."""
+@dataclass(frozen=True)
+class HeartbeatReply:
+    stop: bool  # the job has ended: stop the command
+    sync: bool  # save /workspace and confirm: Krater is about to stop the box
+
+
+def heartbeat(session: Session, instance: ComputeInstance, payload: dict[str, Any], *, now: datetime) -> HeartbeatReply:
+    """Record a heartbeat and say what Krater wants next."""
     kept = {k: v for k, v in payload.items() if k in _HEARTBEAT_FIELDS and isinstance(v, _HEARTBEAT_FIELDS[k])}
     if isinstance(kept.get("phase"), str):
         kept["phase"] = kept["phase"][:32]
     instance.last_heartbeat_at = now
     instance.last_heartbeat = kept
     session.flush()
-    return instance.job.state not in ACTIVE_JOB_STATES
+    wants_sync = instance.stop_requested_at is not None and (
+        instance.last_synced_at is None or instance.last_synced_at < instance.stop_requested_at
+    )
+    return HeartbeatReply(stop=instance.job.state not in ACTIVE_JOB_STATES, sync=wants_sync)
+
+
+def synced(session: Session, instance: ComputeInstance, *, now: datetime) -> None:
+    """The runner saved /workspace. Once Krater asked for it, the scheduler stops the box on its next pass."""
+    instance.last_synced_at = now
+    _event(session, instance, "synced", "The box saved /workspace.", now=now)
+    session.flush()
 
 
 def report_exit(session: Session, instance: ComputeInstance, exit_code: int, *, now: datetime) -> ComputeJob:

@@ -15,15 +15,18 @@ only Krater ends a machine, by destroying it. If the runner never starts, the sc
 from __future__ import annotations
 
 import hashlib
+from decimal import Decimal
 from pathlib import Path
 
-from krater.models import ComputeJob
+from krater.models import ComputeJob, ComputeJobKind
+from krater.vast import CreateInstance
 
 #: Vast's `onstart` in `args` mode: the entrypoint that replaces the image's own.
 ENTRYPOINT = "sh"
 RUNNER_PATH = "/runner/v1/krater-runner"
 
-_BOOTSTRAP = r"""R=/tmp/krater-runner
+#: Downloads the runner and checks its sha256; leaves OK=1 when it may run.
+_FETCH = r"""R=/tmp/krater-runner
 U="${KRATER_RUNNER_URL}__PATH__"
 P='import sys, urllib.request as u; u.urlretrieve(sys.argv[1], sys.argv[2])'
 i=0
@@ -37,26 +40,71 @@ while [ "$i" -lt 5 ] && [ ! -s "$R" ]; do
   i=$((i + 1))
   [ -s "$R" ] || sleep 10
 done
+OK=0
 if [ -s "$R" ]; then
   if command -v sha256sum >/dev/null 2>&1 && ! echo "__SHA256__  $R" | sha256sum -c - >/dev/null 2>&1; then
     echo "krater: the runner download didn't match its checksum; not running it"
   else
-    chmod +x "$R" && "$R"
+    chmod +x "$R" && OK=1
   fi
 fi
+"""
+
+#: A job: the shell is the container's main process, runs the runner, then waits forever.
+_JOB_TAIL = r"""[ "$OK" = 1 ] && "$R"
 echo "krater: waiting for Krater to stop this machine"
 while :; do sleep 3600; done"""
 
+#: A box: Vast's own init is the main process (SSH mode), and this runs as its startup script, so the runner goes in
+#: the background and the script returns.
+_BOX_TAIL = r"""[ "$OK" = 1 ] && nohup "$R" >>/var/log/krater-runner.log 2>&1 &
+exit 0"""
 
-def bootstrap_script(runner_sha256: str) -> str:
+#: Boxes launch in Vast's SSH mode, where Vast sets up sshd and `onstart` is a startup script run after its init.
+#: Pending the paid check: whether the runner starts there, what lands in authorized_keys, and the 22/tcp mapping.
+BOX_RUNTYPE = "ssh_direct"
+
+
+def _check_sha(runner_sha256: str) -> None:
     if len(runner_sha256) != 64 or any(c not in "0123456789abcdef" for c in runner_sha256):
         raise ValueError("runner_sha256 must be a lowercase hex sha256")
-    return _BOOTSTRAP.replace("__PATH__", RUNNER_PATH).replace("__SHA256__", runner_sha256)
+
+
+def bootstrap_script(runner_sha256: str, *, box: bool = False) -> str:
+    _check_sha(runner_sha256)
+    fetch = _FETCH.replace("__PATH__", RUNNER_PATH).replace("__SHA256__", runner_sha256)
+    return fetch + (_BOX_TAIL if box else _JOB_TAIL)
 
 
 def startup_args(runner_sha256: str) -> tuple[str, ...]:
-    """The arguments to `ENTRYPOINT`."""
+    """The arguments to `ENTRYPOINT`, for a job."""
     return ("-c", bootstrap_script(runner_sha256))
+
+
+def create_request(
+    job: ComputeJob, *, label: str, bid_price: Decimal | None, env: dict[str, str], runner_sha256: str
+) -> CreateInstance:
+    """Everything Krater asks Vast to start, for a job or a box. The one place that knows Vast's launch modes."""
+    if job.kind is ComputeJobKind.BOX:
+        return CreateInstance(
+            image=job.image,
+            disk_gb=job.disk_gb,
+            label=label,
+            bid_price=bid_price,
+            env=env,
+            runtype=BOX_RUNTYPE,
+            onstart=bootstrap_script(runner_sha256, box=True),
+        )
+    return CreateInstance(
+        image=job.image,
+        disk_gb=job.disk_gb,
+        label=label,
+        bid_price=bid_price,
+        env=env,
+        runtype="args",
+        onstart=ENTRYPOINT,
+        args=startup_args(runner_sha256),
+    )
 
 
 def job_env(job: ComputeJob, attempt: int, *, runner_url: str, token: str) -> dict[str, str]:

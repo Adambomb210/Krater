@@ -50,7 +50,6 @@ from krater.services import budget, budget_alerts, compute_settings
 from krater.services.compute_settings import ComputePolicy
 from krater.services.launch_policy import LAUNCHABLE_STATUSES, hourly_cap_cents
 from krater.vast import (
-    CreateInstance,
     Instance,
     Offer,
     OfferQuery,
@@ -70,6 +69,13 @@ CREATE_SETTLE = timedelta(minutes=5)
 #: How long a machine may take from create to running (the image pull bills disk) before Krater gives up on it.
 PROVISION_TIMEOUT = timedelta(minutes=30)
 MICROUSD_PER_CENT = 10_000
+#: A box is idle while its GPU use stays under this (percent), and its CPU use, when reported, under that.
+IDLE_GPU_PERCENT = 5
+IDLE_CPU_PERCENT = 10
+#: The warning before a stopped box is destroyed.
+DESTROY_WARNING = timedelta(hours=1)
+#: `destroy_reason` of a box the member asked to start again elsewhere.
+MOVED_BY_MEMBER = "moved by member"
 
 
 @dataclass
@@ -125,6 +131,7 @@ class Scheduler:
         self.prefix = settings.compute_label_prefix
         self.result = PassResult()
         self._policies: dict = {}
+        self._ssh_keys_on_account: bool | None = None
 
     # -- Entry point -----------------------------------------------------------------------------------
 
@@ -288,7 +295,12 @@ class Scheduler:
     def _watch(self, listing: dict[int, Instance]) -> None:
         stmt = sa.select(ComputeInstance).where(
             ComputeInstance.state.in_(
-                [ComputeInstanceState.PROVISIONING, ComputeInstanceState.RUNNING, ComputeInstanceState.PAUSED]
+                [
+                    ComputeInstanceState.PROVISIONING,
+                    ComputeInstanceState.RUNNING,
+                    ComputeInstanceState.PAUSED,
+                    ComputeInstanceState.STOPPED,
+                ]
             ),
             ComputeInstance.vast_instance_id.is_not(None),
         )
@@ -349,11 +361,14 @@ class Scheduler:
                 _requeue(self.session, job, "The machine disappeared; waiting for another offer.", now=self.now)
             return
 
+        previously_seen = row.last_seen_at
         row.last_seen_at = self.now
         row.last_vast_status = seen.actual_status
+        self._record_ssh(row, seen)
 
         if row.destroy_requested_at is not None:
-            if self._destroy(row, row.destroy_reason or "requested") and job.state is ComputeJobState.PAUSED:
+            moving = job.state is ComputeJobState.PAUSED or row.destroy_reason == MOVED_BY_MEMBER
+            if self._destroy(row, row.destroy_reason or "requested") and moving:
                 self._requeue_moved(job)
             return
         if job.state in FINISHED_JOB_STATES:
@@ -374,6 +389,9 @@ class Scheduler:
             return
 
         policy = self._policy(job.project)
+        if row.state is ComputeInstanceState.STOPPED:
+            self._watch_stopped(row, job, seen, policy, previously_seen=previously_seen)
+            return
         if (
             row.state is ComputeInstanceState.PROVISIONING
             and not seen.is_running
@@ -416,7 +434,12 @@ class Scheduler:
                 )
                 self._destroy(row, "max runtime reached")
                 return
+            if job.kind is ComputeJobKind.BOX and row.stop_requested_at is not None:
+                self._finish_stopping(row, job, policy)
+                return
             self._check_runner(row, job, policy)
+            if job.kind is ComputeJobKind.BOX and job.state is ComputeJobState.RUNNING:
+                self._check_idle(row, job, policy)
             return
 
         if row.state is ComputeInstanceState.RUNNING:
@@ -453,6 +476,10 @@ class Scheduler:
             return
         if row.runner_starts < row.runner_starts_needed:
             if self.now - since >= timedelta(minutes=policy.runner_start_minutes):
+                if job.kind is ComputeJobKind.BOX and row.runner_starts > 0:
+                    # It ran before: its disk may hold work newer than the last sync. Stop it, don't destroy it.
+                    self._stop_box(row, job, "the runner didn't start again")
+                    return
                 _finish(
                     job,
                     ComputeJobState.FAILED,
@@ -464,6 +491,9 @@ class Scheduler:
             return
         last = row.last_heartbeat_at or row.runner_started_at
         if self.now - last >= timedelta(minutes=policy.heartbeat_timeout_minutes):
+            if job.kind is ComputeJobKind.BOX:
+                self._stop_box(row, job, "the runner stopped reporting")
+                return
             _finish(
                 job,
                 ComputeJobState.FAILED,
@@ -471,6 +501,146 @@ class Scheduler:
                 now=self.now,
             )
             self._destroy(row, "runner stopped reporting")
+
+    # -- Boxes -----------------------------------------------------------------------------------------
+
+    def _record_ssh(self, row: ComputeInstance, seen: Instance) -> None:
+        """Where the member's SSH client should connect: the direct port when Vast mapped one, else Vast's proxy."""
+        mapped = (seen.ports or {}).get("22/tcp") or []
+        if seen.public_ipaddr and mapped and isinstance(mapped[0], dict) and mapped[0].get("HostPort"):
+            row.ssh_host, row.ssh_port = seen.public_ipaddr, int(mapped[0]["HostPort"])
+        elif seen.ssh_host and seen.ssh_port:
+            row.ssh_host, row.ssh_port = seen.ssh_host, seen.ssh_port
+
+    def _check_idle(self, row: ComputeInstance, job: ComputeJob, policy: ComputePolicy) -> None:
+        """A box is idle while its runner reports low GPU (and CPU) use and no open session. Idle for the box idle
+        time, Krater starts stopping it."""
+        beat = row.last_heartbeat or {}
+        if "gpu_util" not in beat and "sessions" not in beat:
+            return  # nothing to judge by; the heartbeat timeout covers a silent runner
+        idle = beat.get("gpu_util", 0) < IDLE_GPU_PERCENT and beat.get("sessions", 0) == 0
+        if "cpu_util" in beat:
+            idle = idle and beat["cpu_util"] < IDLE_CPU_PERCENT
+        if not idle:
+            row.idle_since = None
+            return
+        if row.idle_since is None:
+            row.idle_since = self.now
+        elif self.now - row.idle_since >= timedelta(minutes=policy.box_idle_minutes):
+            self.request_stop(row, job, f"idle for {policy.box_idle_minutes} minutes")
+
+    def request_stop(self, row: ComputeInstance, job: ComputeJob, reason: str) -> None:
+        """Step one of stopping a box: the next heartbeat asks the runner to save /workspace."""
+        if row.stop_requested_at is not None:
+            return
+        row.stop_requested_at = self.now
+        row.stop_reason = reason
+        job.state_reason = f"Stopping ({reason}): saving /workspace first."
+        _event(self.session, job, "stop_requested", f"Stopping the box: {reason}.", now=self.now, instance=row)
+
+    def _finish_stopping(self, row: ComputeInstance, job: ComputeJob, policy: ComputePolicy) -> None:
+        """Step two: stop once the runner confirmed the sync, or the sync deadline passed."""
+        synced = row.last_synced_at is not None and row.last_synced_at >= row.stop_requested_at
+        if synced or self.now - row.stop_requested_at >= timedelta(minutes=policy.box_sync_deadline_minutes):
+            self._stop_box(row, job, row.stop_reason or "requested", synced=synced)
+
+    def _stop_box(self, row: ComputeInstance, job: ComputeJob, reason: str, *, synced: bool = False) -> None:
+        self.client.stop_instance(row.vast_instance_id)
+        row.state = ComputeInstanceState.STOPPED
+        row.stopped_at = self.now
+        row.stop_requested_at = None
+        row.start_requested_at = None
+        row.idle_since = None
+        # Vast restarts the container on resume: the runner must start again.
+        row.runner_starts_needed = row.runner_starts + 1
+        job.state = ComputeJobState.STOPPED
+        saved = "saved" if synced else "not confirmed saved"
+        job.state_reason = f"Stopped ({reason}); /workspace {saved}. Resume it to carry on."
+        _event(self.session, job, "stopped", f"Stopped the box: {reason}.", now=self.now, instance=row, synced=synced)
+
+    def _watch_stopped(
+        self,
+        row: ComputeInstance,
+        job: ComputeJob,
+        seen: Instance,
+        policy: ComputePolicy,
+        *,
+        previously_seen: datetime | None,
+    ) -> None:
+        if row.start_requested_at is not None:
+            if seen.is_running:
+                row.state = ComputeInstanceState.RUNNING
+                row.entered_running_at = self.now
+                row.start_requested_at = None
+                row.stopped_at = None
+                job.state = ComputeJobState.RUNNING
+                job.state_reason = None
+                _event(self.session, job, "resumed", "The box is running again.", now=self.now, instance=row)
+            elif self.now - row.start_requested_at >= timedelta(minutes=policy.box_resume_timeout_minutes):
+                # Vast keeps trying while the instance's intended state is running; take that back.
+                self.client.stop_instance(row.vast_instance_id)
+                row.start_requested_at = None
+                synced = row.last_synced_at.strftime("%Y-%m-%d %H:%M UTC") if row.last_synced_at else "never"
+                job.state_reason = (
+                    "Couldn't resume: the machine's GPU is taken. Start it elsewhere from the workspace saved at "
+                    f"{synced}, or try again later."
+                )
+                _event(self.session, job, "resume_blocked", job.state_reason, now=self.now, instance=row)
+            else:
+                self.client.start_instance(row.vast_instance_id)
+            return
+        if seen.is_running:
+            # Running without Krater starting it: a member can start their own instance with the container's key.
+            # Bill it at the full rate for the time since Krater last looked, and stop it again.
+            if previously_seen is not None:
+                extra = round(row.gpu_microusd * (self.now - previously_seen).total_seconds() / 3600)
+                row.accrued_microusd += extra
+            self.client.stop_instance(row.vast_instance_id)
+            _event(
+                self.session,
+                job,
+                "unexpected_start",
+                "The stopped box was started outside Krater; stopped it again.",
+                now=self.now,
+                instance=row,
+            )
+            return
+        stopped_for = self.now - (row.stopped_at or self.now)
+        destroy_after = timedelta(hours=policy.box_destroy_hours)
+        if stopped_for >= destroy_after:
+            _finish(
+                job,
+                ComputeJobState.CANCELLED,
+                f"Destroyed after {policy.box_destroy_hours} hours stopped. Its last saved workspace is kept.",
+                now=self.now,
+            )
+            self._destroy(row, "stopped too long")
+        elif stopped_for >= destroy_after - DESTROY_WARNING and not self._has_event(job, "destroy_soon"):
+            _event(
+                self.session,
+                job,
+                "destroy_soon",
+                "This stopped box will be destroyed within the hour unless it's resumed.",
+                now=self.now,
+                instance=row,
+            )
+
+    def _has_event(self, job: ComputeJob, kind: str) -> bool:
+        return (
+            self.session.scalar(
+                sa.select(sa.func.count())
+                .select_from(ComputeEvent)
+                .where(ComputeEvent.job_id == job.id, ComputeEvent.kind == kind)
+            )
+            > 0
+        )
+
+    def _account_has_ssh_keys(self) -> bool:
+        """Checked once per pass: any SSH key on the Vast account may be installed in every instance, which would let
+        its holder into every member's box. Krater refuses to start boxes while there are any."""
+        if self._ssh_keys_on_account is None:
+            self._ssh_keys_on_account = bool(self.client.list_ssh_keys())
+        return self._ssh_keys_on_account
 
     def _requeue_moved(self, job: ComputeJob) -> None:
         _requeue(
@@ -616,6 +786,12 @@ class Scheduler:
         return sum(max(0, hold - spent) for hold, spent in rows)
 
     def _rent(self, job: ComputeJob, choice: offers.Choice, *, hold_cents: int, taken: set[int]) -> bool:
+        if job.kind is ComputeJobKind.BOX and self._account_has_ssh_keys():
+            job.state_reason = (
+                "Krater doesn't start boxes while the Vast account has SSH keys: they may reach every machine. "
+                "An admin must remove them."
+            )
+            return False
         attempt = job.attempts + 1
         token, token_hash = runner_api.new_token()
         label = f"{self.prefix}{job.id.hex[:12]}-{attempt}"
@@ -654,15 +830,12 @@ class Scheduler:
         # Durable before Vast is called: if the response is lost, the next pass finds the machine by this label.
         self.session.commit()
 
-        request = CreateInstance(
-            image=job.image,
-            disk_gb=job.disk_gb,
+        request = launch.create_request(
+            job,
             label=label,
             bid_price=choice.bid,
             env=launch.job_env(job, attempt, runner_url=self.runner_url, token=token),
-            runtype="args",
-            onstart=launch.ENTRYPOINT,
-            args=launch.startup_args(self.runner_sha256),
+            runner_sha256=self.runner_sha256,
         )
         try:
             vast_id = self.client.create_instance(choice.offer.id, request)

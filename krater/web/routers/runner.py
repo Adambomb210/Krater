@@ -68,19 +68,30 @@ def start(request: Request, db_session: Annotated[Session, Depends(get_session)]
         db_session.rollback()
         return _deny(exc)
     db_session.commit()
-    return info.__dict__
+    return {**info.__dict__, "ssh_keys": list(info.ssh_keys)}
 
 
 @router.post("/heartbeat")
 async def heartbeat(request: Request, db_session: Annotated[Session, Depends(get_session)]):
     body = await _body(request)
     try:
-        stop = runner_api.heartbeat(db_session, _instance(request, db_session), body, now=_now())
+        reply = runner_api.heartbeat(db_session, _instance(request, db_session), body, now=_now())
     except NotAllowed as exc:
         db_session.rollback()
         return _deny(exc)
     db_session.commit()
-    return {"stop": stop}
+    return {"stop": reply.stop, "sync": reply.sync}
+
+
+@router.post("/synced")
+def synced(request: Request, db_session: Annotated[Session, Depends(get_session)]):
+    try:
+        runner_api.synced(db_session, _instance(request, db_session), now=_now())
+    except NotAllowed as exc:
+        db_session.rollback()
+        return _deny(exc)
+    db_session.commit()
+    return {"ok": True}
 
 
 @router.post("/exit")
