@@ -627,6 +627,19 @@ def test_compute_off_hides_the_skypilot_budget_banner(
         flag.assert_not_called()
 
 
+def test_compute_on_vast_shows_the_budget_banner_without_a_workspace(
+    client: TestClient, login_as, approved_project, monkeypatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "compute_mode", "vast")
+    member = login_as(MEMBER_SUB)
+    reviewer = login_as(REVIEWER_SUB)
+    project = approved_project(member, reviewer)
+    login_as(MEMBER_SUB)
+
+    with patch("krater.web.routers.projects.current_budget_flag", return_value="teardown"):
+        assert "machines have been torn down" in client.get(f"/projects/{project.id}").text
+
+
 # --------------------------------------------------------------------------------------------------
 # Per-project hourly cap
 # --------------------------------------------------------------------------------------------------

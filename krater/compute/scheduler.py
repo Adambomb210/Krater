@@ -33,7 +33,7 @@ from decimal import ROUND_FLOOR, Decimal
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from krater.compute import launch, offers
+from krater.compute import launch, offers, spend
 from krater.config import Settings
 from krater.models import (
     ComputeEscalation,
@@ -46,7 +46,7 @@ from krater.models import (
     Project,
 )
 from krater.models.compute_job import ACTIVE_JOB_STATES, FINISHED_JOB_STATES
-from krater.services import budget, compute_settings
+from krater.services import budget, budget_alerts, compute_settings
 from krater.services.compute_settings import ComputePolicy
 from krater.services.launch_policy import LAUNCHABLE_STATUSES, hourly_cap_cents
 from krater.vast import (
@@ -124,6 +124,12 @@ class Scheduler:
     # -- Entry point -----------------------------------------------------------------------------------
 
     def run(self) -> PassResult:
+        # Spend first, at the states instances were in since the last pass, then stop anything over budget.
+        changed = spend.accrue(self.session, now=self.now)
+        spend.record_snapshots(self.session, changed, now=self.now)
+        self.session.commit()
+        self._enforce_budgets()
+
         listing = {i.id: i for i in self.client.list_instances(label_prefix=self.prefix)}
         by_label = {i.label: i for i in listing.values() if i.label}
         self._settle_creates(by_label)
@@ -137,6 +143,57 @@ class Scheduler:
         if project.id not in self._policies:
             self._policies[project.id] = compute_settings.effective_policy(self.session, project)
         return self._policies[project.id]
+
+    # -- 1. Budgets ------------------------------------------------------------------------------------
+
+    def _enforce_budgets(self) -> None:
+        """Warn at the warn percentage; at the ceiling, projected one minute ahead, stop every machine the project has.
+        Runs every pass, so a project that stays over budget can't start new work either (no budget to hold)."""
+        stmt = (
+            sa.select(Project)
+            .join(ComputeJob, ComputeJob.project_id == Project.id)
+            .where(ComputeJob.state.in_(ACTIVE_JOB_STATES))
+            .distinct()
+        )
+        for project in list(self.session.scalars(stmt)):
+            ceiling = budget.ceiling_cents(self.session, project)
+            spent = budget.latest_spend_cents(self.session, project)
+            budget_alerts.warn_if_due(
+                self.session,
+                project,
+                ceiling_cents=ceiling,
+                spend_cents=spent,
+                warn_percent=self.settings.skypilot_budget_warn_percent,
+            )
+            projected = spent + spend.next_minute_cents(self.session, project)
+            if budget_alerts.budget_percent(ceiling, projected) >= 100.0:
+                self._stop_project(project, ceiling_cents=ceiling, spend_cents=spent)
+            self.session.commit()
+
+    def _stop_project(self, project: Project, *, ceiling_cents: int, spend_cents: int) -> None:
+        jobs = self.session.scalars(
+            sa.select(ComputeJob).where(ComputeJob.project_id == project.id, ComputeJob.state.in_(ACTIVE_JOB_STATES))
+        )
+        stopped: list[int] = []
+        for job in list(jobs):
+            _finish(job, ComputeJobState.FAILED, "Stopped: the project reached its budget.", now=self.now)
+            _event(self.session, job, "budget_stop", "Stopped: the project reached its budget.", now=self.now)
+            for row in job.instances:
+                if row.is_live and row.vast_instance_id is not None:
+                    try:
+                        self._destroy(row, "budget reached")
+                    except VastError:
+                        # The job is finished, so the next pass's watch retries the destroy.
+                        logger.exception("krater.compute: budget stop of instance %s failed", row.vast_instance_id)
+                        self.result.errors += 1
+                    stopped.append(row.vast_instance_id)
+        budget_alerts.record_teardown(
+            self.session,
+            project,
+            ceiling_cents=ceiling_cents,
+            spend_cents=spend_cents,
+            details={"vast_instance_ids": stopped},
+        )
 
     # -- 2. Lost creates -------------------------------------------------------------------------------
 

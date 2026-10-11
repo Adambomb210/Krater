@@ -25,9 +25,17 @@ from collections.abc import Callable
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from krater.models import AuditEvent, Project, ProjectStatus, SpendSnapshot, SpendSource, User
+from krater.models import Project, ProjectStatus, SpendSnapshot, SpendSource, User
 from krater.services import audit, budget, quilt_events
 from krater.services.actor import GROUP_MEMBER
+from krater.services.budget_alerts import (  # noqa: F401 -- the AUDIT_ names are re-exported for older imports
+    AUDIT_BUDGET_TEARDOWN,
+    AUDIT_BUDGET_WARNING,
+    budget_percent,
+    record_teardown,
+    warn_if_due,
+)
+from krater.services.budget_alerts import current_budget_flag as budget_alerts_flag
 from krater.skypilot.client import SkyPilotClient
 from krater.skypilot.errors import SkyPilotError, SkyPilotWorkspaceNotFoundError
 from krater.weave import WeaveClient, WeaveUnavailableError
@@ -50,8 +58,6 @@ _TERMINAL_STATUSES = (ProjectStatus.COMPLETED, ProjectStatus.WITHDRAWN)
 COST_REPORT_DAYS = 3650
 
 AUDIT_WORKSPACE_TORN_DOWN = "skypilot_workspace_torn_down"
-AUDIT_BUDGET_WARNING = "budget_warning"
-AUDIT_BUDGET_TEARDOWN = "budget_teardown"
 AUDIT_ACCESS_REMOVED = "skypilot_access_removed"
 
 
@@ -270,22 +276,6 @@ def sync_spend(session: Session, client: SkyPilotClient) -> None:
         quilt_events.sync_project(session, project)
 
 
-def _latest_audit_event(session: Session, project: Project, action: str) -> AuditEvent | None:
-    stmt = (
-        sa.select(AuditEvent)
-        .where(AuditEvent.project_id == project.id, AuditEvent.action == action)
-        .order_by(AuditEvent.created_at.desc())
-        .limit(1)
-    )
-    return session.scalars(stmt).first()
-
-
-def _budget_percent(ceiling_cents: int, spend_cents: int) -> float:
-    if ceiling_cents <= 0:
-        return 100.0 if spend_cents > 0 else 0.0
-    return (spend_cents / ceiling_cents) * 100.0
-
-
 def enforce_budgets(session: Session, client: SkyPilotClient, *, warn_percent: int) -> None:
     """Warn once per project at `warn_percent` of the ceiling, and tear down -- every run, every
     cluster/job currently up -- once spend reaches or passes 100%.
@@ -322,28 +312,9 @@ def _enforce_budget(session: Session, client: SkyPilotClient, project: Project, 
     workspace = project.skypilot_workspace
     ceiling_cents = budget.ceiling_cents(session, project)
     spend_cents = budget.latest_spend_cents(session, project)
-    percent = _budget_percent(ceiling_cents, spend_cents)
+    warn_if_due(session, project, ceiling_cents=ceiling_cents, spend_cents=spend_cents, warn_percent=warn_percent)
 
-    if percent >= warn_percent:
-        last_warning = _latest_audit_event(session, project, AUDIT_BUDGET_WARNING)
-        already_warned_at_this_ceiling = last_warning is not None and ceiling_cents <= last_warning.payload.get(
-            "ceiling_cents", 0
-        )
-        if not already_warned_at_this_ceiling:
-            audit.record(
-                session,
-                None,
-                AUDIT_BUDGET_WARNING,
-                project=project,
-                payload={
-                    "ceiling_cents": ceiling_cents,
-                    "spend_cents": spend_cents,
-                    "percent": round(percent, 1),
-                },
-            )
-            session.flush()
-
-    if percent >= 100.0:
+    if budget_percent(ceiling_cents, spend_cents) >= 100.0:
         clusters = client.list_clusters(workspace)
         current_names = sorted(cluster.name for cluster in clusters)
         for cluster in clusters:
@@ -354,53 +325,26 @@ def _enforce_budget(session: Session, client: SkyPilotClient, project: Project, 
         # (and spending) past the point the policy endpoint has already started blocking new launches.
         for service in client.list_services(workspace):
             client.down_service(service.name)
-
-        last_teardown = _latest_audit_event(session, project, AUDIT_BUDGET_TEARDOWN)
-        already_armed_at_this_ceiling = last_teardown is not None and ceiling_cents <= last_teardown.payload.get(
-            "ceiling_cents", 0
+        # The teardown calls above repeat every pass while over budget (that's the enforcement); the audit event
+        # and its Slack post happen once per crossing (`record_teardown`).
+        record_teardown(
+            session,
+            project,
+            ceiling_cents=ceiling_cents,
+            spend_cents=spend_cents,
+            details={"cluster_names": current_names},
         )
-        if already_armed_at_this_ceiling:
-            # Same crossing as last time: the teardown calls above still ran (that's the actual
-            # enforcement), but don't insert another audit row/Slack post for it -- just note that
-            # it fired again.
-            payload = dict(last_teardown.payload)
-            payload["teardown_count"] = int(payload.get("teardown_count", 1)) + 1
-            payload["cluster_names"] = current_names
-            payload["spend_cents"] = spend_cents
-            last_teardown.payload = payload
-            session.flush()
-        else:
-            audit.record(
-                session,
-                None,
-                AUDIT_BUDGET_TEARDOWN,
-                project=project,
-                payload={
-                    "cluster_names": current_names,
-                    "ceiling_cents": ceiling_cents,
-                    "spend_cents": spend_cents,
-                    "teardown_count": 1,
-                },
-            )
-            session.flush()
 
 
 def current_budget_flag(session: Session, project: Project, *, warn_percent: int) -> str | None:
-    """`"teardown"`, `"warning"`, or `None`: whether the project's spend *right now* still meets the
-    condition that last triggered a teardown or warning. Used for the project page's warning banner.
-
-    Deliberately re-derived from the live ceiling/spend rather than "does a budget_warning/teardown
-    event exist", so raising the ceiling (which re-arms future warnings/teardowns) also immediately
-    clears a banner that no longer reflects reality.
-    """
-    ceiling_cents = budget.ceiling_cents(session, project)
-    spend_cents = budget.latest_spend_cents(session, project)
-    if spend_cents >= ceiling_cents and _latest_audit_event(session, project, AUDIT_BUDGET_TEARDOWN) is not None:
-        return "teardown"
-    percent = _budget_percent(ceiling_cents, spend_cents)
-    if percent >= warn_percent and _latest_audit_event(session, project, AUDIT_BUDGET_WARNING) is not None:
-        return "warning"
-    return None
+    """`"teardown"`, `"warning"`, or `None` for the project page's banner; see `budget_alerts.current_budget_flag`."""
+    return budget_alerts_flag(
+        session,
+        project,
+        ceiling_cents=budget.ceiling_cents(session, project),
+        spend_cents=budget.latest_spend_cents(session, project),
+        warn_percent=warn_percent,
+    )
 
 
 def reconcile(session: Session, client: SkyPilotClient, weave_client: WeaveClient, *, warn_percent: int) -> None:

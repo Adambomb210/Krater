@@ -76,6 +76,8 @@ class BudgetEntryKind(enum.StrEnum):
 
 class SpendSource(enum.StrEnum):
     SKYPILOT_COST_REPORT = "skypilot_cost_report"
+    # Krater Compute's live estimate: each instance's rented price for the time it ran (`krater.compute.spend`).
+    VAST_ESTIMATE = "vast_estimate"
 
 
 class QuiltOutboxState(enum.StrEnum):
