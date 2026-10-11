@@ -45,10 +45,13 @@ budgets, Slack, the gallery and Quilt events, but no rented machines, until the 
 `KRATER_PRICING_MODE=live` (or its old name, `KRATER_SKYPILOT_MODE`) fetches the public GPU catalog the budget estimator
 reads; it needs no server or credentials.
 
-**Turning compute on** later takes, in the infra module: the Vast key mounted into the worker only
-(`KRATER_VAST_API_KEY_FILE`), `KRATER_VAST_MODE=live`, `KRATER_COMPUTE_MODE=vast`, and a production
-`KRATER_COMPUTE_LABEL_PREFIX` (production refuses the default, since the scheduler destroys unknown instances with its
-prefix). The deploy's `ensure_bucket` creates the `krater-compute` bucket for checkpoints. Project secrets also need
+**Turning compute on** later is, in infra's `modules/krater`: `compute.enable = true` and `compute.vastKeyFile` (an
+agenix secret; the module puts the key in the worker's env alone, as `KRATER_VAST_API_KEY`), which also sets
+`KRATER_VAST_MODE=live`, `KRATER_COMPUTE_MODE=vast` and a production `KRATER_COMPUTE_LABEL_PREFIX` (`compute.labelPrefix`,
+`krater-prod-` by default; production refuses Krater's own default, since the scheduler destroys unknown instances
+with its prefix). `projectSecretsKeyFile` turns project secrets on (the portal's env alone), and `weave.cliClientId`
+the `krater` CLI's API. With Compose instead, mount the key into the worker only and set
+`KRATER_VAST_API_KEY_FILE`. The deploy's `ensure_bucket` creates the `krater-compute` bucket for checkpoints. Project secrets also need
 `KRATER_PROJECT_SECRETS_KEY_FILE`: a Fernet key file (an agenix secret) mounted into the portal only. Without it the
 feature is off. Losing the key loses every stored secret, so back it up with the other agenix secrets.
 
