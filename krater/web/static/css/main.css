@@ -1749,3 +1749,25 @@ h1 .badge {
     width: 100%;
   }
 }
+
+/* -- Price history chart (krater/web/charts.py) ------------------------------------------------------- */
+.chart-figure { margin: 1rem 0; }
+.chart-wrap { position: relative; }
+.chart { display: block; width: 100%; height: auto; overflow: visible; }
+.chart__grid { stroke: var(--color-line); stroke-width: 1; }
+.chart__tick { fill: var(--color-ink-soft); font-size: 11px; font-family: var(--font-sans); }
+.chart__band { fill: var(--color-grape-soft); stroke: none; }
+.chart__line { fill: none; stroke: var(--color-grape); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart__end { fill: var(--color-grape); stroke: var(--color-paper); stroke-width: 2; }
+.chart__crosshair { stroke: var(--color-ink-faint); stroke-width: 1; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; list-style: none; padding: 0; margin: 0 0 0.5rem; color: var(--color-ink-soft); font-size: 0.875rem; }
+.chart-legend li { display: flex; align-items: center; gap: 0.4rem; }
+.chart-key { display: inline-block; width: 1.25rem; }
+.chart-key--line { height: 2px; background: var(--color-grape); border-radius: 1px; }
+.chart-key--band { height: 0.75rem; background: var(--color-grape-soft); border-radius: 2px; }
+.chart-tooltip {
+  position: absolute; top: 0; pointer-events: none; padding: 0.4rem 0.6rem; border-radius: 6px;
+  background: var(--color-paper); color: var(--color-ink); border: 1px solid var(--color-line-strong);
+  box-shadow: 0 2px 8px var(--shadow-stitch); font-size: 0.8125rem; white-space: nowrap;
+}
+.chart-tooltip__title { color: var(--color-ink-soft); margin-bottom: 0.15rem; }

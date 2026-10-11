@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block title %}{{ job.name }}{% endblock %}
+
+{% block content %}
+<section class="card">
+  <p><a href="/projects/{{ project.id }}/compute">All jobs of {{ project.title or "this project" }}</a></p>
+  <h1>{{ job.name }}</h1>
+  <p>
+    <span class="badge badge--compute-{{ job.state.value }}">{{ job.state.value }}</span>
+    {% if job.state_reason %}{{ job.state_reason }}{% endif %}
+  </p>
+
+  <dl class="summary-list">
+    <dt>Kind</dt><dd>{{ "Box (SSH workspace)" if job.kind.value == "box" else "Job" }}</dd>
+    <dt>Image</dt><dd><code>{{ job.image }}</code></dd>
+    {% if job.command %}<dt>Command</dt><dd><code>{{ job.command }}</code></dd>{% endif %}
+    <dt>GPU</dt>
+    <dd>
+      {{ job.num_gpus }} &times;
+      {% if job.gpu_names %}{{ job.gpu_names | join(", ") }}{% else %}any GPU with {{ job.min_gpu_ram_gb }} GB or more{% endif %},
+      {{ job.disk_gb }} GB disk
+    </dd>
+    <dt>Price</dt>
+    <dd>
+      starts at or under {{ job.target_microusd | rate }}, never above {{ job.max_microusd | rate }}
+      ({{ "interruptible" if job.interruptible else "on demand" }}); after {{ job.max_wait_minutes }} minutes:
+      {{ escalations[job.on_max_wait] | lower }}
+    </dd>
+    <dt>Spent</dt><dd>{{ job.spend_cents | dollars }}{% if job.exit_code is not none %}; exit code {{ job.exit_code }}{% endif %}</dd>
+  </dl>
+
+  {% if instance %}
+    <h2>Machine</h2>
+    <dl class="summary-list">
+      <dt>GPU</dt><dd>{{ instance.gpu_name }} at {{ instance.full_microusd | rate }} ({{ "bid" if instance.interruptible else "on demand" }})</dd>
+      <dt>State</dt><dd>{{ instance.state.value }}</dd>
+      {% if job.kind.value == "box" and instance.ssh_host and instance.ssh_port %}
+        <dt>SSH</dt><dd><code>ssh -p {{ instance.ssh_port }} root@{{ instance.ssh_host }}</code></dd>
+        <dt>Jupyter</dt><dd>Through an SSH tunnel: <code>ssh -L 8888:localhost:8888 -p {{ instance.ssh_port }} root@{{ instance.ssh_host }}</code></dd>
+      {% endif %}
+      {% if instance.last_synced_at %}<dt>Workspace saved</dt><dd>{{ instance.last_synced_at.strftime("%Y-%m-%d %H:%M UTC") }}</dd>{% endif %}
+    </dl>
+  {% endif %}
+
+  <div class="action-row">
+    {% if can_stop %}
+      <form method="post" action="/projects/{{ project.id }}/compute/{{ job.id }}/stop">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="button">Stop box</button>
+      </form>
+    {% endif %}
+    {% if can_resume %}
+      <form method="post" action="/projects/{{ project.id }}/compute/{{ job.id }}/resume">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="button button--primary">Resume box</button>
+      </form>
+      <form method="post" action="/projects/{{ project.id }}/compute/{{ job.id }}/move">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="button">Start it elsewhere from the saved workspace</button>
+      </form>
+    {% endif %}
+    {% if can_cancel %}
+      <form method="post" action="/projects/{{ project.id }}/compute/{{ job.id }}/cancel">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="button button--danger">Cancel</button>
+      </form>
+    {% endif %}
+  </div>
+</section>
+
+<section class="card">
+  <h2>What happened</h2>
+  {% if events %}
+    <table class="table">
+      <thead><tr><th scope="col">When</th><th scope="col">Event</th></tr></thead>
+      <tbody>
+        {% for event in events %}
+          <tr><td>{{ event.at.strftime("%Y-%m-%d %H:%M UTC") }}</td><td>{{ event.message }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">Nothing yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

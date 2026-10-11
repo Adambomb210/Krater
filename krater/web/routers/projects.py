@@ -344,7 +344,12 @@ def _build_detail_context(
         "names_by_id": names_by_id,
         "is_submitter": is_submitter,
         "is_admin": actor.is_admin,
-        "show_compute_off_notice": project.status in LAUNCHABLE_STATUSES,
+        # The workspace outlives a finished project until the reconciler tears it down: only show how to launch
+        # into it while the launch gate would actually allow it.
+        "can_launch": compute_on and project.skypilot_workspace is not None and project.status in LAUNCHABLE_STATUSES,
+        "compute_on": compute_on,
+        "show_compute_off_notice": compute_mode == "off" and project.status in LAUNCHABLE_STATUSES,
+        "compute_vast": compute_mode == "vast",
         "has_draft": has_draft,
         "can_edit_draft": is_submitter and has_draft,
         "can_submit": is_submitter and has_draft and current.kind is not RevisionKind.COMPLETION,

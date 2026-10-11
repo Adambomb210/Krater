@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}Compute: {{ project.title or "Untitled proposal" }}{% endblock %}
+
+{% block content %}
+<section class="card">
+  <div class="page-header">
+    <h1>Compute for <a href="/projects/{{ project.id }}">{{ project.title or "Untitled proposal" }}</a></h1>
+  </div>
+  <p class="muted">
+    Jobs wait until a machine at or under their target price is available, then run on it. Boxes keep a workspace
+    open for SSH and stop on their own when idle. See <a href="/pricing/history">GPU price history</a> to pick a target.
+  </p>
+  {% if can_launch %}
+    <p><a class="button button--primary" href="/projects/{{ project.id }}/compute/new">New job or box</a></p>
+  {% endif %}
+
+  {% if jobs %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th scope="col">Name</th>
+          <th scope="col">Kind</th>
+          <th scope="col">State</th>
+          <th scope="col">Target / max</th>
+          <th scope="col">Spent</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for job in jobs %}
+          <tr>
+            <td><a href="/projects/{{ project.id }}/compute/{{ job.id }}">{{ job.name }}</a></td>
+            <td>{{ job.kind.value }}</td>
+            <td>
+              <span class="badge badge--compute-{{ job.state.value }}">{{ job.state.value }}</span>
+              {% if job.state_reason %}<br><span class="muted">{{ job.state_reason }}</span>{% endif %}
+            </td>
+            <td>{{ job.target_microusd | rate }} / {{ job.max_microusd | rate }}</td>
+            <td>{{ job.spend_cents | dollars }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">No jobs yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

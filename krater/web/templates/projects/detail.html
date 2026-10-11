@@ -46,6 +46,11 @@
       Each launch is capped at {{ hourly_cap_cents | dollars }}/hour, shared across its machines
       ({{ "Ganymede's default" if hourly_cap_is_default else "this project's own cap" }}).
     </p>
+  {% elif compute_vast %}
+    <p class="skypilot-hint">
+      <a href="/projects/{{ project.id }}/compute">Compute</a>: run jobs and SSH boxes on this project's budget.
+      Each machine is capped at {{ hourly_cap_cents | dollars }}/hour.
+    </p>
   {% elif show_compute_off_notice %}
     <p class="skypilot-hint">
       Launching machines from Krater isn't open yet.

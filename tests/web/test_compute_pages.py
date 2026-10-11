@@ -1,0 +1,242 @@
+"""The member's compute pages: a project's jobs, the submit form, a job's page and its actions, and price history."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+import sqlalchemy as sa
+from fastapi.testclient import TestClient
+
+from krater.config import get_settings
+from krater.models import (
+    ComputeInstance,
+    ComputeInstanceState,
+    ComputeJob,
+    ComputeJobKind,
+    ComputeJobState,
+    GpuPriceSample,
+)
+from krater.services import compute_jobs
+from krater.services.compute_jobs import JobSpec
+from krater.web.charts import PricePoint, price_chart_svg
+from tests.conftest import ADMIN_SUB, MEMBER_SUB, OTHER_MEMBER_SUB, REVIEWER_SUB, get_csrf_token
+from tests.web.conftest import actor_for
+
+FORM = {
+    "name": "train",
+    "kind": "job",
+    "image": "ghcr.io/alice/train:v3",
+    "command": "python train.py",
+    "gpu": "RTX 3060",
+    "num_gpus": "1",
+    "disk_gb": "32",
+    "target": "0.07",
+    "max": "0.10",
+    "interruptible": "on",
+    "max_wait_minutes": "720",
+    "on_max_wait": "keep_waiting",
+    "max_runtime_minutes": "480",
+}
+
+
+@pytest.fixture(autouse=True)
+def vast_mode(monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "compute_mode", "vast")
+
+
+@pytest.fixture
+def project(login_as, approved_project):
+    member = login_as(MEMBER_SUB)
+    reviewer = login_as(REVIEWER_SUB)
+    return approved_project(member, reviewer)
+
+
+def _job(db_session, project, member, **overrides) -> ComputeJob:
+    spec = {
+        "name": "train",
+        "image": "ghcr.io/alice/train:v3",
+        "command": "python train.py",
+        "gpu_names": ("RTX 3060",),
+        "target_microusd": 70_000,
+        "max_microusd": 100_000,
+        **overrides,
+    }
+    return compute_jobs.submit_job(
+        db_session, actor_for(member), project=project, spec=JobSpec(**spec), cap_cents=500, now=datetime.now(UTC)
+    )
+
+
+def test_the_pages_exist_only_with_compute_on_vast(client: TestClient, login_as, project, monkeypatch) -> None:
+    login_as(MEMBER_SUB)
+    monkeypatch.setattr(get_settings(), "compute_mode", "off")
+
+    assert client.get(f"/projects/{project.id}/compute").status_code == 404
+
+
+def test_the_team_reviewers_and_admins_see_a_projects_jobs(client: TestClient, login_as, project, db_session) -> None:
+    member = login_as(MEMBER_SUB)
+    _job(db_session, project, member, name="nightly-train")
+
+    assert "nightly-train" in client.get(f"/projects/{project.id}/compute").text
+    login_as(REVIEWER_SUB)
+    assert "nightly-train" in client.get(f"/projects/{project.id}/compute").text
+    login_as(ADMIN_SUB)
+    assert "nightly-train" in client.get(f"/projects/{project.id}/compute").text
+    login_as(OTHER_MEMBER_SUB)
+    assert client.get(f"/projects/{project.id}/compute").status_code == 404
+
+
+def test_the_project_page_links_to_compute(client: TestClient, login_as, project) -> None:
+    login_as(MEMBER_SUB)
+
+    assert f"/projects/{project.id}/compute" in client.get(f"/projects/{project.id}").text
+
+
+def test_a_member_queues_a_job(client: TestClient, login_as, project, db_session) -> None:
+    login_as(MEMBER_SUB)
+    page = client.get(f"/projects/{project.id}/compute/new")
+    assert page.status_code == 200
+
+    response = client.post(
+        f"/projects/{project.id}/compute",
+        data={**FORM, "csrf_token": get_csrf_token(page.text)},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    job = db_session.scalars(sa.select(ComputeJob).where(ComputeJob.project_id == project.id)).one()
+    assert job.state is ComputeJobState.QUEUED
+    assert (job.target_microusd, job.max_microusd, job.interruptible) == (70_000, 100_000, True)
+    assert job.gpu_names == ["RTX 3060"]
+    assert response.headers["location"] == f"/projects/{project.id}/compute/{job.id}"
+
+
+def test_a_bad_form_is_shown_again_with_the_errors(client: TestClient, login_as, project, db_session) -> None:
+    login_as(MEMBER_SUB)
+    page = client.get(f"/projects/{project.id}/compute/new")
+
+    response = client.post(
+        f"/projects/{project.id}/compute",
+        data={**FORM, "target": "0.20", "max": "0.10", "csrf_token": get_csrf_token(page.text)},
+    )
+
+    assert response.status_code == 422
+    assert "The target can&#39;t be above the max price." in response.text
+    assert 'value="ghcr.io/alice/train:v3"' in response.text
+    assert db_session.scalars(sa.select(ComputeJob)).all() == []
+
+
+def test_submitting_needs_the_csrf_token(client: TestClient, login_as, project) -> None:
+    login_as(MEMBER_SUB)
+
+    assert client.post(f"/projects/{project.id}/compute", data=FORM).status_code == 403
+
+
+def test_only_the_team_can_open_the_form_or_submit(client: TestClient, login_as, project) -> None:
+    login_as(REVIEWER_SUB)
+    page = client.get(f"/projects/{project.id}")
+
+    assert client.get(f"/projects/{project.id}/compute/new").status_code == 403
+    response = client.post(f"/projects/{project.id}/compute", data={**FORM, "csrf_token": get_csrf_token(page.text)})
+    assert response.status_code == 403
+
+
+def test_a_box_page_shows_how_to_connect_and_can_be_stopped(client: TestClient, login_as, project, db_session) -> None:
+    member = login_as(MEMBER_SUB)
+    job = _job(db_session, project, member, kind=ComputeJobKind.BOX, command=None)
+    job.state = ComputeJobState.RUNNING
+    db_session.add(
+        ComputeInstance(
+            job_id=job.id,
+            attempt=1,
+            label="krater-job-x-1",
+            vast_instance_id=123,
+            state=ComputeInstanceState.RUNNING,
+            offer_id=1,
+            gpu_name="RTX 3060",
+            interruptible=True,
+            gpu_microusd=55_000,
+            disk_microusd=8_767,
+            ssh_host="198.51.100.7",
+            ssh_port=41022,
+        )
+    )
+    db_session.flush()
+
+    page = client.get(f"/projects/{project.id}/compute/{job.id}")
+    assert "ssh -p 41022 root@198.51.100.7" in page.text
+    assert "$0.0638/h" in page.text
+
+    response = client.post(
+        f"/projects/{project.id}/compute/{job.id}/stop",
+        data={"csrf_token": get_csrf_token(page.text)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    db_session.refresh(job)
+    assert job.instances[0].stop_requested_at is not None
+
+
+def test_cancel_from_the_job_page(client: TestClient, login_as, project, db_session) -> None:
+    member = login_as(MEMBER_SUB)
+    job = _job(db_session, project, member)
+    page = client.get(f"/projects/{project.id}/compute/{job.id}")
+
+    client.post(f"/projects/{project.id}/compute/{job.id}/cancel", data={"csrf_token": get_csrf_token(page.text)})
+
+    db_session.refresh(job)
+    assert job.state is ComputeJobState.CANCELLED
+
+
+def test_an_outsider_cannot_act_on_a_job(client: TestClient, login_as, project, db_session) -> None:
+    member = login_as(MEMBER_SUB)
+    job = _job(db_session, project, member)
+    login_as(OTHER_MEMBER_SUB)
+    page = client.get("/pricing/history")
+
+    response = client.post(
+        f"/projects/{project.id}/compute/{job.id}/cancel", data={"csrf_token": get_csrf_token(page.text)}
+    )
+
+    assert response.status_code == 404
+    db_session.refresh(job)
+    assert job.state is ComputeJobState.QUEUED
+
+
+def test_price_history_draws_the_chart_and_a_table(client: TestClient, db_session) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    for n in range(6):
+        db_session.add(
+            GpuPriceSample(
+                sampled_at=now - timedelta(hours=n),
+                gpu_name="RTX 4090",
+                rental_type="bid",
+                num_gpus=1,
+                disk_gb=32,
+                offer_count=40,
+                truncated=False,
+                min_microusd=200_000 + n * 1000,
+                p10_microusd=220_000,
+                median_microusd=260_000,
+            )
+        )
+    db_session.flush()
+
+    page = client.get("/pricing/history?gpu=RTX%204090&rental=bid&days=1")
+
+    assert page.status_code == 200
+    assert '<svg class="chart"' in page.text and "chart__band" in page.text
+    assert "Cheapest offer" in page.text and "$0.2000/h" in page.text
+    assert "Not enough samples" in client.get("/pricing/history?gpu=H200").text
+
+
+def test_the_chart_needs_two_points() -> None:
+    now = datetime(2026, 10, 11, tzinfo=UTC)
+    assert price_chart_svg([PricePoint(now, 1, 2, 3)], title="t") == ""
+    svg = price_chart_svg(
+        [PricePoint(now, 100_000, 120_000, 150_000), PricePoint(now + timedelta(hours=1), 90_000, 110_000, 140_000)],
+        title="RTX & co",
+    )
+    assert 'aria-label="RTX &amp; co"' in svg
+    assert svg.count("<polyline") == 1 and svg.count("<polygon") == 1

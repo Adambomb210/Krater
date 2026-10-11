@@ -20,6 +20,14 @@
     (${{ "%.2f"|format(cap_cents / 100) }}/hr) are marked below.
   </p>
 
+  <p><a href="/pricing/history">Live Vast price history</a>: what Krater actually sees on Vast, every 10 minutes.</p>
+
+  {% if refreshed_at %}
+    <p class="muted">Last updated {{ refreshed_at.strftime("%b") }} {{ refreshed_at.day }}, {{ refreshed_at.strftime("%Y %H:%M UTC") }}.</p>
+  {% else %}
+    <p class="muted">Prices haven't been refreshed yet.</p>
+  {% endif %}
+
   {% if not rows and not refreshed_at %}
     <div class="empty-state">
       <p class="empty-state__title">No pricing data yet.</p>
