@@ -83,10 +83,14 @@ def accrue(session: Session, *, now: datetime) -> set[uuid.UUID]:
 
 
 def project_compute_spend_cents(session: Session, project: Project) -> int:
+    """The project's compute spend, rounded up once: summing each job's rounded-up cents would add up to a cent per
+    job (staging, 2026-10-11: 6 cents for $0.019 of charges across seven short jobs)."""
     total = session.scalar(
-        sa.select(sa.func.coalesce(sa.func.sum(ComputeJob.spend_cents), 0)).where(ComputeJob.project_id == project.id)
+        sa.select(sa.func.coalesce(sa.func.sum(ComputeInstance.accrued_microusd), 0))
+        .join(ComputeJob, ComputeJob.id == ComputeInstance.job_id)
+        .where(ComputeJob.project_id == project.id)
     )
-    return int(total or 0)
+    return math.ceil(int(total or 0) / MICROUSD_PER_CENT)
 
 
 def record_snapshots(

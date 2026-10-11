@@ -158,3 +158,28 @@ def test_unknown_charges_are_flagged_once(db_session, client, fake) -> None:
 
     events = db_session.scalars(sa.select(AuditEvent).where(AuditEvent.action == reconcile.AUDIT_UNKNOWN_CHARGES)).all()
     assert len(events) == 1
+
+
+def test_a_projects_spend_is_rounded_up_once_not_per_job(db_session, member, project) -> None:  # noqa: F811
+    from krater.compute import spend
+    from krater.models import ComputeInstance, ComputeInstanceState
+
+    for i in range(3):
+        job = _submit(db_session, member, project, name=f"short-{i}")
+        db_session.add(
+            ComputeInstance(
+                job_id=job.id,
+                attempt=1,
+                label=f"krater-test-short-{i}",
+                state=ComputeInstanceState.DESTROYED,
+                offer_id=1000 + i,
+                gpu_name="RTX 3060",
+                interruptible=True,
+                gpu_microusd=50_000,
+                disk_microusd=2_000,
+                accrued_microusd=3_000,  # $0.003 each
+            )
+        )
+    db_session.flush()
+
+    assert spend.project_compute_spend_cents(db_session, project) == 1  # $0.009 in all, not 3 cents
