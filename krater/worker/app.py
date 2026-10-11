@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import UTC, datetime
 
 import procrastinate
 
@@ -14,11 +15,12 @@ from krater.config import get_settings
 from krater.db import get_sessionmaker
 from krater.models import Project, ProjectRevision
 from krater.quilt import sender as quilt_sender
-from krater.services import slack_notify, slack_reviews
+from krater.services import price_history, slack_notify, slack_reviews
 from krater.services.pricing import refresh_prices
 from krater.services.skypilot_sync import reconcile
 from krater.skypilot import SkyPilotError, get_skypilot_client
 from krater.slack import SlackError, get_slack_client
+from krater.vast import get_vast_client
 from krater.weave import get_weave_client
 
 logger = logging.getLogger(__name__)
@@ -99,6 +101,48 @@ def pricing_refresh(timestamp: int) -> None:
         logger.info("krater pricing_refresh: %d accelerator/count groups", count)
     except SkyPilotError:
         logger.exception("krater.pricing_refresh task failed; keeping last known prices")
+        session.rollback()
+    finally:
+        session.close()
+
+
+# --------------------------------------------------------------------------------------------------
+# Krater Compute: Krater's own Vast price history. See `krater.services.price_history`. Only the worker
+# holds a Vast client; without a usable one (no key, or the fake in production) this does nothing.
+# --------------------------------------------------------------------------------------------------
+
+
+def _price_history_cron() -> str:
+    """`*/N * * * *` from `price_history_interval_minutes` -- see `_skypilot_reconcile_cron` above."""
+    return f"*/{get_settings().price_history_interval_minutes} * * * *"
+
+
+@app.periodic(cron=_price_history_cron())
+@app.task(name="price_history_record")
+def price_history_record(timestamp: int) -> None:
+    """Sample Vast's prices for the tracked GPU models. Fails soft: a failed run leaves a gap in the history."""
+    client = get_vast_client()
+    if client is None:
+        return
+    settings = get_settings()
+    session = get_sessionmaker()()
+    try:
+        result = price_history.record(
+            session,
+            client,
+            gpu_names=settings.price_history_gpus,
+            disk_gb=settings.price_history_disk_gb,
+            now=datetime.fromtimestamp(timestamp, tz=UTC),
+        )
+        session.commit()
+        logger.info(
+            "krater price_history_record: %d samples, %d failed%s",
+            result.written,
+            result.failed,
+            " (stopped early)" if result.stopped_early else "",
+        )
+    except Exception:
+        logger.exception("krater.price_history_record failed")
         session.rollback()
     finally:
         session.close()
