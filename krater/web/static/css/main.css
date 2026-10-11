@@ -1419,6 +1419,8 @@ h1 .badge {
 
 /* The wrapper scrolls on small screens, never the page. */
 .table-scroll {
+  /* Positioned, so a visually hidden header label stays inside the scrolling box instead of widening the page. */
+  position: relative;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
   background: var(--surface);
