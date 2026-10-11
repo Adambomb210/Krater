@@ -37,7 +37,7 @@
       <dt>State</dt><dd>{{ instance.state.value }}</dd>
       {% if job.kind.value == "box" and instance.ssh_host and instance.ssh_port %}
         <dt>SSH</dt><dd><code>ssh -p {{ instance.ssh_port }} root@{{ instance.ssh_host }}</code></dd>
-        <dt>Jupyter</dt><dd>Through an SSH tunnel: <code>ssh -L 8888:localhost:8888 -p {{ instance.ssh_port }} root@{{ instance.ssh_host }}</code></dd>
+        <dt>Jupyter</dt><dd>If you start Jupyter in the box, reach it through an SSH tunnel: <code>ssh -L 8888:localhost:8888 -p {{ instance.ssh_port }} root@{{ instance.ssh_host }}</code></dd>
       {% endif %}
       {% if instance.last_synced_at %}<dt>Workspace saved</dt><dd>{{ instance.last_synced_at.strftime("%Y-%m-%d %H:%M UTC") }}</dd>{% endif %}
     </dl>

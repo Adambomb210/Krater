@@ -126,6 +126,9 @@ class ComputeInstance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # When it last went from not running to running (first start, or resume after a pause): Vast restarts the
     # container then, so the runner must start again within the start deadline.
     entered_running_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    # Seconds this instance has spent running in its current run (what max runtime limits), added up by the spend
+    # accrual; reset when a stopped box is resumed.
+    run_seconds: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0, server_default="0")
     paused_since: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     # What this instance has cost so far by Krater's estimate (disk from create, GPU only while running), and up to
     # when. Hourly reconciliation with Vast's charges corrects it.

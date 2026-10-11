@@ -61,6 +61,8 @@ def accrue(session: Session, *, now: datetime) -> set[uuid.UUID]:
             continue
         seconds = (now - start).total_seconds()
         row.accrued_microusd += round(hourly_rate_microusd(row) * seconds / SECONDS_PER_HOUR)
+        if row.state is ComputeInstanceState.RUNNING:
+            row.run_seconds += round(seconds)
         row.accrued_until = now
         touched_jobs.add(row.job_id)
     if not touched_jobs:

@@ -422,9 +422,14 @@ class Scheduler:
                 job.state = ComputeJobState.RUNNING
                 job.state_reason = None
                 _event(self.session, job, "resumed", "The machine is running again.", now=self.now, instance=row)
-            over_runtime = row.running_since is not None and self.now - row.running_since >= timedelta(
-                minutes=job.max_runtime_minutes
-            )
+            # Time actually running (paused and stopped time don't count), added up by the spend accrual.
+            over_runtime = row.run_seconds >= job.max_runtime_minutes * 60
+            if over_runtime and job.kind is ComputeJobKind.BOX:
+                # Never destroy a box's disk on its own: stop it, and the member can resume it for another run.
+                if row.stop_requested_at is None:
+                    self.request_stop(row, job, f"max runtime of {job.max_runtime_minutes} minutes reached")
+                self._finish_stopping(row, job, policy)
+                return
             if over_runtime:
                 _finish(
                     job,
@@ -571,6 +576,7 @@ class Scheduler:
             if seen.is_running:
                 row.state = ComputeInstanceState.RUNNING
                 row.entered_running_at = self.now
+                row.run_seconds = 0  # a resumed box starts a new run
                 row.start_requested_at = None
                 row.stopped_at = None
                 job.state = ComputeJobState.RUNNING
@@ -589,8 +595,10 @@ class Scheduler:
             else:
                 self.client.start_instance(row.vast_instance_id)
             return
-        if seen.is_running:
-            # Running without Krater starting it: a member can start their own instance with the container's key.
+        if seen.is_running and "running" in (seen.intended_status, seen.cur_state):
+            # Running and meant to be, without Krater starting it: a member can start their own instance with the
+            # container's key. (Right after Krater's own stop, Vast still reports `running` for a while, but its
+            # intended state is already `stopped`: that's lag, not a restart.)
             # Bill it at the full rate for the time since Krater last looked, and stop it again.
             if previously_seen is not None:
                 extra = round(row.gpu_microusd * (self.now - previously_seen).total_seconds() / 3600)
@@ -639,7 +647,12 @@ class Scheduler:
         """Checked once per pass: any SSH key on the Vast account may be installed in every instance, which would let
         its holder into every member's box. Krater refuses to start boxes while there are any."""
         if self._ssh_keys_on_account is None:
-            self._ssh_keys_on_account = bool(self.client.list_ssh_keys())
+            try:
+                self._ssh_keys_on_account = bool(self.client.list_ssh_keys())
+            except VastError:
+                # Can't tell: refuse boxes this pass, but keep starting jobs.
+                logger.warning("krater.compute: could not check the Vast account's SSH keys; no boxes this pass")
+                self._ssh_keys_on_account = True
         return self._ssh_keys_on_account
 
     def _requeue_moved(self, job: ComputeJob) -> None:

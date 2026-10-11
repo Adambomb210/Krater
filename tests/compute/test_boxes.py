@@ -247,3 +247,80 @@ def test_only_boxes_stop_and_resume(db_session, member, project) -> None:  # noq
     job = _submit(db_session, member, project)
     with pytest.raises(InvalidState):
         compute_jobs.stop_box(db_session, member, job=job, now=NOW)
+
+
+def test_max_runtime_counts_running_time_only(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job = _box(db_session, member, project, max_runtime_minutes=8 * 60)
+    _pass(db_session, client)
+    row = _instance(db_session, job)
+    fake.set_status(row.vast_instance_id, "running")
+    runner_api.start(db_session, row, now=NOW + timedelta(minutes=1))
+    for minute in range(2, 63):
+        _beat(db_session, row, minute, sessions=1)
+        _pass(db_session, client, NOW + timedelta(minutes=minute))
+    compute_jobs.stop_box(db_session, member, job=job, now=NOW + timedelta(minutes=63))
+    runner_api.synced(db_session, row, now=NOW + timedelta(minutes=63, seconds=5))
+    _pass(db_session, client, NOW + timedelta(minutes=64))
+    assert row.state is ComputeInstanceState.STOPPED
+
+    later = NOW + timedelta(hours=11)
+    compute_jobs.resume_box(db_session, member, job=job, now=later)
+    _pass(db_session, client, later + timedelta(minutes=1))
+    _pass(db_session, client, later + timedelta(minutes=2))
+    runner_api.start(db_session, row, now=later + timedelta(minutes=2, seconds=10))
+    _beat(db_session, row, 11 * 60 + 3, sessions=1)
+    _pass(db_session, client, later + timedelta(minutes=3))
+
+    assert job.state is ComputeJobState.RUNNING and row.state is ComputeInstanceState.RUNNING
+
+
+def test_a_box_at_its_max_runtime_is_stopped_not_destroyed(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job = _box(db_session, member, project, max_runtime_minutes=30)
+    _pass(db_session, client)
+    row = _instance(db_session, job)
+    fake.set_status(row.vast_instance_id, "running")
+    runner_api.start(db_session, row, now=NOW + timedelta(minutes=1))
+    for minute in range(2, 34):
+        _beat(db_session, row, minute, sessions=1)
+        _pass(db_session, client, NOW + timedelta(minutes=minute))
+    assert row.stop_requested_at is not None
+    runner_api.synced(db_session, row, now=NOW + timedelta(minutes=34))
+    _pass(db_session, client, NOW + timedelta(minutes=35))
+
+    assert row.state is ComputeInstanceState.STOPPED and job.state is ComputeJobState.STOPPED
+    assert "max runtime" in job.state_reason
+    assert row.vast_instance_id in fake.instances
+
+
+def test_vasts_lag_after_a_stop_is_not_a_member_restart(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job, row = _running_box(db_session, member, project, client, fake)
+    fake.lag_stops = True
+    compute_jobs.stop_box(db_session, member, job=job, now=NOW + timedelta(minutes=3))
+    runner_api.synced(db_session, row, now=NOW + timedelta(minutes=3, seconds=10))
+    _pass(db_session, client, NOW + timedelta(minutes=4))  # Krater stops it; Vast still says running
+    before = row.accrued_microusd
+
+    _pass(db_session, client, NOW + timedelta(minutes=5))
+
+    assert row.state is ComputeInstanceState.STOPPED
+    assert "unexpected_start" not in _events(db_session, job)
+    assert row.accrued_microusd - before < row.gpu_microusd / 60  # disk only
+
+
+def test_a_failing_ssh_key_check_refuses_boxes_but_not_jobs(db_session, member, project, fake) -> None:  # noqa: F811
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v0/ssh/":
+            return httpx.Response(502, text="bad gateway")
+        return fake.handle(request)
+
+    client = fake.client()
+    client._http = httpx.Client(transport=httpx.MockTransport(handler))
+    box = _box(db_session, member, project)
+    job = _submit(db_session, member, project, now=NOW + timedelta(seconds=1))
+
+    _pass(db_session, client, NOW + timedelta(seconds=2))
+
+    assert box.state is ComputeJobState.QUEUED
+    assert job.state is ComputeJobState.STARTING
