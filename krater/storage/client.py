@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from krater.storage.types import ObjectMeta, PresignedPost
+from krater.storage.types import ListedObject, ObjectMeta, PresignedPost
 
 #: Default lifetime for a presigned upload/download URL. Short: these are handed to a browser and used
 #: (or not) within the same page load.
@@ -47,6 +47,32 @@ class ObjectStore(Protocol):
 
     def delete(self, key: str) -> None:
         """Delete `key`. Safe to call on a key that's already gone (S3's own `DeleteObject` semantics)."""
+        ...
+
+    # -- Machine uploads (Krater Compute checkpoints and outputs) ---------------------------------------
+    # A rented machine gets only presigned URLs, never storage credentials. Uploads bigger than one part go up
+    # as multipart uploads, so no single request body passes Cloudflare's cap in front of the storage host.
+
+    def presign_put(self, key: str, *, expires: int = DEFAULT_UPLOAD_EXPIRES_SECONDS) -> str:
+        """A presigned `PUT` URL for uploading `key` in one request."""
+        ...
+
+    def list_prefix(self, prefix: str) -> list[ListedObject]:
+        """Every object whose key starts with `prefix`."""
+        ...
+
+    def create_multipart_upload(self, key: str) -> str:
+        """Start a multipart upload of `key`; returns its upload id."""
+        ...
+
+    def presign_upload_part(
+        self, key: str, *, upload_id: str, part_number: int, expires: int = DEFAULT_UPLOAD_EXPIRES_SECONDS
+    ) -> str:
+        """A presigned `PUT` URL for one part (numbered from 1) of a multipart upload."""
+        ...
+
+    def complete_multipart_upload(self, key: str, *, upload_id: str, parts: list[tuple[int, str]]) -> None:
+        """Finish a multipart upload from its `(part number, ETag)` pairs."""
         ...
 
 

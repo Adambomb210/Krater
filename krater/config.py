@@ -65,6 +65,14 @@ class Settings(BaseSettings):
     # account with this prefix that it has no record of, so give each Krater (staging, production) sharing a Vast
     # account its own prefix, and never start another tool's labels with it.
     compute_label_prefix: str = DEFAULT_COMPUTE_LABEL_PREFIX
+    # Where a rented machine reaches Krater: the runner downloads itself from here and reports to it. Blank means
+    # `base_url`; local staging sets its public tunnel URL.
+    compute_runner_url: str = ""
+    # The runner binary the portal serves and the worker checksums (built by the Dockerfile's runner stage).
+    compute_runner_binary_path: str = "/app/runner/dist/krater-runner-linux-amd64"
+    # The bucket for job checkpoints and outputs, on the same S3 storage as screenshots. Machines only ever get
+    # presigned URLs for their own job's keys in it.
+    compute_s3_bucket: str = "krater-compute"
 
     # SkyPilot integration. See docs/skypilot-integration.md and docs/dev/skypilot-spike.md.
     # `fake` uses an in-memory SkyPilot for dev and tests; `live` talks to a real API server over REST.

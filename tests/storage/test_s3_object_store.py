@@ -254,3 +254,52 @@ def test_ensure_bucket_raises_storage_unavailable_on_failure(clients) -> None:
         stubber.add_client_error("head_bucket", service_error_code="500", http_status_code=500)
         with pytest.raises(StorageUnavailableError):
             store.ensure_bucket()
+
+
+# --------------------------------------------------------------------------------------------------
+# Machine uploads: presigned PUTs and multipart parts, signed for the public endpoint.
+# --------------------------------------------------------------------------------------------------
+
+
+def test_presign_put_and_upload_part_target_the_public_endpoint_and_the_right_bucket(clients) -> None:
+    settings, internal, public = clients
+    store = S3ObjectStore(settings, bucket="krater-compute", internal_client=internal, public_client=public)
+
+    put = store.presign_put("projects/p/jobs/j/checkpoints/step.pt", expires=600)
+    part = store.presign_upload_part("projects/p/jobs/j/checkpoints/big.pt", upload_id="u1", part_number=3)
+
+    assert put.startswith("https://public-storage.example.com/krater-compute/projects/p/jobs/j/checkpoints/step.pt?")
+    assert "X-Amz-Expires=600" in put
+    assert "/krater-compute/projects/p/jobs/j/checkpoints/big.pt?" in part
+    assert "uploadId=u1" in part and "partNumber=3" in part
+
+
+def test_list_prefix_and_multipart_round_trip(clients) -> None:
+    settings, internal, public = clients
+    store = S3ObjectStore(settings, bucket="krater-compute", internal_client=internal, public_client=public)
+    with Stubber(internal) as stub:
+        stub.add_response(
+            "list_objects_v2",
+            {"Contents": [{"Key": "p/a.pt", "Size": 10}, {"Key": "p/b.pt", "Size": 20}], "IsTruncated": False},
+            {"Bucket": "krater-compute", "Prefix": "p/"},
+        )
+        stub.add_response(
+            "create_multipart_upload", {"UploadId": "u9"}, {"Bucket": "krater-compute", "Key": "p/big.pt"}
+        )
+        stub.add_response(
+            "complete_multipart_upload",
+            {},
+            {
+                "Bucket": "krater-compute",
+                "Key": "p/big.pt",
+                "UploadId": "u9",
+                "MultipartUpload": {"Parts": [{"PartNumber": 1, "ETag": '"a"'}, {"PartNumber": 2, "ETag": '"b"'}]},
+            },
+        )
+
+        listed = store.list_prefix("p/")
+        upload_id = store.create_multipart_upload("p/big.pt")
+        store.complete_multipart_upload("p/big.pt", upload_id=upload_id, parts=[(2, '"b"'), (1, '"a"')])
+
+    assert [(o.key, o.size_bytes) for o in listed] == [("p/a.pt", 10), ("p/b.pt", 20)]
+    assert upload_id == "u9"

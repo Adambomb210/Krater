@@ -29,17 +29,18 @@ def main(*, attempts: int = DEFAULT_ATTEMPTS, delay_seconds: float = DEFAULT_DEL
         logger.info("KRATER_S3_MODE=%s: no bucket to set up", settings.s3_mode)
         return
 
-    store = S3ObjectStore(settings)
+    stores = [S3ObjectStore(settings), S3ObjectStore(settings, bucket=settings.compute_s3_bucket)]
     for attempt in range(1, attempts + 1):
         try:
-            store.ensure_bucket()
+            for store in stores:
+                store.ensure_bucket()
         except StorageUnavailableError as exc:
             if attempt == attempts:
                 raise
             logger.warning("storage not ready (attempt %d/%d): %s", attempt, attempts, exc)
             time.sleep(delay_seconds)
         else:
-            logger.info("bucket %r is ready", settings.s3_bucket)
+            logger.info("buckets %r and %r are ready", settings.s3_bucket, settings.compute_s3_bucket)
             return
 
 
