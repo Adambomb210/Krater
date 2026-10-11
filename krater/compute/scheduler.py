@@ -615,6 +615,8 @@ class Scheduler:
             label=label,
             bid_price=choice.bid,
             env=launch.job_env(job, attempt),
+            runtype="args",
+            onstart=launch.ENTRYPOINT,
             args=launch.startup_args(job),
         )
         try:
