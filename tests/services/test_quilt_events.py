@@ -34,6 +34,7 @@ from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
 from krater.services.quilt_events import (
     BUDGET_COMMITTED,
     BUDGET_RELEASED,
+    SPEND_CORRECTED,
     SPEND_RECORDED,
     SUBMISSION_CREATED,
     SUBMISSION_UPDATED,
@@ -331,6 +332,39 @@ def test_spend_is_sent_as_the_cumulative_total_only_when_it_changes(
     ).first()
     assert spend_rows[-1].id == event_id("spend", latest.id)
     assert spend_rows[-1].occurred_at == latest.taken_at
+
+
+def test_a_lower_total_is_sent_as_a_correction_with_a_reason(
+    db_session: Session, member: Actor, reviewer: Actor
+) -> None:
+    project = _approved(db_session, member, reviewer)
+    _spend(db_session, project, 2_500)
+    _spend(db_session, project, 1_800)
+    _spend(db_session, project, 1_800)
+    _spend(db_session, project, 2_000)
+
+    spend_rows = [row for row in _rows(db_session, project) if row.type in (SPEND_RECORDED, SPEND_CORRECTED)]
+    assert [(row.type, row.payload["spent_cents_total"]) for row in spend_rows] == [
+        (SPEND_RECORDED, 2_500),
+        (SPEND_CORRECTED, 1_800),
+        (SPEND_RECORDED, 2_000),
+    ]
+    assert spend_rows[1].payload["reason"]
+
+
+def test_a_correction_takes_off_the_overspend_first_as_quilt_does(
+    db_session: Session, member: Actor, reviewer: Actor, admin: Actor
+) -> None:
+    """Quilt's own example (docs/patch-api.md, `spend.corrected`): commitment 10000, spend 12000, corrected to 9000:
+    the overspend goes to 0 and 1000 of drawdown comes back, so 1000 stays committed."""
+    project = _approved(db_session, member, reviewer, budget_cents=10_000)
+    _spend(db_session, project, 12_000)
+    _spend(db_session, project, 9_000)
+    # Releasing more than Quilt's remaining 1000 is capped at 1000.
+    projects.admin_adjust_budget(db_session, admin, project=project, amount_cents=-5_000, reason="Cut.")
+
+    last = _rows(db_session, project)[-1]
+    assert (last.type, last.payload["amount_cents"]) == (BUDGET_RELEASED, 1_000)
 
 
 # --------------------------------------------------------------------------------------------------

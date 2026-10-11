@@ -7,7 +7,7 @@ from datetime import timedelta
 import sqlalchemy as sa
 
 from krater.compute import reconcile
-from krater.models import AuditEvent, QuiltOutbox, SpendReconciliation, SpendSnapshot
+from krater.models import AuditEvent, QuiltOutbox, SpendReconciliation
 from krater.services import budget
 from krater.vast import CreateInstance
 from tests.compute.test_scheduler import NOW, SETTINGS, _beat, _instance, _pass, _runner_starts, _submit
@@ -71,7 +71,7 @@ def test_a_lower_charge_never_lowers_a_live_instances_estimate(db_session, membe
     assert row.accrued_microusd == estimate
 
 
-def test_a_destroyed_instance_takes_vasts_lower_figure_but_quilt_never_goes_down(
+def test_a_destroyed_instance_takes_vasts_lower_figure_and_quilt_gets_a_correction(
     db_session,
     member,
     project,
@@ -85,17 +85,46 @@ def test_a_destroyed_instance_takes_vasts_lower_figure_but_quilt_never_goes_down
     _pass(db_session, client, NOW + timedelta(minutes=65))
     assert row.destroyed_at is not None
     before = budget.latest_spend_cents(db_session, project)
-    snapshots_before = db_session.scalar(sa.select(sa.func.count()).select_from(SpendSnapshot))
-    outbox_before = db_session.scalar(sa.select(sa.func.count()).select_from(QuiltOutbox))
     fake.add_charge(row.vast_instance_id, gpu="0.010", disk="0.001")
 
     _reconcile(db_session, client, minutes=70)
 
     assert row.accrued_microusd == 11_000
-    assert job.spend_cents == 2  # Krater's own records take Vast's figure...
-    assert budget.latest_spend_cents(db_session, project) == before  # ...the snapshot and Quilt don't go down
-    assert db_session.scalar(sa.select(sa.func.count()).select_from(SpendSnapshot)) == snapshots_before
-    assert db_session.scalar(sa.select(sa.func.count()).select_from(QuiltOutbox)) == outbox_before
+    assert job.spend_cents == 2
+    assert budget.latest_spend_cents(db_session, project) == 2 < before  # the budget gets the difference back
+    last = db_session.scalars(sa.select(QuiltOutbox).order_by(QuiltOutbox.seq.desc())).first()
+    assert last.type == "spend.corrected"
+    assert last.payload["spent_cents_total"] == 2 and last.payload["reason"]
+    # The next scheduler pass doesn't put the higher estimate back.
+    _pass(db_session, client, NOW + timedelta(minutes=71))
+    assert budget.latest_spend_cents(db_session, project) == 2
+
+
+def test_charges_for_an_unconfirmed_create_count_against_its_job(db_session, member, project, fake) -> None:  # noqa: F811
+    """Staging, 2026-10-11: Vast answered a create `{"success": false}`, rented anyway, and the sweep destroyed it."""
+    import httpx
+
+    job = _submit(db_session, member, project)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = fake.handle(request)
+        if request.method == "PUT" and "/asks/" in request.url.path:
+            return httpx.Response(400, json={"success": False, "error": "invalid_args", "msg": "GPU conflict"})
+        return response
+
+    refusing = fake.client()
+    refusing._http = httpx.Client(transport=httpx.MockTransport(handler))
+    _pass(db_session, refusing)  # refused (a 4xx), but the fake did rent it
+    row = _instance(db_session, job)
+    vast_id = next(iter(fake.instances))
+    fake.add_charge(vast_id, gpu="0.002", disk="0.001")
+
+    result = _reconcile(db_session, fake.client(), minutes=10)
+
+    assert result.unknown_sources == []
+    assert row.vast_instance_id == vast_id and row.state.value == "create_failed"
+    assert row.accrued_microusd == 3_000
+    assert job.spend_cents == 1
 
 
 def test_an_instance_with_no_charges_yet_keeps_its_estimate(db_session, member, project, client, fake) -> None:  # noqa: F811

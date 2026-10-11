@@ -25,8 +25,9 @@ move), runtime limits and finished projects, and confirms every destroy. See [sc
 
 **Spend**. A live estimate per instance (disk from create, GPU only while running) into `SpendSnapshot`, so the project
 page, the 80%/100% alerts and Quilt events work as before; a hard stop one minute ahead of the ceiling; an hourly
-reconciliation with Vast's charges, which never lowers a live instance's estimate and never sends Quilt a decrease
-(quilt#17).
+reconciliation with Vast's charges, which never lowers a live instance's estimate; a finished machine's lower final
+charge lowers the total, sent to Quilt as `spend.corrected`. Charges for a create Vast didn't confirm count against
+that create's job.
 
 **Runner** (`runner/`, Go, standard library). Fetched by a bootstrap that checks its sha256; reports start, heartbeats
 with nvidia-smi GPU use, restores and uploads checkpoints and outputs through presigned URLs (signed sizes, multipart

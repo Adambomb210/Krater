@@ -235,8 +235,8 @@ Uploads use presigned URLs, and only objects from approved completion revisions 
 - The **ceiling** is the sum of the project's `BudgetEntry` rows. Approvals, amendments, admin adjustments and reclaims
   all add entries, so the ledger doubles as the audit trail.
 - **Spend** is Krater's live estimate from the price each machine was actually rented at (disk from create, GPU only
-  while running), corrected every hour from Vast's own charges. Quilt only ever gets increases until
-  patchworklabsorg/quilt#17.
+  while running), corrected every hour from Vast's own charges. A correction downwards reaches Quilt as
+  `spend.corrected`.
 - **Enforcement** (details in [compute/scheduler.md](compute/scheduler.md)): Krater only rents within the project's
   hourly cap and remaining budget (holding a job's expected cost), warns the project channel at 80% of the ceiling, and
   stops and destroys the project's machines one minute before it would pass 100%.
