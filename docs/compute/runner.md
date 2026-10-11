@@ -46,8 +46,12 @@ or Python; its own ENTRYPOINT is not run, so put any setup in the command.
 The runner holds one secret, `KRATER_JOB_TOKEN`. It works for this instance only and only while it is live (Krater
 stores its sha256). Storage is reached through presigned URLs for this job's own keys
 (`projects/<project>/jobs/<job>/checkpoints|outputs/`), single PUTs up to 64 MB and multipart parts above that, so no
-request body passes Cloudflare's cap in front of the storage host. The organization's Vast key never reaches a
-machine.
+request body passes Cloudflare's cap in front of the storage host. Each URL is signed for its exact size, so a
+machine can't upload more than it asked for, and Krater refuses URLs past the project's storage quota (an admin
+setting, 50 GB by default; replacing a file counts only the difference). Checked against SeaweedFS 4.47 on
+2026-10-11: a body of the signed size gets 200, a bigger or smaller one 403, for single PUTs and parts alike.
+Unfinished multipart uploads are aborted hourly once their job has ended (SeaweedFS lists no start time, so age
+alone can't decide). The organization's Vast key never reaches a machine.
 
 ## Tests
 

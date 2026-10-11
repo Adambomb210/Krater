@@ -115,6 +115,15 @@ POLICY_FIELDS: tuple[PolicyField, ...] = (
         30,
     ),
     PolicyField(
+        "storage_quota_gb",
+        "Storage quota",
+        "Checkpoints and outputs one project's machines may keep in Krater's storage. Uploads past it are refused.",
+        "GB",
+        1,
+        10000,
+        50,
+    ),
+    PolicyField(
         "reconcile_alert_percent",
         "Reconciliation alert",
         "Admins are alerted when Vast's hourly charges differ from Krater's estimate by more than this.",
@@ -140,6 +149,7 @@ class ComputePolicy:
     reconcile_alert_percent: int
     runner_start_minutes: int
     heartbeat_timeout_minutes: int
+    storage_quota_gb: int
     #: The fields a project overrides (empty for the global policy).
     overridden: frozenset[str] = frozenset()
 

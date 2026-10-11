@@ -65,3 +65,13 @@ def test_compute_reconcile_runs_hourly_under_the_scheduler_lock(monkeypatch) -> 
     with patch("krater.worker.app.compute_reconciler") as mock_reconciler:
         compute_reconcile.func(timestamp=1_791_700_000)
         mock_reconciler.run.assert_not_called()
+
+
+def test_compute_storage_cleanup_is_hourly_and_only_with_vast(monkeypatch) -> None:
+    from krater.worker.app import compute_storage_cleanup
+
+    assert app.periodic_registry.periodic_tasks[("compute_storage_cleanup", "")].cron == "37 * * * *"
+    monkeypatch.setattr(get_settings(), "compute_mode", "off")
+    with patch("krater.worker.app.compute_storage") as mock_cleanup:
+        compute_storage_cleanup.func(timestamp=1_791_700_000)
+        mock_cleanup.abort_abandoned_uploads.assert_not_called()

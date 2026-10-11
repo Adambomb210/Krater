@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 
 @dataclass(frozen=True)
@@ -35,4 +36,14 @@ class ListedObject:
     size_bytes: int
 
 
-__all__ = ["ListedObject", "ObjectMeta", "PresignedPost"]
+@dataclass(frozen=True)
+class MultipartUpload:
+    """A multipart upload started and not finished. `initiated` is `None` when the backend doesn't say (SeaweedFS
+    4.47 lists only the key and the upload id)."""
+
+    key: str
+    upload_id: str
+    initiated: datetime | None
+
+
+__all__ = ["ListedObject", "MultipartUpload", "ObjectMeta", "PresignedPost"]

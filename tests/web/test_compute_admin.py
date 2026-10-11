@@ -21,6 +21,7 @@ FORM = {
     "reconcile_alert_percent": "10",
     "runner_start_minutes": "10",
     "heartbeat_timeout_minutes": "30",
+    "storage_quota_gb": "50",
 }
 
 

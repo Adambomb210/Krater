@@ -164,13 +164,29 @@ def list_files(store: ObjectStore, instance: ComputeInstance, area: str) -> list
     ]
 
 
-def begin_upload(store: ObjectStore, instance: ComputeInstance, area: str, name: str, size: int) -> dict[str, Any]:
-    """One presigned PUT for a small file; for a big one, a multipart upload with a presigned URL per part."""
+def project_usage_bytes(store: ObjectStore, instance: ComputeInstance) -> dict[str, int]:
+    """Bytes stored per key under the instance's project."""
+    prefix = f"projects/{instance.job.project_id}/"
+    return {item.key: item.size_bytes for item in store.list_prefix(prefix)}
+
+
+def begin_upload(
+    store: ObjectStore, instance: ComputeInstance, area: str, name: str, size: int, *, quota_bytes: int
+) -> dict[str, Any]:
+    """One presigned PUT for a small file; for a big one, a multipart upload with a presigned URL per part. Each URL
+    is signed for its exact size, and the upload must fit the project's storage quota (replacing a file counts only
+    the difference)."""
     key = _key(instance, area, name)
     if not 0 <= size <= MAX_UPLOAD_BYTES:
         raise ValidationFailed({"size": f"Files can be up to {MAX_UPLOAD_BYTES // 1024**3} GB."})
+    usage = project_usage_bytes(store, instance)
+    used = sum(usage.values()) - usage.get(key, 0)
+    if used + size > quota_bytes:
+        raise ValidationFailed(
+            {"size": f"The project's storage quota of {quota_bytes // 1024**3} GB is full ({used} bytes used)."}
+        )
     if size <= PART_BYTES:
-        return {"name": name, "url": store.presign_put(key, expires=URL_EXPIRES_SECONDS)}
+        return {"name": name, "url": store.presign_put(key, content_length=size, expires=URL_EXPIRES_SECONDS)}
     upload_id = store.create_multipart_upload(key)
     parts = math.ceil(size / PART_BYTES)
     return {
@@ -178,7 +194,13 @@ def begin_upload(store: ObjectStore, instance: ComputeInstance, area: str, name:
         "upload_id": upload_id,
         "part_bytes": PART_BYTES,
         "parts": [
-            store.presign_upload_part(key, upload_id=upload_id, part_number=n, expires=URL_EXPIRES_SECONDS)
+            store.presign_upload_part(
+                key,
+                upload_id=upload_id,
+                part_number=n,
+                content_length=min(PART_BYTES, size - (n - 1) * PART_BYTES),
+                expires=URL_EXPIRES_SECONDS,
+            )
             for n in range(1, parts + 1)
         ],
     }

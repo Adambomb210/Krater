@@ -14,6 +14,7 @@ import procrastinate
 from krater.compute import launch as compute_launch
 from krater.compute import reconcile as compute_reconciler
 from krater.compute import scheduler as compute_scheduler
+from krater.compute import storage_cleanup as compute_storage
 from krater.config import get_settings
 from krater.db import get_sessionmaker
 from krater.models import Project, ProjectRevision
@@ -22,6 +23,7 @@ from krater.quilt import sender as quilt_sender
 from krater.services import price_history, slack_notify, slack_reviews
 from krater.services.pricing import refresh_prices
 from krater.slack import SlackError, get_slack_client
+from krater.storage import StorageError, get_compute_store
 from krater.vast import get_vast_client
 from krater.weave import get_weave_client
 
@@ -181,6 +183,25 @@ def compute_reconcile(timestamp: int) -> None:
     except Exception:
         logger.exception("krater.compute_reconcile failed")
         session.rollback()
+    finally:
+        session.close()
+
+
+@app.periodic(cron="37 * * * *")
+@app.task(name="compute_storage_cleanup")
+def compute_storage_cleanup(timestamp: int) -> None:
+    """Hourly: abort unfinished multipart uploads of jobs that have ended (`krater.compute.storage_cleanup`)."""
+    if get_settings().compute_mode != "vast":
+        return
+    session = get_sessionmaker()()
+    try:
+        aborted = compute_storage.abort_abandoned_uploads(
+            session, get_compute_store(), now=datetime.fromtimestamp(timestamp, tz=UTC)
+        )
+        if aborted:
+            logger.info("krater compute_storage_cleanup: aborted %d unfinished uploads", aborted)
+    except StorageError:
+        logger.exception("krater.compute_storage_cleanup failed")
     finally:
         session.close()
 
