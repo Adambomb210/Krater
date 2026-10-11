@@ -24,6 +24,7 @@ __all__ = [
     "S3ObjectStore",
     "StorageError",
     "StorageUnavailableError",
+    "get_compute_store",
     "get_object_store",
 ]
 
@@ -39,3 +40,12 @@ def get_object_store() -> ObjectStore:
     if settings.s3_mode == "fake":
         return FakeObjectStore()
     return S3ObjectStore(settings)
+
+
+@lru_cache
+def get_compute_store() -> ObjectStore:
+    """The store for Krater Compute's checkpoints and outputs: the same storage, its own bucket."""
+    settings = get_settings()
+    if settings.s3_mode == "fake":
+        return FakeObjectStore()
+    return S3ObjectStore(settings, bucket=settings.compute_s3_bucket)

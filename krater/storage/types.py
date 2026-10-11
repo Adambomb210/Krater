@@ -27,4 +27,12 @@ class ObjectMeta:
     content_type: str | None
 
 
-__all__ = ["ObjectMeta", "PresignedPost"]
+@dataclass(frozen=True)
+class ListedObject:
+    """One object under a prefix, from `ObjectStore.list_prefix`."""
+
+    key: str
+    size_bytes: int
+
+
+__all__ = ["ListedObject", "ObjectMeta", "PresignedPost"]
