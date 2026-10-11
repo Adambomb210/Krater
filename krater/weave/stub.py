@@ -26,6 +26,8 @@ from krater.weave.types import WeaveIdentity, WeaveUser
 
 #: The fake client_credentials token `quilt_token` returns. A real Quilt refuses it (Weave never issued it).
 STUB_QUILT_TOKEN = "stub-quilt-token"
+#: The stub accepts `<prefix>:<sub>` as a Krater CLI token for that fixture user.
+STUB_CLI_TOKEN_PREFIX = "stub-cli-token"
 
 #: The bundled fixture, used whenever `settings.weave_stub_users_file` is blank.
 DEFAULT_STUB_USERS_FILE = Path(__file__).parent / "stub_users.json"
@@ -112,7 +114,20 @@ class StubWeaveClient:
     def invalidate_quilt_token(self) -> None:
         self.quilt_token_invalidations += 1
 
+    def cli_token_sub(self, token: str) -> str | None:
+        prefix = f"{STUB_CLI_TOKEN_PREFIX}:"
+        if not token.startswith(prefix):
+            return None
+        sub = token[len(prefix) :]
+        user = self._users_by_sub.get(sub)
+        return sub if user is not None and user.active else None
+
     # -- Stub-only helpers ---------------------------------------------------------------------------
+
+    @staticmethod
+    def cli_token_for(sub: str) -> str:
+        """A CLI access token the stub accepts for `sub` (tests and local dev)."""
+        return f"{STUB_CLI_TOKEN_PREFIX}:{sub}"
 
     def list_all_users(self) -> list[WeaveUser]:
         """Every fixture user, in file order, with Krater role names. Used by the `/auth/stub` picker."""

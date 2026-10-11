@@ -49,6 +49,9 @@ TOKEN_EXPIRY_MARGIN_SECONDS = 30.0
 
 #: Used when the token response has no usable `expires_in`.
 DEFAULT_TOKEN_LIFETIME_SECONDS = 300.0
+#: How long a checked CLI token is trusted before asking Weave again (never past the token's own expiry).
+CLI_TOKEN_CACHE_SECONDS = 60.0
+CLI_TOKEN_CACHE_MAX = 2000
 
 
 def _pkce_code_challenge_s256(code_verifier: str) -> str:
@@ -69,6 +72,8 @@ class LiveWeaveClient:
         # client_credentials tokens by scope: (token, monotonic time to refetch at).
         self._service_tokens: dict[str, tuple[str, float]] = {}
         self._directory_cache: TTLCache[str, WeaveUser | None] = TTLCache(DIRECTORY_CACHE_TTL_SECONDS)
+        # CLI tokens already checked, by their sha256: (sub, monotonic time to check again at).
+        self._cli_tokens: dict[str, tuple[str, float]] = {}
 
     # -- OIDC ------------------------------------------------------------------------------------
 
@@ -218,6 +223,51 @@ class LiveWeaveClient:
             return self._http.get(url, params=params, headers=headers)
         except httpx.HTTPError as exc:
             raise WeaveUnavailableError(f"could not reach Weave's directory at {url}") from exc
+
+    # -- The CLI's tokens ------------------------------------------------------------------------
+
+    def cli_token_sub(self, token: str) -> str | None:
+        """Check a CLI token with the token itself: Doorkeeper's `/oauth/token/info` names the app it was issued to,
+        and `/oauth/userinfo` gives its `sub` and applies Weave's app-access rules. (A token can't introspect itself:
+        Doorkeeper refuses that, per RFC 7662.)"""
+        client_id = self._settings.weave_cli_client_id
+        if not client_id or not token or len(token) > 4096:
+            return None
+        key = hashlib.sha256(token.encode()).hexdigest()
+        cached = self._cli_tokens.get(key)
+        if cached is not None and time.monotonic() < cached[1]:
+            return cached[0]
+        base = (self._settings.weave_api_base_url or self._settings.weave_issuer).rstrip("/")
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            info = self._http.get(f"{base}/oauth/token/info", headers=headers)
+            if info.status_code in (401, 403):
+                return None
+            if info.status_code != 200:
+                raise WeaveUnavailableError(f"Weave answered {info.status_code} to a token check")
+            data = info.json()
+            if not isinstance(data, dict) or (data.get("application") or {}).get("uid") != client_id:
+                return None
+            userinfo = self._http.get(f"{base}/oauth/userinfo", headers=headers)
+            if userinfo.status_code in (401, 403):
+                return None
+            if userinfo.status_code != 200:
+                raise WeaveUnavailableError(f"Weave answered {userinfo.status_code} to userinfo")
+            sub = userinfo.json().get("sub")
+        except httpx.HTTPError as exc:
+            raise WeaveUnavailableError("could not reach Weave to check a CLI token") from exc
+        except ValueError as exc:
+            raise WeaveUnavailableError("Weave's token check wasn't JSON") from exc
+        if not isinstance(sub, str) or not sub:
+            return None
+        expires_in = data.get("expires_in")
+        ttl = CLI_TOKEN_CACHE_SECONDS
+        if isinstance(expires_in, int | float) and expires_in >= 0:
+            ttl = min(ttl, float(expires_in))
+        if len(self._cli_tokens) >= CLI_TOKEN_CACHE_MAX:
+            self._cli_tokens.clear()
+        self._cli_tokens[key] = (sub, time.monotonic() + ttl)
+        return sub
 
     # -- client_credentials tokens ---------------------------------------------------------------
 
