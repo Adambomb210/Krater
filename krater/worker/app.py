@@ -14,6 +14,7 @@ import procrastinate
 from krater.compute import launch as compute_launch
 from krater.compute import reconcile as compute_reconciler
 from krater.compute import scheduler as compute_scheduler
+from krater.compute import search_quota as compute_search_quota
 from krater.compute import storage_cleanup as compute_storage
 from krater.compute.search_pacing import SearchPacer
 from krater.config import get_settings
@@ -122,6 +123,7 @@ def price_history_record(timestamp: int) -> None:
             # Vast rate-limits about 30 searches in quick succession (staging, 2026-10-11).
             pause_seconds=PRICE_HISTORY_SEARCH_PAUSE_SECONDS,
         )
+        compute_search_quota.record(session, client.search_quota, now=datetime.now(UTC))
         session.commit()
         logger.info(
             "krater price_history_record: %d samples, %d failed%s",

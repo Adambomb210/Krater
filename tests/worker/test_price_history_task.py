@@ -64,6 +64,7 @@ def test_price_history_record_records_and_commits() -> None:
     with (
         patch("krater.worker.app.get_vast_client") as mock_client,
         patch("krater.worker.app.price_history") as mock_history,
+        patch("krater.worker.app.compute_search_quota") as mock_quota,
         patch("krater.worker.app.get_sessionmaker") as mock_sessionmaker,
     ):
         session = mock_sessionmaker.return_value.return_value
@@ -74,5 +75,6 @@ def test_price_history_record_records_and_commits() -> None:
         assert kwargs["disk_gb"] == 32
         assert "RTX 4090" in kwargs["gpu_names"]
         assert kwargs["now"].timestamp() == 1_791_700_000
+        mock_quota.record.assert_called_once()  # saved for /admin/compute
         session.commit.assert_called_once()
         session.close.assert_called_once()

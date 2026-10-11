@@ -5,6 +5,7 @@ project's overrides). Admins only; every change needs a reason and writes an `Au
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 import sqlalchemy as sa
@@ -12,11 +13,14 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
+from krater.compute import search_quota
+from krater.compute.search_pacing import LOW_QUOTA_FRACTION
 from krater.db import get_session
 from krater.models import Project, SpendReconciliation
 from krater.services import compute_settings
 from krater.services.actor import Actor
 from krater.services.errors import NotFound, ValidationFailed
+from krater.vast import SearchQuota
 from krater.web.csrf import verify_csrf_token
 from krater.web.deps import require_admin
 from krater.web.flash import flash
@@ -57,6 +61,19 @@ def _parse_form(form, *, allow_blank: bool) -> tuple[dict[str, int | None], dict
     return values, posted, errors
 
 
+def _quota_view(db_session: Session, now: datetime) -> dict | None:
+    row = search_quota.latest(db_session)
+    if row is None:
+        return None
+    quota = SearchQuota(limit=row.limit_rows, remaining=row.remaining_rows, reset_at=row.reset_at)
+    return {
+        "row": row,
+        "reset_passed": now >= row.reset_at,
+        "exhausted": quota.exhausted(now),
+        "low": quota.fraction_left(now) < LOW_QUOTA_FRACTION,
+    }
+
+
 def _global_page(request: Request, db_session: Session, *, errors=None, posted=None, reason="", status_code=200):
     policy = compute_settings.global_policy(db_session)
     overrides = [
@@ -75,6 +92,7 @@ def _global_page(request: Request, db_session: Session, *, errors=None, posted=N
         "admin/compute.html",
         {
             "rows": _field_rows(policy.values(), posted),
+            "quota": _quota_view(db_session, datetime.now(UTC)),
             "overrides": overrides,
             "mismatches": [
                 (check, db_session.get(Project, check.project_id))

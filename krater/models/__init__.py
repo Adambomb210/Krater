@@ -31,6 +31,7 @@ from krater.models.slack_notification import SlackNotification
 from krater.models.spend_snapshot import SpendSnapshot
 from krater.models.ssh_key import UserSshKey
 from krater.models.user import User
+from krater.models.vast_search_quota import VastSearchQuota
 
 __all__ = [
     "ApprovalPolicy",
@@ -65,5 +66,6 @@ __all__ = [
     "SpendSnapshot",
     "SpendSource",
     "User",
+    "VastSearchQuota",
     "UserSshKey",
 ]
