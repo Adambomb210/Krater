@@ -78,8 +78,10 @@ tests/             mirrors krater/ layout
 
 ## Brand
 
-Krater uses Patchwork's "quilt" design system, the same one as Weave and patchworklabs.org: Ink `#2a2050` text on
-Quilt `#f7f5fb` paper, Grape `#6c3ec1` as the primary accent, violet/orchid/sky/teal patches, stitched (dashed)
-cards and buttons, Geist for text and Shantell Sans for headings, and a dark mode. The tokens and motifs live in
-`krater/web/static/css/main.css`, copied from Weave's `app/assets/tailwind/application.css`; keep the two in sync.
-Style through the existing classes (`.card`, `.button--primary`, `.badge--<status>` ...) rather than new colors.
+Krater uses the Patchwork palette with the same role tokens as Quilt's stylesheet: Ink `#2a2050` text on Quilt
+`#f7f5fb`, Grape `#6c3ec1` as the primary accent, Deep Purple `#4b006e` for hover, Lavender `#c7b7e2` in the brand
+mark, solid hairline cards, Geist for all text, and a dark mode. The tokens live on `:root` in
+`krater/web/static/css/main.css`; components use the role tokens (`--surface`, `--text`, `--accent` ...), never raw
+colors. Style through the existing classes (`.page-head`, `.card`, `.stats`, `.button--primary`, `.badge--<status>`,
+`.table-scroll` ...). Pages give only their own name in `{% block title %}`; `base.html` adds " · Krater". Every
+page must work at 360px wide with no horizontal page scroll.
