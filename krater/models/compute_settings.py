@@ -41,6 +41,10 @@ class ComputeSettings(Base):
     box_destroy_hours: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     # Admins are alerted when Vast's hourly charges differ from Krater's estimate by more than this percent.
     reconcile_alert_percent: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    # A running machine whose runner hasn't started within this long is destroyed (the image can't run it)...
+    runner_start_minutes: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    # ...and one whose runner stops sending heartbeats for this long.
+    heartbeat_timeout_minutes: Mapped[int] = mapped_column(sa.Integer, nullable=False)
 
     updated_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now(), onupdate=sa.func.now()
@@ -66,6 +70,8 @@ class ProjectComputeSettings(Base):
     box_idle_minutes: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     box_destroy_hours: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     reconcile_alert_percent: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    runner_start_minutes: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    heartbeat_timeout_minutes: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
 
     updated_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now(), onupdate=sa.func.now()

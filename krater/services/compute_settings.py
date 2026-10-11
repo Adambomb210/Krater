@@ -95,6 +95,26 @@ POLICY_FIELDS: tuple[PolicyField, ...] = (
         24,
     ),
     PolicyField(
+        "runner_start_minutes",
+        "Runner start deadline",
+        "A running machine whose runner hasn't reported in this long is destroyed and its job failed (the image "
+        "needs a POSIX shell and curl, wget or Python).",
+        "minutes",
+        2,
+        120,
+        10,
+    ),
+    PolicyField(
+        "heartbeat_timeout_minutes",
+        "Heartbeat timeout",
+        "A machine whose runner stops sending heartbeats for this long is destroyed and its job failed. Keep it "
+        "well above the time Krater itself may be down for a deploy.",
+        "minutes",
+        5,
+        1440,
+        30,
+    ),
+    PolicyField(
         "reconcile_alert_percent",
         "Reconciliation alert",
         "Admins are alerted when Vast's hourly charges differ from Krater's estimate by more than this.",
@@ -118,6 +138,8 @@ class ComputePolicy:
     box_idle_minutes: int
     box_destroy_hours: int
     reconcile_alert_percent: int
+    runner_start_minutes: int
+    heartbeat_timeout_minutes: int
     #: The fields a project overrides (empty for the global policy).
     overridden: frozenset[str] = frozenset()
 

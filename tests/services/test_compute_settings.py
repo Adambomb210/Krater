@@ -20,6 +20,8 @@ APPROVED = {
     "box_idle_minutes": 30,
     "box_destroy_hours": 24,
     "reconcile_alert_percent": 10,
+    "runner_start_minutes": 10,
+    "heartbeat_timeout_minutes": 30,
 }
 
 

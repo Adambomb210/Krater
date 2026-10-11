@@ -10,7 +10,7 @@ from krater.compute import reconcile
 from krater.models import AuditEvent, QuiltOutbox, SpendReconciliation, SpendSnapshot
 from krater.services import budget
 from krater.vast import CreateInstance
-from tests.compute.test_scheduler import NOW, SETTINGS, _instance, _pass, _submit
+from tests.compute.test_scheduler import NOW, SETTINGS, _beat, _instance, _pass, _runner_starts, _submit
 
 
 def _ran_an_hour(db_session, member, project, client, fake):  # noqa: F811
@@ -19,6 +19,8 @@ def _ran_an_hour(db_session, member, project, client, fake):  # noqa: F811
     row = _instance(db_session, job)
     fake.set_status(row.vast_instance_id, "running")
     _pass(db_session, client, NOW + timedelta(minutes=4))
+    _runner_starts(db_session, fake, row, NOW + timedelta(minutes=4))
+    _beat(db_session, row, NOW + timedelta(minutes=63))
     _pass(db_session, client, NOW + timedelta(minutes=64))
     return job, row
 

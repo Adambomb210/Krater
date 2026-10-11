@@ -31,6 +31,7 @@ from krater.web.routers import (
     pricing,
     projects,
     reviews,
+    runner,
     skypilot_policy,
     slack_interactions,
 )
@@ -100,6 +101,7 @@ def create_app() -> FastAPI:
     app.include_router(reviews.router)
     app.include_router(admin.router)
     app.include_router(compute_admin.router)
+    app.include_router(runner.router)
     app.include_router(gallery.router)
     app.include_router(pricing.router)
     app.include_router(skypilot_policy.router)

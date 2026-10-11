@@ -18,7 +18,7 @@ from krater.models import (
     SpendSource,
 )
 from krater.services import budget, budget_alerts, projects
-from tests.compute.test_scheduler import NOW, SETTINGS, _instance, _pass, _submit
+from tests.compute.test_scheduler import NOW, SETTINGS, _beat, _instance, _pass, _runner_starts, _submit
 
 
 def _running(db_session, member, project, client, fake, **overrides):  # noqa: F811
@@ -27,6 +27,7 @@ def _running(db_session, member, project, client, fake, **overrides):  # noqa: F
     row = _instance(db_session, job)
     fake.set_status(row.vast_instance_id, "running")
     _pass(db_session, client, NOW + timedelta(minutes=4))  # pulled for 4 minutes: disk only
+    _runner_starts(db_session, fake, row, NOW + timedelta(minutes=4))
     return job, row
 
 
@@ -34,6 +35,7 @@ def test_disk_bills_from_create_and_the_gpu_only_while_running(db_session, membe
     job, row = _running(db_session, member, project, client, fake)
     assert row.accrued_microusd == round(row.disk_microusd * 4 / 60)
 
+    _beat(db_session, row, NOW + timedelta(minutes=63))
     _pass(db_session, client, NOW + timedelta(minutes=64))  # then an hour running
 
     assert row.accrued_microusd == round(row.disk_microusd * 4 / 60) + row.full_microusd
@@ -98,6 +100,7 @@ def test_the_project_is_warned_then_stopped_before_it_overruns(db_session, membe
     minute = 5
     while job.state is not ComputeJobState.FAILED and minute < 6 * 60:
         minute += 1
+        _beat(db_session, row, NOW + timedelta(minutes=minute))
         _pass(db_session, client, NOW + timedelta(minutes=minute))
 
     assert job.state is ComputeJobState.FAILED

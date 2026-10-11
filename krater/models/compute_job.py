@@ -121,6 +121,9 @@ class ComputeInstance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     last_vast_status: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     running_since: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    # When it last went from not running to running (first start, or resume after a pause): Vast restarts the
+    # container then, so the runner must start again within the start deadline.
+    entered_running_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     paused_since: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     # What this instance has cost so far by Krater's estimate (disk from create, GPU only while running), and up to
     # when. Hourly reconciliation with Vast's charges corrects it.
@@ -129,6 +132,13 @@ class ComputeInstance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Vast's own charges for it at the last hourly reconciliation (`krater.compute.reconcile`).
     charged_microusd: Mapped[int | None] = mapped_column(sa.BigInteger, nullable=True)
     charged_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    # The runner on the machine: its token (sha256 only; the token itself is only in the machine's environment),
+    # when it last started, how many times, and its last heartbeat.
+    runner_token_hash: Mapped[str | None] = mapped_column(sa.String(64), nullable=True, unique=True)
+    runner_started_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    runner_starts: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0, server_default="0")
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    last_heartbeat: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # Set when Krater decides to destroy it; the scheduler retries until Vast confirms it's gone.
     destroy_requested_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     destroy_reason: Mapped[str | None] = mapped_column(sa.String(200), nullable=True)

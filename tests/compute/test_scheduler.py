@@ -46,8 +46,29 @@ def _submit(db_session, member, project, *, now=NOW, **overrides) -> ComputeJob:
     return compute_jobs.submit_job(db_session, member, project=project, spec=JobSpec(**spec), cap_cents=500, now=now)
 
 
+RUNNER_SHA = "ab" * 32
+
+
 def _pass(db_session, client, now=NOW) -> scheduler.PassResult:
-    return scheduler.run_pass(db_session, client, SETTINGS, now=now)
+    return scheduler.run_pass(db_session, client, SETTINGS, now=now, runner_sha256=RUNNER_SHA)
+
+
+def _token(fake, row) -> str:
+    """The runner token Krater sent to the machine (it keeps only the hash)."""
+    env = fake.instances[row.vast_instance_id]["env"]
+    return env.split("KRATER_JOB_TOKEN=")[1].split("'")[0].split(" ")[0]
+
+
+def _runner_starts(db_session, fake, row, now):
+    from krater.compute import runner_api
+
+    runner_api.start(db_session, runner_api.authenticate(db_session, _token(fake, row)), now=now)
+
+
+def _beat(db_session, row, now):
+    from krater.compute import runner_api
+
+    runner_api.heartbeat(db_session, row, {"gpu_util": 90}, now=now)
 
 
 def _instance(db_session, job) -> ComputeInstance:
@@ -95,9 +116,14 @@ def test_a_job_rents_the_cheapest_offer_at_or_under_its_target(db_session, membe
     # The image's ENTRYPOINT is replaced by sh (in args mode, Vast's onstart is the entrypoint override).
     assert created["onstart"] == "sh"
     assert created["args"][0] == "-c"
-    assert "python train.py" in created["args"][1]
+    # The bootstrap fetches the runner and checks its sha256; the runner asks Krater for the command.
+    assert RUNNER_SHA in created["args"][1]
+    assert "python train.py" not in created["args"][1]
     assert created["runtype"] == "args"
     assert "KRATER_JOB_ID=" in created["env"]
+    assert "KRATER_RUNNER_URL=http://localhost:8000" in created["env"]
+    token = _token(fake, row)
+    assert len(token) >= 40 and row.runner_token_hash != token
     assert job.state is ComputeJobState.STARTING
     # Holds its max runtime (8 h) at the rented price: ceil(0.063767 * 8 * 100) cents.
     assert job.hold_cents == 52
@@ -333,6 +359,7 @@ def _running_job(db_session, member, project, client, fake, **overrides):  # noq
     row = _instance(db_session, job)
     fake.set_status(row.vast_instance_id, "running")
     _pass(db_session, client, NOW + timedelta(minutes=5))
+    _runner_starts(db_session, fake, row, NOW + timedelta(minutes=5))
     return job, row
 
 
@@ -487,3 +514,57 @@ def test_bid_rounding_and_clamping() -> None:
     assert bid_for(offer, margin_percent=10, max_gpu=Decimal("1")) == Decimal("0.0587")
     assert bid_for(offer, margin_percent=10, max_gpu=Decimal("0.055")) == Decimal("0.055")
     assert bid_for(offer, margin_percent=10, max_gpu=Decimal("0.05")) is None
+
+
+# -- The runner ---------------------------------------------------------------------------------------------
+
+
+def test_a_runner_that_never_starts_fails_the_job(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job = _submit(db_session, member, project)
+    _pass(db_session, client)
+    row = _instance(db_session, job)
+    fake.set_status(row.vast_instance_id, "running")
+    _pass(db_session, client, NOW + timedelta(minutes=5))
+
+    _pass(db_session, client, NOW + timedelta(minutes=14))
+    assert job.state is ComputeJobState.RUNNING
+    _pass(db_session, client, NOW + timedelta(minutes=15))
+
+    assert job.state is ComputeJobState.FAILED
+    assert "curl, wget or Python" in job.state_reason
+    assert fake.instances == {}
+
+
+def test_a_silent_runner_fails_the_job(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job, row = _running_job(db_session, member, project, client, fake)
+    _beat(db_session, row, NOW + timedelta(minutes=20))
+
+    _pass(db_session, client, NOW + timedelta(minutes=49))
+    assert job.state is ComputeJobState.RUNNING
+    _pass(db_session, client, NOW + timedelta(minutes=50))
+
+    assert job.state is ComputeJobState.FAILED
+    assert "stopped reporting" in job.state_reason
+
+
+def test_after_a_pause_the_runner_must_start_again(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job, row = _running_job(db_session, member, project, client, fake)
+    fake.set_status(row.vast_instance_id, "stopped")
+    _pass(db_session, client, NOW + timedelta(minutes=6))
+    fake.set_status(row.vast_instance_id, "running")
+    _pass(db_session, client, NOW + timedelta(minutes=7))  # resumed: Vast restarted the container
+
+    _runner_starts(db_session, fake, row, NOW + timedelta(minutes=8))
+    _pass(db_session, client, NOW + timedelta(minutes=20))
+
+    assert job.state is ComputeJobState.RUNNING
+    assert row.runner_starts == 2
+
+
+def test_no_runner_binary_means_nothing_is_rented(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job = _submit(db_session, member, project)
+
+    scheduler.run_pass(db_session, client, SETTINGS, now=NOW, runner_sha256=None)
+
+    assert job.state is ComputeJobState.QUEUED
+    assert fake.instances == {}
