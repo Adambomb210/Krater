@@ -28,6 +28,7 @@ A Weave superadmin must create the roles `member`, `reviewer` and `admin` on the
 | The client_credentials grant, scope `directory` | Krater's own token for the directory API |
 | `GET /api/v1/directory/users/{sub}` | The fresh role check before every action |
 | `GET /api/v1/directory/users?role=<key>` | "Everyone with role X", e.g. reviewers to invite to Slack channels |
+| A second, public app for the `krater` CLI; `GET /oauth/token/info` and `GET /oauth/userinfo` with a member's CLI token | Checking the CLI's tokens (docs/compute/cli.md) |
 
 Krater asks for the sign-in scopes `openid profile email groups roles slack`.
 
