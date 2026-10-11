@@ -142,6 +142,9 @@ _POST_GENERAL_LIMIT = RateLimit(capacity=120, per_seconds=60)
 #: session; generous, because several machines can share an address.
 _RUNNER_LIMIT = RateLimit(capacity=600, per_seconds=60)
 _RUNNER_PREFIX = "/runner/"
+#: The CLI's API, every method: each request is checked with Weave (cached a minute), so this also shields Weave.
+_API_LIMIT = RateLimit(capacity=120, per_seconds=60)
+_API_PREFIX = "/api/"
 
 _AUTH_PATHS = frozenset({"/login", "/auth/callback"})
 _SLACK_PATH = "/slack/interactions"
@@ -158,6 +161,8 @@ def _classify(request: Request) -> tuple[str, RateLimit, bool] | None:
         return "slack", _SLACK_LIMIT, True
     if path.startswith(_RUNNER_PREFIX):
         return "runner", _RUNNER_LIMIT, True
+    if path.startswith(_API_PREFIX):
+        return "api", _API_LIMIT, True
     if method == "POST":
         return "post_general", _POST_GENERAL_LIMIT, False
     return None

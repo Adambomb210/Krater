@@ -12,6 +12,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exception_handlers import http_exception_handler
+from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.staticfiles import StaticFiles
@@ -25,6 +26,7 @@ from krater.web.request_id import RequestIdMiddleware
 from krater.web.routers import (
     account,
     admin,
+    api,
     auth,
     compute,
     compute_admin,
@@ -43,6 +45,12 @@ from krater.worker.app import app as procrastinate_app
 STATIC_DIR = Path(__file__).parent / "static"
 SESSION_COOKIE_NAME = "krater_session"
 _HTML_ERROR_PAGES = {403: "errors/403.html", 404: "errors/404.html", 503: "errors/503.html"}
+
+
+def _is_api(request: Request) -> bool:
+    """The CLI's API (`krater.web.routers.api`) answers in JSON, never with the site's error pages."""
+    return request.url.path.startswith("/api/")
+
 
 logger = logging.getLogger(__name__)
 
@@ -108,13 +116,18 @@ def create_app() -> FastAPI:
     app.include_router(gallery.router)
     app.include_router(pricing.router)
     app.include_router(slack_interactions.router)
+    app.include_router(api.router)
 
     @app.exception_handler(NotAllowed)
     def _handle_not_allowed(request: Request, exc: NotAllowed):
+        if _is_api(request):
+            return JSONResponse({"error": str(exc)}, status_code=403)
         return templates.TemplateResponse(request, "errors/403.html", status_code=403)
 
     @app.exception_handler(NotFound)
     def _handle_not_found(request: Request, exc: NotFound):
+        if _is_api(request):
+            return JSONResponse({"error": str(exc)}, status_code=404)
         return templates.TemplateResponse(request, "errors/404.html", status_code=404)
 
     # Unknown URLs and the auth dependencies' 403s are plain `HTTPException`s, which FastAPI renders as
@@ -122,6 +135,8 @@ def create_app() -> FastAPI:
     # the estimator's fetch) don't ask for HTML, so they keep the JSON body.
     @app.exception_handler(StarletteHTTPException)
     async def _handle_http_exception(request: Request, exc: StarletteHTTPException):
+        if _is_api(request):  # the CLI's API: always JSON, `{"error": ...}`
+            return JSONResponse({"error": exc.detail}, status_code=exc.status_code, headers=exc.headers)
         if exc.status_code in _HTML_ERROR_PAGES and "text/html" in request.headers.get("accept", ""):
             return templates.TemplateResponse(
                 request, _HTML_ERROR_PAGES[exc.status_code], status_code=exc.status_code, headers=exc.headers

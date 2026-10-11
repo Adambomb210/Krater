@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     # Base URL of Weave's directory API (`/api/v1/directory/...`). Blank means `weave_issuer`.
     weave_api_base_url: str = ""
     weave_stub_users_file: str = ""
+    # The Krater CLI's own Weave app: a public (non-confidential) OAuth app the `krater` command signs in with
+    # (docs/compute/cli.md). Blank turns the CLI's API (`/api/v1/`) off.
+    weave_cli_client_id: str = ""
+    # Whether that app accepts a loopback redirect (`http://127.0.0.1/callback`, any port). Production Weave refuses
+    # plain-http redirect URIs, so the CLI's default is copy-and-paste (`urn:ietf:wg:oauth:2.0:oob`).
+    weave_cli_loopback: bool = False
 
     # How Weave's answers map onto Krater's roles (`ganymede:member`, `ganymede:reviewer`,
     # `ganymede:admin`). The `roles` claim (Krater's app-defined role keys in Weave) is the source of
