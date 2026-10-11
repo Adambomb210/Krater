@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #: Sentinel used as the default `secret_key`. Production must override it (and, either way, production
@@ -17,7 +17,8 @@ MIN_SECRET_KEY_LENGTH = 32
 class Settings(BaseSettings):
     """Krater's configuration. All fields read from `KRATER_<FIELD_NAME>` env vars (or a `.env` file)."""
 
-    model_config = SettingsConfigDict(env_prefix="KRATER_", env_file=".env", extra="ignore")
+    # `populate_by_name`: fields renamed with an alias for their old env name still take their new name in code.
+    model_config = SettingsConfigDict(env_prefix="KRATER_", env_file=".env", extra="ignore", populate_by_name=True)
 
     env: Literal["development", "test", "production"] = "development"
     database_url: str = "postgresql+psycopg://root:root@localhost:5432/krater_dev"
@@ -69,19 +70,35 @@ class Settings(BaseSettings):
     # strong secret: SkyPilot clients fetch the URL too, so the endpoint must be safe for any member to call.
     skypilot_policy_token: str = ""
     skypilot_reconcile_interval_minutes: int = 5
-    skypilot_budget_warn_percent: int = 80
     skypilot_autodown_idle_minutes: int = 30
-    skypilot_max_hourly_cost_cents: int = 500  # default hourly cap per launch; a project can have its own
 
-    # GPU pricing (see docs/dev/pricing.md): fetched straight from SkyPilot's public Vast catalog CSV,
-    # not the SkyPilot API server -- no workspace/auth needed, and it's the exact same data the
-    # optimizer itself reads. `skypilot_mode=fake` uses `FakeSkyPilotClient`'s canned catalog instead.
-    # The catalog is used with `compute_mode=off` too, so with compute off `skypilot_mode=live` only means
-    # "fetch the real catalog": no API server, service token or policy token is needed.
-    skypilot_catalog_url: str = (
-        "https://raw.githubusercontent.com/skypilot-org/skypilot-catalog/master/catalogs/v8/vast/vms.csv"
+    # Budgets and caps, whatever compute layer runs. The old SKYPILOT_ env names still work for one release, so a
+    # deploy doesn't have to change its env file and Krater in the same step.
+    budget_warn_percent: int = Field(
+        80, validation_alias=AliasChoices("KRATER_BUDGET_WARN_PERCENT", "KRATER_SKYPILOT_BUDGET_WARN_PERCENT")
     )
-    skypilot_catalog_fetch_timeout_seconds: float = 15.0
+    # The default hourly price cap per machine; a project can have its own.
+    compute_max_hourly_cost_cents: int = Field(
+        500,
+        validation_alias=AliasChoices("KRATER_COMPUTE_MAX_HOURLY_COST_CENTS", "KRATER_SKYPILOT_MAX_HOURLY_COST_CENTS"),
+    )
+
+    # The public GPU price catalog behind /pricing and the budget estimator (krater.pricing.catalog,
+    # docs/dev/pricing.md): SkyPilot's Vast catalog CSV, fetched from GitHub with no server or credentials. `fake`
+    # serves a canned catalog; production refuses it. KRATER_SKYPILOT_MODE used to choose this, and still does.
+    pricing_mode: Literal["fake", "live"] = Field(
+        "fake", validation_alias=AliasChoices("KRATER_PRICING_MODE", "KRATER_SKYPILOT_MODE")
+    )
+    pricing_catalog_url: str = Field(
+        "https://raw.githubusercontent.com/skypilot-org/skypilot-catalog/master/catalogs/v8/vast/vms.csv",
+        validation_alias=AliasChoices("KRATER_PRICING_CATALOG_URL", "KRATER_SKYPILOT_CATALOG_URL"),
+    )
+    pricing_catalog_fetch_timeout_seconds: float = Field(
+        15.0,
+        validation_alias=AliasChoices(
+            "KRATER_PRICING_CATALOG_FETCH_TIMEOUT_SECONDS", "KRATER_SKYPILOT_CATALOG_FETCH_TIMEOUT_SECONDS"
+        ),
+    )
     pricing_refresh_cron: str = "0 7 * * *"  # daily, off-peak UTC -- see docs/dev/pricing.md
     budget_estimate_default_margin_percent: int = 20
     # How far a requested budget can differ from its stored estimate (as a percent of the estimate)
@@ -120,9 +137,13 @@ class Settings(BaseSettings):
         if self.env == "production":
             if self.weave_mode == "stub":
                 raise ValueError("KRATER_WEAVE_MODE cannot be 'stub' when KRATER_ENV=production")
-            if self.skypilot_mode == "fake":
-                # Even with compute off: the budget estimator's GPU prices come from SkyPilot's catalog.
-                raise ValueError("KRATER_SKYPILOT_MODE cannot be 'fake' when KRATER_ENV=production")
+            if self.pricing_mode == "fake":
+                # Even with compute off: the budget estimator's GPU prices come from the public catalog.
+                raise ValueError("KRATER_PRICING_MODE cannot be 'fake' when KRATER_ENV=production")
+            if self.compute_mode == "skypilot" and self.skypilot_mode == "fake":
+                raise ValueError(
+                    "KRATER_SKYPILOT_MODE cannot be 'fake' when KRATER_COMPUTE_MODE=skypilot in production"
+                )
             if self.slack_mode == "fake":
                 raise ValueError("KRATER_SLACK_MODE cannot be 'fake' when KRATER_ENV=production")
             if self.s3_mode == "fake":

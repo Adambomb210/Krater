@@ -20,7 +20,7 @@ pytestmark = pytest.mark.live
 
 
 def _real_client() -> LiveSkyPilotClient:
-    # Only `skypilot_catalog_url` matters for `list_gpu_prices` -- no API URL/service token needed
+    # Only `pricing_catalog_url` matters for `list_gpu_prices` -- no API URL/service token needed
     # (docs/dev/pricing.md: this never talks to a SkyPilot API server).
     return LiveSkyPilotClient(Settings(skypilot_mode="live", skypilot_api_url="http://unused.invalid"))
 

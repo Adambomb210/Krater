@@ -34,7 +34,7 @@ from krater.services import projects as project_service
 from krater.services import screenshots as screenshot_service
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
-from krater.services.launch_policy import LAUNCHABLE_STATUSES, hourly_cap_cents
+from krater.services.launch_rules import LAUNCHABLE_STATUSES, hourly_cap_cents
 from krater.services.skypilot_sync import current_budget_flag
 from krater.slack import get_slack_client
 from krater.storage import ObjectStore, get_object_store
@@ -315,9 +315,7 @@ def _build_detail_context(
     compute_on = get_settings().compute_mode == "skypilot"
     skypilot_budget_flag = None
     if compute_on and project.skypilot_workspace is not None:
-        skypilot_budget_flag = current_budget_flag(
-            session, project, warn_percent=get_settings().skypilot_budget_warn_percent
-        )
+        skypilot_budget_flag = current_budget_flag(session, project, warn_percent=get_settings().budget_warn_percent)
 
     screenshots = _screenshot_entries(get_object_store(), current) if current is not None else []
 
@@ -371,7 +369,7 @@ def _build_detail_context(
         "hourly_cap_input": ""
         if project.max_hourly_cost_cents is None
         else cents_to_input(project.max_hourly_cost_cents),
-        "default_hourly_cap_cents": get_settings().skypilot_max_hourly_cost_cents,
+        "default_hourly_cap_cents": get_settings().compute_max_hourly_cost_cents,
         "can_admin_set_hourly_cap": actor.is_admin and project.status not in _TERMINAL_STATUSES,
         "errors": errors or {},
         "error_form": error_form,
@@ -1000,7 +998,7 @@ def admin_set_hourly_cap(
             )
             return templates.TemplateResponse(request, "projects/detail.html", context, status_code=422)
 
-    default_cap_cents = get_settings().skypilot_max_hourly_cost_cents
+    default_cap_cents = get_settings().compute_max_hourly_cost_cents
     try:
         project_service.set_hourly_cost_cap(
             db_session, actor, project=project, cap_cents=cap_cents, default_cap_cents=default_cap_cents, reason=reason

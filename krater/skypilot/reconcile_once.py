@@ -25,9 +25,7 @@ def main() -> None:
         raise SystemExit("KRATER_COMPUTE_MODE is not 'skypilot': there is nothing to reconcile")
     session = get_sessionmaker()()
     try:
-        reconcile(
-            session, get_skypilot_client(), get_weave_client(), warn_percent=settings.skypilot_budget_warn_percent
-        )
+        reconcile(session, get_skypilot_client(), get_weave_client(), warn_percent=settings.budget_warn_percent)
     finally:
         session.close()
 

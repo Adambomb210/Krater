@@ -121,7 +121,7 @@ def test_allow_returns_a_body_shaped_like_the_accepted_fixture(
 ) -> None:
     monkeypatch.setattr(get_settings(), "skypilot_policy_token", TOKEN)
     monkeypatch.setattr(get_settings(), "skypilot_autodown_idle_minutes", 30)
-    monkeypatch.setattr(get_settings(), "skypilot_max_hourly_cost_cents", 500)
+    monkeypatch.setattr(get_settings(), "compute_max_hourly_cost_cents", 500)
 
     member = login_as(MEMBER_SUB)
     project = Project(

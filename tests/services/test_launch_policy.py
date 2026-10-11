@@ -24,7 +24,7 @@ def _email(user) -> str:
     return PROFILES[user.weave_sub][1]
 
 
-SETTINGS = Settings(skypilot_autodown_idle_minutes=30, skypilot_max_hourly_cost_cents=500)
+SETTINGS = Settings(skypilot_autodown_idle_minutes=30, compute_max_hourly_cost_cents=500)
 
 
 def _request(

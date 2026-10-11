@@ -13,6 +13,7 @@ import procrastinate
 from krater.config import get_settings
 from krater.db import get_sessionmaker
 from krater.models import Project, ProjectRevision
+from krater.pricing.catalog import CatalogError, get_price_catalog
 from krater.quilt import sender as quilt_sender
 from krater.services import people, slack_notify, slack_reviews
 from krater.services.pricing import refresh_prices
@@ -68,9 +69,7 @@ def skypilot_reconcile(timestamp: int) -> None:
         return
     session = get_sessionmaker()()
     try:
-        reconcile(
-            session, get_skypilot_client(), get_weave_client(), warn_percent=settings.skypilot_budget_warn_percent
-        )
+        reconcile(session, get_skypilot_client(), get_weave_client(), warn_percent=settings.budget_warn_percent)
     except SkyPilotError:
         # `reconcile` already catches per-step SkyPilot errors and logs+continues; this is a last-resort
         # net for anything that still escapes (e.g. a step raising before its own try/except is reached).
@@ -94,10 +93,10 @@ def pricing_refresh(timestamp: int) -> None:
     del timestamp
     session = get_sessionmaker()()
     try:
-        count = refresh_prices(session, get_skypilot_client())
+        count = refresh_prices(session, get_price_catalog())
         session.commit()
         logger.info("krater pricing_refresh: %d accelerator/count groups", count)
-    except SkyPilotError:
+    except CatalogError:
         logger.exception("krater.pricing_refresh task failed; keeping last known prices")
         session.rollback()
     finally:
