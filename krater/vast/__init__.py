@@ -8,7 +8,6 @@ See docs/compute/vast-api.md for the facts the client follows.
 from __future__ import annotations
 
 import logging
-from functools import lru_cache
 from pathlib import Path
 
 from krater.config import Settings, get_settings
@@ -80,7 +79,31 @@ def build_vast_client(settings: Settings) -> VastClient | None:
     return VastClient(api_key, base_url=settings.vast_api_url, timeout_seconds=settings.vast_timeout_seconds)
 
 
-@lru_cache
+#: The worker's client and the key it was built with. Not `lru_cache`: a missing key must not be cached, and a
+#: rotated key file must take effect without restarting the worker.
+_cached: tuple[str, VastClient] | None = None
+
+
 def get_vast_client() -> VastClient | None:
-    """The worker's process-wide client (see `build_vast_client`). Cached, so the fake keeps its state in dev."""
-    return build_vast_client(get_settings())
+    """The worker's client (see `build_vast_client`). The fake is built once, so it keeps its state in dev; a live
+    client is rebuilt whenever the key changes. Live mode without a key logs an error on every call."""
+    global _cached
+    settings = get_settings()
+    if settings.vast_mode == "fake":
+        if _cached is None or _cached[0] != "fake":
+            client = build_vast_client(settings)
+            if client is None:
+                return None
+            _cached = ("fake", client)
+        return _cached[1]
+    api_key = _read_api_key(settings)
+    if not api_key:
+        logger.error("krater.vast: KRATER_VAST_MODE=live but no Vast API key is readable; nothing will be rented")
+        _cached = None
+        return None
+    if _cached is None or _cached[0] != api_key:
+        _cached = (
+            api_key,
+            VastClient(api_key, base_url=settings.vast_api_url, timeout_seconds=settings.vast_timeout_seconds),
+        )
+    return _cached[1]
