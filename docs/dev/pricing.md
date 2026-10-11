@@ -148,7 +148,7 @@ nothing.
 
 ## Estimator: Krater's own Vast samples first
 
-Once Krater Compute's worker has a Vast key, it samples Vast every 10 minutes (`krater.services.price_history`). The
+With compute on, Krater Compute's worker samples Vast every hour (`krater.services.price_history`). The
 estimator uses those samples instead of the catalog for a GPU that has at least a day of them in the last 7 days: the
 rate is the median of the samples' median full hourly prices (32 GB of disk included) for the chosen basis (`spot` =
 interruptible bids, `on_demand`), a typical price rather than the catalog's cheapest spot offer. Catalog names are

@@ -8,6 +8,9 @@ Each run searches Vast once per tracked GPU model and rental type, for 1-GPU off
 reliability floor, and writes one `GpuPriceSample` with the min, p10 and median full hourly cost. Full cost is how
 Krater compares offers everywhere: the GPU price (the minimum bid, or `dph_base` on demand) plus a fixed basis disk
 at the host's storage price. Framework-free, like the other services; the worker's periodic task calls `record`.
+
+Its searches count against Vast's daily quota of search rows, which the scheduler needs to start jobs. A run stops
+when less than `QUOTA_RESERVE` of the quota is left, so the history never takes the scheduler's share.
 """
 
 from __future__ import annotations
@@ -31,6 +34,8 @@ from krater.vast.types import SEARCH_RESULT_CAP
 logger = logging.getLogger(__name__)
 
 RENTAL_TYPES: tuple[RentalType, ...] = ("bid", "ondemand")
+#: The share of Vast's daily search quota price history leaves for the scheduler.
+QUOTA_RESERVE = 0.5
 
 
 @dataclass(frozen=True)
@@ -82,10 +87,20 @@ def record(
     sleep: Callable[[float], None] = time.sleep,
 ) -> RecordResult:
     """Search and write one sample per (GPU model, rental type), `pause_seconds` apart. One model failing is logged
-    and skipped; a rate limit stops the run (the next run starts over). Flushes; the caller commits."""
+    and skipped; a rate limit, or Vast's search quota falling under `QUOTA_RESERVE`, stops the run (the next run
+    starts over). Flushes; the caller commits."""
     reliability = compute_settings.global_policy(session).reliability_floor
     written = failed = 0
     for i, (gpu_name, rental_type) in enumerate((g, r) for g in gpu_names for r in RENTAL_TYPES):
+        quota = client.search_quota
+        if quota is not None and quota.fraction_left(now) < QUOTA_RESERVE:
+            logger.warning(
+                "krater.price_history: %d of %d Vast search rows left today; leaving them to the scheduler",
+                quota.remaining,
+                quota.limit,
+            )
+            session.flush()
+            return RecordResult(written, failed, stopped_early=True)
         if i and pause_seconds:
             sleep(pause_seconds)
         query = OfferQuery(

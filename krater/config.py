@@ -128,8 +128,10 @@ class Settings(BaseSettings):
     project_secrets_key: str = ""
     # Krater's own Vast price history (Vast's history API is for host accounts only, and its public feed needs a
     # data license for bulk use). Every `price_history_interval_minutes`, one search per GPU model and rental type;
-    # rows hold the min, p10 and median of GPU price plus `price_history_disk_gb` of disk, for 1-GPU offers.
-    price_history_interval_minutes: int = 10
+    # rows hold the min, p10 and median of GPU price plus `price_history_disk_gb` of disk, for 1-GPU offers. A run
+    # costs about 500 of Vast's 20,000 daily search rows, so hourly (a divisor of 60, or whole hours); see
+    # docs/compute/vast-api.md.
+    price_history_interval_minutes: int = 60
     price_history_disk_gb: int = 32
     # Vast's own model names (checked against a live search on 2026-10-11).
     price_history_gpus: list[str] = [

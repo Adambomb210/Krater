@@ -18,6 +18,7 @@ from krater.vast import (
     VastRateLimitedError,
     VastRedirectError,
     VastRequestFailedError,
+    VastSearchQuotaError,
     VastUnavailableError,
     build_vast_client,
     usd_to_microusd,
@@ -41,6 +42,40 @@ def _create(client: VastClient, offer_id: int = 1001, **kwargs) -> int:
 
 
 # -- Search ------------------------------------------------------------------------------------------
+
+
+def test_a_search_records_vasts_daily_row_quota(client: VastClient, fake: FakeVast) -> None:
+    fake.set_search_quota(20_000, remaining=500, reset_at=1_791_763_200)
+    assert client.search_quota is None
+
+    found = client.search_offers(OfferQuery(gpu_names=("RTX 3060",), limit=64))
+
+    quota = client.search_quota
+    assert quota.limit == 20_000
+    assert quota.remaining == 500 - len(found)
+    assert quota.reset_at == datetime(2026, 10, 12, tzinfo=UTC)
+
+
+def test_a_used_up_quota_raises_its_own_error_with_the_reset(client: VastClient, fake: FakeVast) -> None:
+    # The live answer (staging, 2026-10-11): 429 {"error": "search_quota_exceeded", "msg": "Daily search row quota
+    # exhausted", "retry_after": ..., "limit": 20000, "remaining": 0} with x-ratelimit-* headers.
+    fake.set_search_quota(20_000, remaining=0, reset_at=1_791_763_200)
+
+    with pytest.raises(VastSearchQuotaError) as raised:
+        client.search_offers(OfferQuery(gpu_names=("RTX 3060",)))
+
+    assert raised.value.reset_at == datetime(2026, 10, 12, tzinfo=UTC)
+    assert client.search_quota.exhausted(datetime(2026, 10, 11, 18, tzinfo=UTC))
+    assert not client.search_quota.exhausted(datetime(2026, 10, 12, 0, 1, tzinfo=UTC))
+
+
+def test_a_plain_429_is_still_a_rate_limit(client: VastClient, fake: FakeVast) -> None:
+    fake.fail_next(429)
+
+    with pytest.raises(VastRateLimitedError) as raised:
+        client.search_offers(OfferQuery(gpu_names=("RTX 3060",)))
+
+    assert not isinstance(raised.value, VastSearchQuotaError)
 
 
 def test_search_sends_the_job_disk_and_sorts_by_full_cost(client: VastClient, fake: FakeVast) -> None:
