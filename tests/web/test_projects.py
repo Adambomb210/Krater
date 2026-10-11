@@ -572,24 +572,6 @@ def test_compute_off_notice_only_shows_while_a_project_could_launch(
     assert "Launching machines from Krater" not in client.get(f"/projects/{project.id}").text
 
 
-def test_compute_off_hides_the_skypilot_budget_banner(
-    client: TestClient, login_as, approved_project, db_session: Session, monkeypatch
-) -> None:
-    member = login_as(MEMBER_SUB)
-    reviewer = login_as(REVIEWER_SUB)
-    project = approved_project(member, reviewer)
-    project.skypilot_workspace = "ganymede-abc123abc123"
-    db_session.flush()
-    login_as(MEMBER_SUB)
-
-    with patch("krater.web.routers.projects.current_budget_flag", return_value="teardown") as flag:
-        assert "torn down" in client.get(f"/projects/{project.id}").text
-        monkeypatch.setattr(get_settings(), "compute_mode", "off")
-        flag.reset_mock()
-        assert "torn down" not in client.get(f"/projects/{project.id}").text
-        flag.assert_not_called()
-
-
 def test_compute_on_vast_shows_the_budget_banner_without_a_workspace(
     client: TestClient, login_as, approved_project, monkeypatch
 ) -> None:

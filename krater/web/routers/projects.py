@@ -29,13 +29,14 @@ from krater.models import (
     RevisionOutcome,
     User,
 )
-from krater.services import people, pricing, slack_membership
+from krater.services import budget as budget_service
+from krater.services import pricing, slack_membership
 from krater.services import projects as project_service
 from krater.services import screenshots as screenshot_service
 from krater.services.actor import Actor
+from krater.services.budget_alerts import current_budget_flag
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
 from krater.services.launch_rules import LAUNCHABLE_STATUSES, hourly_cap_cents
-from krater.services.skypilot_sync import current_budget_flag
 from krater.slack import get_slack_client
 from krater.storage import ObjectStore, get_object_store
 from krater.weave import WeaveClient, get_weave_client
@@ -313,10 +314,15 @@ def _build_detail_context(
     can_review = actor.is_reviewer and not is_submitter and not is_credited_builder and current_is_pending
 
     compute_mode = get_settings().compute_mode
-    compute_on = compute_mode == "skypilot"
-    skypilot_budget_flag = None
-    if (compute_on and project.skypilot_workspace is not None) or compute_mode == "vast":
-        skypilot_budget_flag = current_budget_flag(session, project, warn_percent=get_settings().budget_warn_percent)
+    budget_flag = None
+    if compute_mode == "vast":
+        budget_flag = current_budget_flag(
+            session,
+            project,
+            ceiling_cents=budget_service.ceiling_cents(session, project),
+            spend_cents=budget_service.latest_spend_cents(session, project),
+            warn_percent=get_settings().budget_warn_percent,
+        )
 
     screenshots = _screenshot_entries(get_object_store(), current) if current is not None else []
 
@@ -337,16 +343,13 @@ def _build_detail_context(
     return {
         "project": project,
         "summary": summary,
+        "budget_flag": budget_flag,
         "screenshots": screenshots,
         "revisions": revisions,
         "estimate_mismatch_by_revision": estimate_mismatch_by_revision,
         "names_by_id": names_by_id,
         "is_submitter": is_submitter,
         "is_admin": actor.is_admin,
-        # The workspace outlives a finished project until the reconciler tears it down: only show how to launch
-        # into it while the launch gate would actually allow it.
-        "can_launch": compute_on and project.skypilot_workspace is not None and project.status in LAUNCHABLE_STATUSES,
-        "compute_on": compute_on,
         "show_compute_off_notice": compute_mode == "off" and project.status in LAUNCHABLE_STATUSES,
         "compute_vast": compute_mode == "vast",
         "has_draft": has_draft,

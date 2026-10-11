@@ -19,9 +19,7 @@ _PRODUCTION_READY: dict = {
     "base_url": "https://ganymede.patchworklabs.example",
     "weave_mode": "live",
     "weave_client_secret": "weave-client-secret",
-    "skypilot_mode": "live",
     "pricing_mode": "live",
-    "skypilot_policy_token": "x" * 32,
     "slack_mode": "live",
     "slack_signing_secret": "slack-signing-secret",
     "s3_mode": "live",
@@ -81,11 +79,6 @@ def test_production_compute_on_vast_needs_the_live_vast_api() -> None:
     Settings(
         **{**_PRODUCTION_READY, "compute_mode": "vast", "vast_mode": "live", "compute_label_prefix": "krater-prod-"}
     )
-
-
-def test_production_rejects_a_short_skypilot_policy_token() -> None:
-    with pytest.raises(ValueError, match="SKYPILOT_POLICY_TOKEN"):
-        Settings(**{**_PRODUCTION_READY, "skypilot_policy_token": "too-short"})
 
 
 def test_production_rejects_the_default_secret_key() -> None:

@@ -34,7 +34,6 @@ from krater.web.routers import (
     projects,
     reviews,
     runner,
-    skypilot_policy,
     slack_interactions,
 )
 from krater.web.security_headers import SecurityHeadersMiddleware, apply_security_headers

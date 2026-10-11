@@ -1,6 +1,6 @@
 """Budget warnings and teardowns: the audit events behind the project page's banner and the Slack alerts.
 
-Shared by every compute layer (`krater.services.skypilot_sync` and `krater.compute`). Each writes a `budget_warning`
+Shared by every compute layer (today `krater.compute`). Each writes a `budget_warning`
 `AuditEvent` once a project crosses the warn percentage, and a `budget_teardown` one when it stops the project's
 machines at 100%; `krater.services.slack_notify.sync_budget_notifications` posts both to the project's channel.
 Both are written once per crossing, and re-armed when the ceiling is raised.

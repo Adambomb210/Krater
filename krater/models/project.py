@@ -55,11 +55,13 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     slack_channel_archived: Mapped[bool] = mapped_column(
         sa.Boolean, nullable=False, default=False, server_default=sa.false()
     )
-    # The table still has SkyPilot's unused `skypilot_workspace` and `skypilot_allowed_users` columns; Krater
-    # Compute's migrations drop them.
+    skypilot_workspace: Mapped[str | None] = mapped_column(sa.String(255), nullable=True)
+    # The `allowed_users` Krater last sent to the workspace, so the reconciler can tell who it removed.
+    # `None` until the first update after this column was added (the workspace then holds the whole team).
+    skypilot_allowed_users: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     # This project's own hourly price cap per rented machine, set by an admin
     # (`krater.services.projects.set_hourly_cost_cap`). `None` means the global default,
-    # `Settings.compute_max_hourly_cost_cents`; see `krater.services.launch_policy.hourly_cap_cents`.
+    # `Settings.compute_max_hourly_cost_cents`; see `krater.services.launch_rules.hourly_cap_cents`.
     max_hourly_cost_cents: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
 
     submitter: Mapped[User] = relationship(foreign_keys=[submitter_id], back_populates="projects")

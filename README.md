@@ -8,7 +8,7 @@ gallery of completed projects.
 
 - [Spec](docs/SPEC.md): product spec, data model, workflow, deployment, open questions
 - [Weave integration](docs/weave-integration.md): sign-in and roles (Weave owns roles; Krater reads them from claims and the directory API)
-- [Quilt integration](docs/quilt-integration.md): submission and budget events to Quilt
+- [Krater Compute](docs/compute/README.md): renting Vast machines for members' jobs and boxes, spend and budgets
 - [Handoff](docs/HANDOFF.md): start here if you are picking this project up (setup, state, decisions, next steps)
 - [Future work](docs/FUTURE.md): what comes after v1, loose ends, and parked ideas
 

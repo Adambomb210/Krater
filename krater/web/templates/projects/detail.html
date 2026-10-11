@@ -27,32 +27,24 @@
     <p class="policy-note">{{ summary.policy_explanation }}</p>
   {% endif %}
 
-  {% if skypilot_budget_flag == "teardown" %}
-    <p class="skypilot-banner">
+  {% if budget_flag == "teardown" %}
+    <p class="budget-banner">
       Budget reached: this project's machines have been torn down. New launches are blocked until the
       ceiling is raised.
     </p>
-  {% elif skypilot_budget_flag == "warning" %}
-    <p class="skypilot-banner">
+  {% elif budget_flag == "warning" %}
+    <p class="budget-banner">
       Warning: this project is approaching its compute budget ceiling.
     </p>
   {% endif %}
 
-  {% if can_launch %}
-    <p class="skypilot-hint">
-      SkyPilot workspace: <code>{{ project.skypilot_workspace }}</code>.
-      Sign in with <code>sky api login</code> and launch with
-      <code>sky launch -w {{ project.skypilot_workspace }} ...</code>.
-      Each launch is capped at {{ hourly_cap_cents | dollars }}/hour, shared across its machines
-      ({{ "Ganymede's default" if hourly_cap_is_default else "this project's own cap" }}).
-    </p>
-  {% elif compute_vast %}
-    <p class="skypilot-hint">
+  {% if compute_vast %}
+    <p class="compute-hint">
       <a href="/projects/{{ project.id }}/compute">Compute</a>: run jobs and SSH boxes on this project's budget.
       Each machine is capped at {{ hourly_cap_cents | dollars }}/hour.
     </p>
   {% elif show_compute_off_notice %}
-    <p class="skypilot-hint">
+    <p class="compute-hint">
       Launching machines from Krater isn't open yet.
     </p>
   {% endif %}
