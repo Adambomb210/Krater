@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import logging
 import math
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -69,48 +71,58 @@ class RecordResult:
     stopped_early: bool
 
 
-def record(session: Session, client: VastClient, *, gpu_names: list[str], disk_gb: int, now: datetime) -> RecordResult:
-    """Search and write one sample per (GPU model, rental type). One model failing is logged and skipped; a rate
-    limit stops the run (the next run starts over). Flushes; the caller commits."""
+def record(
+    session: Session,
+    client: VastClient,
+    *,
+    gpu_names: list[str],
+    disk_gb: int,
+    now: datetime,
+    pause_seconds: float = 0.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> RecordResult:
+    """Search and write one sample per (GPU model, rental type), `pause_seconds` apart. One model failing is logged
+    and skipped; a rate limit stops the run (the next run starts over). Flushes; the caller commits."""
     reliability = compute_settings.global_policy(session).reliability_floor
     written = failed = 0
-    for gpu_name in gpu_names:
-        for rental_type in RENTAL_TYPES:
-            query = OfferQuery(
+    for i, (gpu_name, rental_type) in enumerate((g, r) for g in gpu_names for r in RENTAL_TYPES):
+        if i and pause_seconds:
+            sleep(pause_seconds)
+        query = OfferQuery(
+            rental_type=rental_type,
+            gpu_names=(gpu_name,),
+            num_gpus=1,
+            disk_gb=disk_gb,
+            min_reliability=reliability,
+        )
+        try:
+            offers = client.search_offers(query)
+        except VastRateLimitedError:
+            logger.warning("krater.price_history: Vast rate-limited the run after %d samples; stopping", written)
+            session.flush()
+            return RecordResult(written, failed + 1, stopped_early=True)
+        except VastError:
+            logger.exception("krater.price_history: searching %s (%s) failed; skipping", gpu_name, rental_type)
+            failed += 1
+            continue
+        summary = summarize(offers, rental_type, disk_gb=disk_gb)
+        if summary.truncated:
+            logger.info("krater.price_history: %s (%s) hit Vast's 512-offer cap", gpu_name, rental_type)
+        session.add(
+            GpuPriceSample(
+                sampled_at=now,
+                gpu_name=gpu_name,
                 rental_type=rental_type,
-                gpu_names=(gpu_name,),
                 num_gpus=1,
                 disk_gb=disk_gb,
-                min_reliability=reliability,
+                offer_count=summary.offer_count,
+                truncated=summary.truncated,
+                min_microusd=summary.min_microusd,
+                p10_microusd=summary.p10_microusd,
+                median_microusd=summary.median_microusd,
             )
-            try:
-                offers = client.search_offers(query)
-            except VastRateLimitedError:
-                logger.warning("krater.price_history: Vast rate-limited the run after %d samples; stopping", written)
-                session.flush()
-                return RecordResult(written, failed + 1, stopped_early=True)
-            except VastError:
-                logger.exception("krater.price_history: searching %s (%s) failed; skipping", gpu_name, rental_type)
-                failed += 1
-                continue
-            summary = summarize(offers, rental_type, disk_gb=disk_gb)
-            if summary.truncated:
-                logger.info("krater.price_history: %s (%s) hit Vast's 512-offer cap", gpu_name, rental_type)
-            session.add(
-                GpuPriceSample(
-                    sampled_at=now,
-                    gpu_name=gpu_name,
-                    rental_type=rental_type,
-                    num_gpus=1,
-                    disk_gb=disk_gb,
-                    offer_count=summary.offer_count,
-                    truncated=summary.truncated,
-                    min_microusd=summary.min_microusd,
-                    p10_microusd=summary.p10_microusd,
-                    median_microusd=summary.median_microusd,
-                )
-            )
-            written += 1
+        )
+        written += 1
     session.flush()
     return RecordResult(written, failed, stopped_early=False)
 

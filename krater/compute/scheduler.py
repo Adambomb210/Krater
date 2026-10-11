@@ -864,6 +864,20 @@ class Scheduler:
             )
             return True
         except VastRequestFailedError as exc:
+            if exc.status_code is not None and exc.status_code < 400:
+                # A 200 that says `success: false`: Vast has rented the machine anyway (staging, 2026-10-11), so
+                # treat it like a lost answer and let the next pass find the machine by its label.
+                logger.warning("krater.compute: create for %s answered 200 without success; settling by label", label)
+                _event(
+                    self.session,
+                    job,
+                    "create_unconfirmed",
+                    f"Vast didn't confirm the rental ({exc}); checking next pass.",
+                    now=self.now,
+                    instance=row,
+                    error=exc.error,
+                )
+                return True
             row.state = ComputeInstanceState.CREATE_FAILED
             queued_at = job.queued_at
             _requeue(self.session, job, "The offer was taken before Krater could rent it; trying again.", now=self.now)

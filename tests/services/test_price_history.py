@@ -139,3 +139,21 @@ def test_latest_returns_the_newest_sample_per_series(db_session: Session) -> Non
 @pytest.mark.parametrize("percent,expected", [(10, 1), (50, 5), (100, 10)])
 def test_nearest_rank(percent: int, expected: int) -> None:
     assert price_history._nearest_rank(list(range(1, 11)), percent) == expected
+
+
+def test_searches_are_paced(db_session: Session) -> None:
+    fake = FakeVast()
+    pauses: list[float] = []
+
+    price_history.record(
+        db_session,
+        fake.client(),
+        gpu_names=["RTX 3060", "RTX 4090"],
+        disk_gb=32,
+        now=NOW,
+        pause_seconds=1.0,
+        sleep=pauses.append,
+    )
+
+    assert len(fake.search_bodies) == 4
+    assert pauses == [1.0, 1.0, 1.0]  # between searches, not before the first
