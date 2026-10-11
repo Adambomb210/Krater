@@ -49,8 +49,9 @@ reads; it needs no server or credentials.
 agenix secret; the module puts the key in the worker's env alone, as `KRATER_VAST_API_KEY`), which also sets
 `KRATER_VAST_MODE=live`, `KRATER_COMPUTE_MODE=vast` and a production `KRATER_COMPUTE_LABEL_PREFIX` (`compute.labelPrefix`,
 `krater-prod-` by default; production refuses Krater's own default, since the scheduler destroys unknown instances
-with its prefix). `projectSecretsKeyFile` turns project secrets on (the portal's env alone), and `weave.cliClientId`
-the `krater` CLI's API. With Compose instead, mount the key into the worker only and set
+with its prefix). `projectSecretsKeyFile` turns project secrets on (the portal's env alone; to rotate its key, put a new first line in
+the file, restart, run `python -m krater.rotate_project_secrets` in the portal container, then drop the old line), and
+`weave.cliClientId` the `krater` CLI's API. With Compose instead, mount the key into the worker only and set
 `KRATER_VAST_API_KEY_FILE`. The deploy's `ensure_bucket` creates the `krater-compute` bucket for checkpoints. Project secrets also need
 `KRATER_PROJECT_SECRETS_KEY_FILE`: a Fernet key file (an agenix secret) mounted into the portal only. Without it the
 feature is off. Losing the key loses every stored secret, so back it up with the other agenix secrets.

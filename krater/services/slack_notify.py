@@ -435,12 +435,22 @@ def sync_box_notifications(session: Session, slack_client: SlackClient) -> None:
         AuditEvent.project_id.is_not(None),
         AuditEvent.id.not_in(already_posted),
     )
-    for event in session.scalars(stmt):
+    for event in list(session.scalars(stmt)):
         project = session.get(Project, event.project_id)
         if project is None or project.slack_channel_id is None:
+            continue  # no channel yet: try again next tick
+        if project.slack_channel_archived:
+            # The project finished; nobody reads its channel. Mark it handled so it isn't retried forever.
+            session.add(SlackNotification(audit_event_id=event.id))
+            session.flush()
             continue
         blocks, text = _box_message(session, slack_client, event, project)
-        slack_client.post_message(project.slack_channel_id, blocks=blocks, text=text)
+        try:
+            slack_client.post_message(project.slack_channel_id, blocks=blocks, text=text)
+        except SlackRequestFailedError:
+            # One channel Slack refuses (removed, bot kicked) mustn't hold up every other notice: retried next tick.
+            logger.exception("krater.slack box notice %s for project %s failed; continuing", event.id, project.id)
+            continue
         session.add(SlackNotification(audit_event_id=event.id))
         session.flush()
 

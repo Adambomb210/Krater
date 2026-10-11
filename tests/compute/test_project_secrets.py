@@ -129,3 +129,14 @@ def test_the_runner_gets_them_at_start_and_vast_never_does(db_session, member, p
 
     assert info.secrets == {"HF_TOKEN": "hf_abc123"}
     assert "hf_abc123" not in repr(info)
+
+
+def test_rotation_re_encrypts_with_the_newest_key_so_the_old_one_can_go(db_session, member, project, settings) -> None:
+    project_secrets.set_secret(db_session, member, project=project, name="HF_TOKEN", value="v1", settings=settings)
+    new_key = Fernet.generate_key().decode()
+    both = settings.model_copy(update={"project_secrets_key": f"{new_key},{KEY}"})
+
+    assert project_secrets.rotate_all(db_session, both) == (1, [])
+
+    only_new = settings.model_copy(update={"project_secrets_key": new_key})
+    assert project_secrets.environment(db_session, project.id, only_new) == {"HF_TOKEN": "v1"}
