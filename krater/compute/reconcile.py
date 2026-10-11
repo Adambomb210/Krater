@@ -1,9 +1,10 @@
 """Hourly reconciliation of Krater Compute's spend estimate with what Vast actually charged.
 
 Reads `GET /api/v0/charges/` for the days Krater's recent instances ran, sums each instance's charges (a row can span
-several days and is rounded to $0.001, so only the instance's cumulative total is compared), replaces the instance's
-estimate with Vast's figure, and records the check per project in `spend_reconciliations`. A difference past the
-project's reconciliation alert threshold writes an `AuditEvent` for admins.
+several days and is rounded to $0.001, so only the instance's cumulative total is compared), and records the check
+per project in `spend_reconciliations`. A destroyed instance takes Vast's figure; a live one takes it only when it is
+higher, since charges for a running machine may lag, and a lower estimate would make the budget stop late. A
+difference past the project's reconciliation alert threshold writes an `AuditEvent` for admins.
 
 A corrected total above the project's latest snapshot becomes a new `vast_estimate` snapshot (and a Quilt
 `spend.recorded` event). A lower one stays in Krater's records only: Quilt takes increases only until
@@ -24,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from krater.compute import spend
 from krater.config import Settings
-from krater.models import ComputeInstance, ComputeJob, Project, SpendReconciliation
+from krater.models import AuditEvent, ComputeInstance, ComputeJob, Project, SpendReconciliation
 from krater.services import audit, compute_settings
 from krater.vast import VastClient, usd_to_microusd
 
@@ -82,7 +83,12 @@ def run(session: Session, client: VastClient, settings: Settings, *, now: dateti
         logger.warning(
             "krater.compute: Vast charged for Krater-labelled instances Krater never rented: %s", result.unknown_sources
         )
-        audit.record(session, None, AUDIT_UNKNOWN_CHARGES, payload={"sources": result.unknown_sources})
+        already = set()
+        for event in session.scalars(sa.select(AuditEvent).where(AuditEvent.action == AUDIT_UNKNOWN_CHARGES)):
+            already.update(event.payload.get("sources", []))
+        new_sources = [source for source in result.unknown_sources if source not in already]
+        if new_sources:
+            audit.record(session, None, AUDIT_UNKNOWN_CHARGES, payload={"sources": new_sources})
 
     by_project: dict[uuid.UUID, list[tuple[ComputeInstance, int, int]]] = {}
     for row in rows:
@@ -92,10 +98,14 @@ def run(session: Session, client: VastClient, settings: Settings, *, now: dateti
         estimate = row.accrued_microusd
         row.charged_microusd = actual
         row.charged_at = now
-        # Vast's figure replaces the estimate; accrual continues from here for a live instance.
-        row.accrued_microusd = actual
         if row.destroyed_at is None:
+            # Live: Vast's charges may lag what is running now, so never correct downwards here (a lower
+            # estimate would make the budget stop late). Accrual continues from here.
+            row.accrued_microusd = max(estimate, actual)
             row.accrued_until = now
+        else:
+            # Destroyed: nothing more will be charged, so Vast's figure is final.
+            row.accrued_microusd = actual
         by_project.setdefault(row.job.project_id, []).append((row, estimate, actual))
 
     for project_id, items in by_project.items():
