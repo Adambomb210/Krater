@@ -280,6 +280,7 @@ class FakeVast:
             "env": body.get("env"),
             "onstart": body.get("onstart"),
             "args": body.get("args"),
+            "runtype": body.get("runtype"),
             "offer_id": offer_id,
             "actual_status": None,
             "intended_status": "running",

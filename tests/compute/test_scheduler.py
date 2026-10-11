@@ -92,8 +92,11 @@ def test_a_job_rents_the_cheapest_offer_at_or_under_its_target(db_session, membe
     created = fake.instances[row.vast_instance_id]
     assert created["is_bid"] is True
     assert created["label"] == row.label
-    assert created["args"][0:2] == ["sh", "-c"]
-    assert "python train.py" in created["args"][2]
+    # The image's ENTRYPOINT is replaced by sh (in args mode, Vast's onstart is the entrypoint override).
+    assert created["onstart"] == "sh"
+    assert created["args"][0] == "-c"
+    assert "python train.py" in created["args"][1]
+    assert created["runtype"] == "args"
     assert "KRATER_JOB_ID=" in created["env"]
     assert job.state is ComputeJobState.STARTING
     # Holds its max runtime (8 h) at the rented price: ceil(0.063767 * 8 * 100) cents.

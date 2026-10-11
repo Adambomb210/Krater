@@ -46,5 +46,10 @@ each behavior that would cost money to get wrong, and `tests/vast/test_client.py
 
 ## Not checked live yet
 
+- **Entrypoint override.** In `args` mode Vast's `onstart` field is the container's entrypoint (Vast's CLI sends
+  `--entrypoint X` as `"onstart": X`, and documents `--onstart-cmd bash --args -c '...'`). Krater sends
+  `runtype: "args"`, `onstart: "sh"`, `args: ["-c", script]`, so a member's image ENTRYPOINT can't swallow the
+  command. The 2026-10-11 spike used an image without an ENTRYPOINT, so this needs one paid launch with an image
+  that has one.
 - `gpu_ram` in a search filter: sent in MB, as Vast's CLI does (it multiplies a `gpu_ram>=24` query by 1000).
 - Rate limits: Vast answers 429 with a `detail`; how many calls a minute it allows isn't documented.
