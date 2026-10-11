@@ -47,6 +47,8 @@ class ComputeSettings(Base):
     heartbeat_timeout_minutes: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     # Checkpoints and outputs a project's machines may keep in Krater's storage, in GB.
     storage_quota_gb: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    box_sync_deadline_minutes: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    box_resume_timeout_minutes: Mapped[int] = mapped_column(sa.Integer, nullable=False)
 
     updated_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now(), onupdate=sa.func.now()
@@ -75,6 +77,8 @@ class ProjectComputeSettings(Base):
     runner_start_minutes: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     heartbeat_timeout_minutes: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     storage_quota_gb: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    box_sync_deadline_minutes: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    box_resume_timeout_minutes: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
 
     updated_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now(), onupdate=sa.func.now()

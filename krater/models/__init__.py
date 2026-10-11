@@ -28,6 +28,7 @@ from krater.models.quilt_outbox import QuiltOutbox
 from krater.models.review import Review
 from krater.models.slack_notification import SlackNotification
 from krater.models.spend_snapshot import SpendSnapshot
+from krater.models.ssh_key import UserSshKey
 from krater.models.user import User
 
 __all__ = [
@@ -62,4 +63,5 @@ __all__ = [
     "SpendSnapshot",
     "SpendSource",
     "User",
+    "UserSshKey",
 ]

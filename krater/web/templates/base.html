@@ -36,10 +36,22 @@
           <span>Krater</span>
         </a>
         <nav class="site-nav" aria-label="Primary">
-          {% set on_home = path == "/" or path.startswith("/projects") or path.startswith("/reviews") or path.startswith("/admin") %}
-          <a class="site-nav__link" href="/"{% if on_home %} aria-current="{{ 'page' if path == '/' else 'true' }}"{% endif %}>{{ "My projects" if signed_in_name else "Home" }}</a>
-          <a class="site-nav__link" href="/gallery"{% if path.startswith("/gallery") %} aria-current="{{ 'page' if path == '/gallery' else 'true' }}"{% endif %}>Gallery</a>
-          <a class="site-nav__link" href="/pricing"{% if path.startswith("/pricing") %} aria-current="page"{% endif %}>GPU pricing</a>
+          <a href="/"{% if path == "/" %} aria-current="page"{% endif %}>Home</a>
+          <a href="/gallery"{% if path.startswith("/gallery") %} aria-current="page"{% endif %}>Gallery</a>
+          <a href="/pricing"{% if path.startswith("/pricing") %} aria-current="page"{% endif %}>GPU pricing</a>
+          {% set signed_in_name = request.session.get('display_name') %}
+          <div class="site-nav__account">
+            {% if signed_in_name %}
+              <span class="site-nav__user">{{ signed_in_name }}</span>
+              <a href="/account/ssh-keys"{% if path.startswith("/account") %} aria-current="page"{% endif %}>SSH keys</a>
+              <form class="site-nav__logout" action="/logout" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="link-button">Sign out</button>
+              </form>
+            {% else %}
+              <a href="/login">Sign in</a>
+            {% endif %}
+          </div>
         </nav>
         <div class="site-account">
           {% if signed_in_name %}

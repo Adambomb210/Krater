@@ -22,6 +22,8 @@ APPROVED = {
     "reconcile_alert_percent": 10,
     "runner_start_minutes": 10,
     "heartbeat_timeout_minutes": 30,
+    "box_sync_deadline_minutes": 10,
+    "box_resume_timeout_minutes": 10,
     "storage_quota_gb": 50,
 }
 
