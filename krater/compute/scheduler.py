@@ -292,6 +292,19 @@ class Scheduler:
         if job.state in FINISHED_JOB_STATES:
             self._destroy(row, f"job {job.state.value}")
             return
+        if job.project.status not in LAUNCHABLE_STATUSES:
+            # Withdrawn or completed: its remaining budget may already be reclaimed, so stop billing now.
+            _finish(job, ComputeJobState.CANCELLED, f"The project is {job.project.status.value}.", now=self.now)
+            _event(
+                self.session,
+                job,
+                "cancelled",
+                "Cancelled: the project can't launch any more.",
+                now=self.now,
+                instance=row,
+            )
+            self._destroy(row, f"project {job.project.status.value}")
+            return
 
         policy = self._policy(job.project)
         if (

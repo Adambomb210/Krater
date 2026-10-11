@@ -12,6 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 #: requires at least `MIN_SECRET_KEY_LENGTH` characters -- see `_validate_production_safety`).
 DEFAULT_SECRET_KEY = "insecure-dev-secret-change-me"
 MIN_SECRET_KEY_LENGTH = 32
+DEFAULT_COMPUTE_LABEL_PREFIX = "krater-job-"
 
 
 class Settings(BaseSettings):
@@ -63,7 +64,7 @@ class Settings(BaseSettings):
     # Every instance Krater rents is labelled `<prefix><job>-<attempt>`. The scheduler destroys any instance on the
     # account with this prefix that it has no record of, so give each Krater (staging, production) sharing a Vast
     # account its own prefix, and never start another tool's labels with it.
-    compute_label_prefix: str = "krater-job-"
+    compute_label_prefix: str = DEFAULT_COMPUTE_LABEL_PREFIX
 
     # SkyPilot integration. See docs/skypilot-integration.md and docs/dev/skypilot-spike.md.
     # `fake` uses an in-memory SkyPilot for dev and tests; `live` talks to a real API server over REST.
@@ -166,6 +167,10 @@ class Settings(BaseSettings):
                 raise ValueError("KRATER_SKYPILOT_MODE cannot be 'fake' when KRATER_ENV=production")
             if self.compute_mode == "vast" and self.vast_mode != "live":
                 raise ValueError("KRATER_VAST_MODE must be 'live' when KRATER_COMPUTE_MODE=vast in production")
+            if self.compute_mode == "vast" and self.compute_label_prefix == DEFAULT_COMPUTE_LABEL_PREFIX:
+                # The scheduler destroys unknown instances with its prefix: two Kraters on one Vast account with the
+                # same prefix would destroy each other's machines.
+                raise ValueError("Set KRATER_COMPUTE_LABEL_PREFIX to this deployment's own prefix in production")
             if self.slack_mode == "fake":
                 raise ValueError("KRATER_SLACK_MODE cannot be 'fake' when KRATER_ENV=production")
             if self.s3_mode == "fake":

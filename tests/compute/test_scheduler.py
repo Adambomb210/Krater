@@ -439,6 +439,19 @@ def test_a_vanished_machine_requeues_the_job(db_session, member, project, client
     assert _instance(db_session, job).attempt == 2
 
 
+def test_a_withdrawn_project_stops_its_running_machines(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job, row = _running_job(db_session, member, project, client, fake)
+    project.status = ProjectStatus.WITHDRAWN
+    db_session.flush()
+
+    _pass(db_session, client, NOW + timedelta(minutes=6))
+
+    assert job.state is ComputeJobState.CANCELLED
+    assert row.state is ComputeInstanceState.DESTROYED
+    assert fake.instances == {}
+    assert job.hold_cents == 0
+
+
 def test_cancelling_destroys_the_machine_on_the_next_pass(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_job(db_session, member, project, client, fake)
 
