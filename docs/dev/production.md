@@ -76,7 +76,7 @@ systemctl restart krater-skypilot krater-web
   | --- | --- | --- |
   | `krater.example.org` | the portal, Slack's endpoint and the launch gate | `KRATER_DOMAIN` |
   | `storage.krater.example.org` | screenshot uploads and thumbnails | `KRATER_S3_DOMAIN` |
-  | `sky.krater.example.org` | the SkyPilot API server members log in to | `KRATER_SKYPILOT_DOMAIN` |
+  | `sky.krater.example.org` | the SkyPilot API server members log in to (compute on only) | `KRATER_SKYPILOT_DOMAIN` |
 
   Leave `KRATER_S3_DOMAIN` unset if screenshots live with a hosted provider (R2, B2 or S3), and
   `KRATER_SKYPILOT_DOMAIN` unset without the `skypilot` profile. Their `*.localhost` defaults keep those sites
@@ -86,16 +86,18 @@ systemctl restart krater-skypilot krater-web
   - Krater's app has redirect URI `https://<KRATER_DOMAIN>/auth/callback` and scopes
     `openid profile email groups roles slack directory`.
   - A Weave superadmin creates the roles `member`, `reviewer` and `admin` on it, and gives you `member` and `admin`.
-  - A second, confidential app for the SkyPilot sign-in proxy has redirect URI
+  - With compute on only: a second, confidential app for the SkyPilot sign-in proxy has redirect URI
     `https://<KRATER_SKYPILOT_DOMAIN>/oauth2/callback`.
 - **Slack:** the app's interactivity URL is `https://<KRATER_DOMAIN>/slack/interactions` ([slack-setup.md](slack-setup.md)).
-- **Vast:** the production API key, in a file only root can read, named by `KRATER_SKYPILOT_VAST_KEY_FILE`.
+- **Vast** (compute on only): the production API key, in a file only root can read, named by
+  `KRATER_SKYPILOT_VAST_KEY_FILE`.
 
 ## 2. The env file
 
 Start from `.env.example`. Keep the file outside the repo, readable only by the deploy user, and pass it with
 `--env-file <path>`, with `KRATER_ENV_FILE` set to the same path. Krater refuses to start in production with stub or
-fake modes, a short or placeholder `KRATER_SECRET_KEY`, a short policy token, a non-https `KRATER_BASE_URL`, or missing
+fake modes, a short or placeholder `KRATER_SECRET_KEY`, a short policy token (compute on only), a non-https
+`KRATER_BASE_URL`, or missing
 Weave, Slack or S3 secrets (`krater/config.py`). Settings that differ from staging:
 
 ```bash
