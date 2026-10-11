@@ -131,6 +131,8 @@ class FakeVast:
         #: Whether any log download carried an Authorization header (it must never).
         self.log_fetch_saw_authorization = False
         self.search_bodies: list[dict[str, Any]] = []
+        #: When true, a stop leaves `actual_status` at `running` (as the live API does for a while).
+        self.lag_stops = False
         #: Stopped instances whose machine's GPU someone else has rented: a start is accepted but they stay stopped.
         self.gpu_taken: dict[int, bool] = {}
         #: SSH keys on the account (Krater keeps none).
@@ -352,7 +354,8 @@ class FakeVast:
             instance["intended_status"] = state
             instance["cur_state"] = state
             if state == "stopped":
-                instance["actual_status"] = "stopped"
+                # The live API keeps reporting `running` for a while after a stop; `lag_stops` imitates that.
+                instance["actual_status"] = "running" if self.lag_stops else "stopped"
             elif instance["actual_status"] == "stopped" and not self.gpu_taken.get(instance_id):
                 instance["actual_status"] = "running"
         if "label" in body:
