@@ -311,6 +311,14 @@ def _build_detail_context(
 
     can_review = actor.is_reviewer and not is_submitter and not is_credited_builder and current_is_pending
 
+    compute_mode = get_settings().compute_mode
+    compute_on = compute_mode == "skypilot"
+    skypilot_budget_flag = None
+    if (compute_on and project.skypilot_workspace is not None) or compute_mode == "vast":
+        skypilot_budget_flag = current_budget_flag(
+            session, project, warn_percent=get_settings().skypilot_budget_warn_percent
+        )
+
     screenshots = _screenshot_entries(get_object_store(), current) if current is not None else []
 
     # For each revision that used the budget estimator (`budget_estimate` set), whether its actually

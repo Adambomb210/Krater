@@ -122,6 +122,10 @@ class ComputeInstance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     running_since: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     paused_since: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    # What this instance has cost so far by Krater's estimate (disk from create, GPU only while running), and up to
+    # when. Hourly reconciliation with Vast's charges corrects it.
+    accrued_microusd: Mapped[int] = mapped_column(sa.BigInteger, nullable=False, default=0, server_default="0")
+    accrued_until: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     # Set when Krater decides to destroy it; the scheduler retries until Vast confirms it's gone.
     destroy_requested_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     destroy_reason: Mapped[str | None] = mapped_column(sa.String(200), nullable=True)

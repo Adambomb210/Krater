@@ -9,7 +9,6 @@ from decimal import Decimal
 import httpx
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.orm import Session
 
 from krater.compute import scheduler
 from krater.config import Settings
@@ -21,43 +20,17 @@ from krater.models import (
     ComputeJob,
     ComputeJobState,
     ProjectStatus,
-    ReviewDecision,
 )
 from krater.services import compute_jobs, projects
-from krater.services.actor import Actor
 from krater.services.compute_jobs import JobSpec
 from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
 from krater.vast import FakeVast, VastClient
-from tests.services.conftest import admin, make_actor, make_user, member, weave  # noqa: F401
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 SETTINGS = Settings(compute_mode="vast", skypilot_max_hourly_cost_cents=500)
 # Disk is 32 GB everywhere. RTX 3060 offers: 1001 bids $0.055 + $0.0088 disk = $0.0638/h (cheapest),
 # 1003 $0.066 + $0.0066 = $0.0726/h, 1002 $0.0495 + $0.0351 = $0.0846/h.
 CHEAPEST_3060_FULL = 63_767
-
-
-@pytest.fixture
-def fake() -> FakeVast:
-    return FakeVast()
-
-
-@pytest.fixture
-def client(fake: FakeVast) -> VastClient:
-    return fake.client()
-
-
-@pytest.fixture
-def project(db_session: Session, member: Actor, admin: Actor):  # noqa: F811
-    project = projects.create_project(
-        db_session, member, title="Compute Test", write_up="w", budget_requested_cents=10_000
-    )
-    projects.submit(db_session, member, project=project)
-    projects.admin_decide(
-        db_session, admin, revision=project.current_revision, decision=ReviewDecision.APPROVE, reason="ok"
-    )
-    db_session.refresh(project)
-    return project
 
 
 def _submit(db_session, member, project, *, now=NOW, **overrides) -> ComputeJob:  # noqa: F811

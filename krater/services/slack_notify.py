@@ -32,6 +32,7 @@ from krater.models import (
     User,
 )
 from krater.services.actor import GROUP_REVIEWER
+from krater.services.budget_alerts import AUDIT_BUDGET_TEARDOWN, AUDIT_BUDGET_WARNING
 from krater.services.slack_membership import slack_id_for
 from krater.slack.client import SlackClient
 from krater.slack.errors import SlackError, SlackRequestFailedError
@@ -356,7 +357,7 @@ def _budget_event_message(event: AuditEvent) -> tuple[list[dict], str]:
     payload = event.payload or {}
     if event.action == AUDIT_BUDGET_TEARDOWN:
         text = (
-            ":octagonal_sign: *Budget teardown*: this project's clusters and managed jobs have been "
+            ":octagonal_sign: *Budget teardown*: this project's machines have been "
             f"torn down. Ceiling: {_format_cents(payload.get('ceiling_cents', 0))}, "
             f"spend: {_format_cents(payload.get('spend_cents', 0))}."
         )
