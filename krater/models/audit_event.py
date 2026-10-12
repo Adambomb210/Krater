@@ -26,6 +26,9 @@ class AuditEvent(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     actor_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=True, index=True
     )
+    # The actor's Patchwork ID (Weave `sub`), kept on the record itself so the append-only log names who acted
+    # without Krater storing their name (docs/weave-integration.md). Null for system events, as `actor_id` is.
+    actor_sub: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
     # Open-ended (e.g. "admin_approve", "budget_adjust", "launch_blocked") per SPEC.md -- not an enum,
     # since new admin actions shouldn't need a migration to be logged.
     action: Mapped[str] = mapped_column(sa.String(64), nullable=False, index=True)

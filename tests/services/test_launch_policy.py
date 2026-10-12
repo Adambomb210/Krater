@@ -16,6 +16,13 @@ from krater.models import (
 from krater.services import budget, launch_policy
 from krater.services.actor import Actor
 from krater.skypilot_policy.envelope import PolicyRequest, PolicyUser
+from tests.services.conftest import PROFILES
+
+
+def _email(user) -> str:
+    """The email the stub Weave has for a test user; Krater itself stores none."""
+    return PROFILES[user.weave_sub][1]
+
 
 SETTINGS = Settings(skypilot_autodown_idle_minutes=30, skypilot_max_hourly_cost_cents=500)
 
@@ -88,7 +95,7 @@ def test_rejects_when_workspace_is_not_a_krater_project(db_session: Session) -> 
 def test_rejects_when_project_is_not_active(db_session: Session, member: Actor) -> None:
     _make_project(db_session, member, status=ProjectStatus.COMPLETED)
 
-    decision = launch_policy.decide(_request(user=_user(member.user.email)), db_session, SETTINGS)
+    decision = launch_policy.decide(_request(user=_user(_email(member.user))), db_session, SETTINGS)
 
     assert isinstance(decision, launch_policy.Reject)
     assert "isn't open for compute launches" in decision.message
@@ -112,7 +119,7 @@ def test_rejects_when_budget_is_exhausted(db_session: Session, member: Actor) ->
     )
     db_session.flush()
 
-    decision = launch_policy.decide(_request(user=_user(member.user.email)), db_session, SETTINGS)
+    decision = launch_policy.decide(_request(user=_user(_email(member.user))), db_session, SETTINGS)
 
     assert isinstance(decision, launch_policy.Reject)
     assert "no compute budget left" in decision.message
@@ -349,7 +356,7 @@ def test_inactive_project_message_names_nothing_whoever_asks(
 ) -> None:
     project = _make_project(db_session, member, status=ProjectStatus.COMPLETED)
     user = (
-        None if claimed_email is None else _user(member.user.email if claimed_email == "submitter" else claimed_email)
+        None if claimed_email is None else _user(_email(member.user) if claimed_email == "submitter" else claimed_email)
     )
 
     decision = launch_policy.decide(_request(user=user), db_session, SETTINGS)
@@ -365,7 +372,7 @@ def test_exhausted_budget_message_names_nothing_whoever_asks(
 ) -> None:
     project = _spent_project(db_session, member)
     user = (
-        None if claimed_email is None else _user(member.user.email if claimed_email == "submitter" else claimed_email)
+        None if claimed_email is None else _user(_email(member.user) if claimed_email == "submitter" else claimed_email)
     )
 
     decision = launch_policy.decide(_request(user=user), db_session, SETTINGS)
@@ -571,7 +578,7 @@ def test_a_project_with_no_budget_at_all_gets_the_budget_message(db_session: Ses
     budget.add_entry(db_session, project=project, kind=BudgetEntryKind.RECLAIM, amount_cents=-1_000, actor=member)
     db_session.flush()
 
-    decision = launch_policy.decide(_request(user=_user(member.user.email)), db_session, SETTINGS)
+    decision = launch_policy.decide(_request(user=_user(_email(member.user))), db_session, SETTINGS)
 
     assert isinstance(decision, launch_policy.Reject)
     assert "no compute budget left" in decision.message

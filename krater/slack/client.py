@@ -59,10 +59,6 @@ class SlackClient(Protocol):
         """
         ...
 
-    def lookup_user_by_email(self, email: str) -> str | None:
-        """The Slack user id for `email`, or `None` if no Slack account uses it."""
-        ...
-
     def get_user_info(self, slack_user_id: str) -> SlackUserInfo | None:
         """Directory info for `slack_user_id`, or `None` if it doesn't exist."""
         ...

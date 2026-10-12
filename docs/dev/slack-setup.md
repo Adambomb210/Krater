@@ -21,8 +21,6 @@ name, the bot scopes and interactivity (steps 1, 2 and 5 below). Then do steps 3
    - `chat:write` -- post/update the review message and admin-override notices
    - `users:read` -- look up a user's guest/restricted/deleted status (`users.info`) for the Slack membership
      gate, when Weave doesn't send `slack_member`
-   - `users:read.email` -- Krater finds a person's Slack account with `users.lookupByEmail` (using the email
-     Weave verified) when Weave has no `slack_id` for them, for the membership gate and for channel invites
 3. **Install App** (or **Install to Workspace**) at the top of that same page. Copy the **Bot User OAuth
    Token** (`xoxb-...`) -> `KRATER_SLACK_BOT_TOKEN`.
 4. **Basic Information** -> **App Credentials** -> copy the **Signing Secret** ->
@@ -99,11 +97,10 @@ the port.
 
 With `KRATER_SLACK_MODE=live` and the tunnel up:
 
-1. Submit a proposal as a member with a real Slack account in the workspace, under the same email as their
-   Weave account (or with Slack linked in Weave, which sends `slack_id`). The membership gate in
-   `krater.services.slack_membership` uses Weave's `slack_member` when Weave sends it. Otherwise it finds the
-   account by stored id or `users.lookupByEmail`, then requires `users.info` to show a non-guest,
-   non-deleted account -- see `docs/SPEC.md` "Roles & authentication".
+1. Submit a proposal as a member whose Slack account is linked in Weave (Weave sends `slack_id`). The membership
+   gate in `krater.services.slack_membership` uses Weave's `slack_member` when Weave sends it. Otherwise it requires
+   `users.info` for that `slack_id` to show a non-guest, non-deleted account -- see `docs/SPEC.md` "Roles &
+   authentication".
 2. Krater should create a private `ganymede-<slug>-<id>` channel, invite you and every current
    reviewer (Weave's directory lists everyone with the Krater `reviewer` role), and post the review message with
    Approve/Reject buttons.

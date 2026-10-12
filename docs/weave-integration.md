@@ -21,15 +21,36 @@ A Weave superadmin must create the roles `member`, `reviewer` and `admin` on the
 | --- | --- |
 | OIDC Authorization Code + PKCE (PKCE is **required**) | Sign-in |
 | Discovery, JWKS, RS256 id_tokens | Verifying the id_token |
-| Claims `sub`, `name`, `email`, `email_verified` | The user row. `sub` is the user's `p_id`, e.g. `PWL5A1B2C3D4` |
+| Claim `sub` | The user row. `sub` is the user's `p_id` (Patchwork ID), e.g. `PWL5A1B2C3D4` |
+| Claims `name`, `email` | The signed-in name in the session cookie; never stored (see "Member data" below) |
 | Claim `roles` (scope `roles`) | Krater's app-defined role keys the user holds |
 | Claim `groups` (scope `groups`) | Group slugs linked to the Krater app; the fallback when `roles` is absent |
 | Claims `slack_id`, `slack_member` (scope `slack`) | Mapping Slack clicks to users, and the Slack membership gate |
 | The client_credentials grant, scope `directory` | Krater's own token for the directory API |
-| `GET /api/v1/directory/users/{sub}` | The fresh role check before every action |
-| `GET /api/v1/directory/users?role=<key>` | "Everyone with role X", e.g. reviewers to invite to Slack channels |
+| `GET /api/v1/directory/users/{sub}` | The fresh role check before every action, and names and emails when a page needs them |
+| `GET /api/v1/directory/users?role=<key>` | "Everyone with role X", e.g. reviewers to invite to Slack channels, or finding a member by email |
 
 Krater asks for the sign-in scopes `openid profile email groups roles slack`.
+
+## Member data
+
+Weave is the one place that stores member data (patchworklabsorg/internal-docs, "Member data" in `patches.md`).
+Krater keeps only each member's Patchwork ID (`users.weave_sub`), plus Weave's `slack_id` and roles for routing Slack
+clicks and for navigation. It stores no names, emails or other personal details:
+
+- **Names and emails** are read from the directory when Krater needs them (`krater.services.people`), through the
+  directory client's short in-memory cache. A page that can't reach Weave shows the Patchwork ID instead of failing.
+- **Who did what** is recorded by Patchwork ID: audit events carry `actor_sub`, the worker's admin-override notice
+  gets the admin's `sub` and reads their name when it posts, and a job's history says "a team member" or "an admin".
+- **Finding a member** (a teammate, a credited builder) takes a Patchwork ID, looked up directly, or an email,
+  matched against `?role=member` because the directory has no search by email. Krater then stores the Patchwork ID.
+- **Slack** uses Weave's `slack_id` only. Krater never looks Slack accounts up by email.
+- **SkyPilot** knows users by email, so the reconciler reads the team's emails from the directory's member list on
+  each run and sends them to the workspace; Krater keeps only their Patchwork IDs.
+- **The signed-in name** shown in the header comes from the id_token and lives in the signed session cookie only.
+
+When a member asks for their data to be deleted, Krater holds nothing to delete beyond their Patchwork ID and the
+content they wrote (proposals, reviews), which belongs to their projects.
 
 ## Setting up Weave for Krater
 
@@ -107,8 +128,8 @@ carries `active`. `exchange_code` verifies the id_token against Weave's JWKS (si
 
 ### Sign-in (`krater.services.users.sign_in`)
 
-1. Upsert the `User` by `weave_sub`: name, email, `email_verified`, `roles_cached`, and `slack_user_id` when Weave sent
-   a `slack_id`. If another user row still holds that Slack id, it loses it.
+1. Upsert the `User` by `weave_sub`: `roles_cached`, and `slack_user_id` when Weave sent a `slack_id`. If another
+   user row still holds that Slack id, it loses it. The name goes into the session cookie, not the database.
 2. Without `ganymede:member`, refuse with the "not a member" page.
 
 ### Authorization (`krater.services.users.authorize`)
@@ -121,7 +142,8 @@ Every state-changing action asks Weave again by `sub`:
   unknown Slack id gets "not linked".
 
 A 404, `active: false` or a missing `member` role refuses the action. The record also refreshes the user's cached
-fields. `roles_cached` is for display and navigation only.
+roles and Slack id; its name and email ride on the `Actor` for that request only. `roles_cached` is for display and
+navigation only.
 
 ### Slack membership gate
 

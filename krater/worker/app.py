@@ -14,7 +14,7 @@ from krater.config import get_settings
 from krater.db import get_sessionmaker
 from krater.models import Project, ProjectRevision
 from krater.quilt import sender as quilt_sender
-from krater.services import slack_notify, slack_reviews
+from krater.services import people, slack_notify, slack_reviews
 from krater.services.pricing import refresh_prices
 from krater.services.skypilot_sync import reconcile
 from krater.skypilot import SkyPilotError, get_skypilot_client
@@ -159,9 +159,10 @@ def slack_notify_decision(revision_id: str) -> None:
 
 @app.task(name="slack_post_admin_override")
 def slack_post_admin_override(
-    project_id: str, *, action: str, actor_name: str, reason: str | None = None, extra: str | None = None
+    project_id: str, *, action: str, actor_sub: str, reason: str | None = None, extra: str | None = None
 ) -> None:
-    """Post an admin-override notice to a project's channel. A no-op if it has none yet."""
+    """Post an admin-override notice to a project's channel. A no-op if it has none yet. The job carries the
+    admin's Patchwork ID, not their name, and the name is read from Weave when the notice is posted."""
     session = get_sessionmaker()()
     try:
         project = session.get(Project, uuid.UUID(project_id))
@@ -172,7 +173,7 @@ def slack_post_admin_override(
             get_slack_client(),
             project=project,
             action=action,
-            actor_name=actor_name,
+            actor_name=people.lookup(get_weave_client(), actor_sub).label,
             reason=reason,
             extra=extra,
         )

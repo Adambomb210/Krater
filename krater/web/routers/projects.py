@@ -29,7 +29,7 @@ from krater.models import (
     RevisionOutcome,
     User,
 )
-from krater.services import pricing, slack_membership
+from krater.services import people, pricing, slack_membership
 from krater.services import projects as project_service
 from krater.services import screenshots as screenshot_service
 from krater.services.actor import Actor
@@ -38,11 +38,12 @@ from krater.services.launch_policy import LAUNCHABLE_STATUSES, hourly_cap_cents
 from krater.services.skypilot_sync import current_budget_flag
 from krater.slack import get_slack_client
 from krater.storage import ObjectStore, get_object_store
+from krater.weave import WeaveClient, get_weave_client
 from krater.web import estimator_form
 from krater.web.csrf import verify_csrf_token
 from krater.web.deps import fresh_actor
 from krater.web.flash import flash
-from krater.web.forms import UnknownEmails, parse_credited_builder_emails, parse_tags
+from krater.web.forms import UnknownMembers, parse_members, parse_tags
 from krater.web.money import InvalidDollarAmount, cents_to_input, format_cents, parse_dollars
 from krater.web.templates import templates
 from krater.worker.app import (
@@ -54,6 +55,8 @@ from krater.worker.app import (
 )
 
 router = APIRouter()
+
+Weave = Annotated[WeaveClient, Depends(get_weave_client)]
 
 _TERMINAL_STATUSES = (ProjectStatus.COMPLETED, ProjectStatus.WITHDRAWN)
 
@@ -280,6 +283,7 @@ def create_project(
 
 def _build_detail_context(
     session: Session,
+    weave_client: WeaveClient,
     project: Project,
     actor: Actor,
     *,
@@ -295,9 +299,8 @@ def _build_detail_context(
     for revision in revisions:
         builder_ids.update(revision.credited_builder_ids)
     user_ids = reviewer_ids | builder_ids
-    users_by_id = (
-        {user.id: user for user in session.scalars(sa.select(User).where(User.id.in_(user_ids)))} if user_ids else {}
-    )
+    users = list(session.scalars(sa.select(User).where(User.id.in_(user_ids)))) if user_ids else []
+    names_by_id = people.names(weave_client, users)
 
     is_submitter = actor.user.id == project.submitter_id
     current = project.current_revision
@@ -339,7 +342,7 @@ def _build_detail_context(
         "screenshots": screenshots,
         "revisions": revisions,
         "estimate_mismatch_by_revision": estimate_mismatch_by_revision,
-        "users_by_id": users_by_id,
+        "names_by_id": names_by_id,
         "is_submitter": is_submitter,
         "is_admin": actor.is_admin,
         # The workspace outlives a finished project until the reconciler tears it down: only show how to launch
@@ -382,9 +385,10 @@ def project_detail(
     project_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
 ):
     project = _get_visible_project(db_session, actor, project_id)
-    context = _build_detail_context(db_session, project, actor)
+    context = _build_detail_context(db_session, weave_client, project, actor)
     return templates.TemplateResponse(request, "projects/detail.html", context)
 
 
@@ -394,10 +398,10 @@ def project_detail(
 
 
 def _edit_form_values(session: Session, project: Project, draft: ProjectRevision) -> dict:
-    builder_emails = ""
+    builder_ids = ""
     if draft.credited_builder_ids:
         users = session.scalars(sa.select(User).where(User.id.in_(draft.credited_builder_ids)))
-        builder_emails = ", ".join(sorted(user.email for user in users))
+        builder_ids = ", ".join(sorted(user.weave_sub for user in users))
     return {
         "title": project.title,
         "repo_url": project.repo_url or "",
@@ -405,7 +409,7 @@ def _edit_form_values(session: Session, project: Project, draft: ProjectRevision
         "budget_requested": cents_to_input(draft.budget_requested_cents),
         "demo_url": draft.demo_url or "",
         "tags": ", ".join(draft.tags),
-        "credited_builder_emails": builder_emails,
+        "credited_builders": builder_ids,
     }
 
 
@@ -476,6 +480,7 @@ def update_draft(
     project_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
     store: Annotated[ObjectStore, Depends(get_object_store)],
     title: Annotated[str, Form()] = "",
     repo_url: Annotated[str, Form()] = "",
@@ -483,7 +488,7 @@ def update_draft(
     budget_requested: Annotated[str, Form()] = "",
     demo_url: Annotated[str, Form()] = "",
     tags: Annotated[str, Form()] = "",
-    credited_builder_emails: Annotated[str, Form()] = "",
+    credited_builders: Annotated[str, Form()] = "",
     form_action: Annotated[str, Form()] = "save",
     estimator_gpu: Annotated[str, Form()] = "",
     estimator_hours: Annotated[str, Form()] = "",
@@ -513,7 +518,7 @@ def update_draft(
         "budget_requested": budget_requested,
         "demo_url": demo_url,
         "tags": tags,
-        "credited_builder_emails": credited_builder_emails,
+        "credited_builders": credited_builders,
     }
 
     if form_action == "estimate":
@@ -550,9 +555,9 @@ def update_draft(
     builder_ids = list(draft.credited_builder_ids)
     if draft.kind is RevisionKind.COMPLETION:
         try:
-            builder_ids = parse_credited_builder_emails(db_session, credited_builder_emails)
-        except UnknownEmails as exc:
-            errors["credited_builder_emails"] = f"Unknown email(s): {', '.join(exc.emails)}"
+            builder_ids = parse_members(db_session, weave_client, credited_builders)
+        except UnknownMembers as exc:
+            errors["credited_builders"] = f"Not a Ganymede member: {', '.join(exc.entries)}"
     is_completion = draft.kind is RevisionKind.COMPLETION
     errors.update(project_service.link_errors(repo_url=repo_url, demo_url=demo_url if is_completion else None))
 
@@ -705,6 +710,7 @@ def withdraw_project(
     project_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
     reason: Annotated[str, Form()] = "",
 ):
     project = _get_visible_project(db_session, actor, project_id)
@@ -713,7 +719,9 @@ def withdraw_project(
         project_service.withdraw(db_session, actor, project=project, reason=reason or None)
     except ValidationFailed as exc:
         db_session.rollback()
-        context = _build_detail_context(db_session, project, actor, errors=exc.errors, error_form="withdraw")
+        context = _build_detail_context(
+            db_session, weave_client, project, actor, errors=exc.errors, error_form="withdraw"
+        )
         return templates.TemplateResponse(request, "projects/detail.html", context, status_code=422)
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
@@ -722,7 +730,7 @@ def withdraw_project(
         slack_archive_channel.defer(project_id=str(project.id))
         if not is_self:
             slack_post_admin_override.defer(
-                project_id=str(project.id), action="admin_withdraw", actor_name=actor.user.display_name, reason=reason
+                project_id=str(project.id), action="admin_withdraw", actor_sub=actor.user.weave_sub, reason=reason
             )
 
     return _success_redirect(db_session, request, project_id, "Project withdrawn.", after_commit=_notify)
@@ -739,6 +747,7 @@ def record_review(
     project_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
     decision: Annotated[str, Form()],
     reason: Annotated[str, Form()] = "",
 ):
@@ -748,7 +757,7 @@ def record_review(
     except ValueError:
         db_session.rollback()
         context = _build_detail_context(
-            db_session, project, actor, errors={"decision": "Unknown decision."}, error_form="review"
+            db_session, weave_client, project, actor, errors={"decision": "Unknown decision."}, error_form="review"
         )
         return templates.TemplateResponse(request, "projects/detail.html", context, status_code=422)
 
@@ -760,7 +769,7 @@ def record_review(
     except ValidationFailed as exc:
         db_session.rollback()
         context = _build_detail_context(
-            db_session, project, actor, errors=exc.errors, error_form="review", posted={"reason": reason}
+            db_session, weave_client, project, actor, errors=exc.errors, error_form="review", posted={"reason": reason}
         )
         return templates.TemplateResponse(request, "projects/detail.html", context, status_code=422)
     except InvalidState as exc:
@@ -788,6 +797,7 @@ def admin_decide(
     project_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
     decision: Annotated[str, Form()],
     reason: Annotated[str, Form()] = "",
 ):
@@ -797,7 +807,12 @@ def admin_decide(
     except ValueError:
         db_session.rollback()
         context = _build_detail_context(
-            db_session, project, actor, errors={"decision": "Unknown decision."}, error_form="admin_decide"
+            db_session,
+            weave_client,
+            project,
+            actor,
+            errors={"decision": "Unknown decision."},
+            error_form="admin_decide",
         )
         return templates.TemplateResponse(request, "projects/detail.html", context, status_code=422)
 
@@ -807,7 +822,13 @@ def admin_decide(
     except ValidationFailed as exc:
         db_session.rollback()
         context = _build_detail_context(
-            db_session, project, actor, errors=exc.errors, error_form="admin_decide", posted={"reason": reason}
+            db_session,
+            weave_client,
+            project,
+            actor,
+            errors=exc.errors,
+            error_form="admin_decide",
+            posted={"reason": reason},
         )
         return templates.TemplateResponse(request, "projects/detail.html", context, status_code=422)
     except InvalidState as exc:
@@ -820,7 +841,7 @@ def admin_decide(
         slack_notify_decision.defer(revision_id=str(revision_id))
         slack_archive_channel.defer(project_id=str(project.id))
         slack_post_admin_override.defer(
-            project_id=str(project.id), action=action, actor_name=actor.user.display_name, reason=reason
+            project_id=str(project.id), action=action, actor_sub=actor.user.weave_sub, reason=reason
         )
 
     return _success_redirect(db_session, request, project_id, "Decision recorded.", after_commit=_notify)
@@ -832,6 +853,7 @@ def admin_adjust_budget(
     project_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
     amount: Annotated[str, Form()] = "",
     reason: Annotated[str, Form()] = "",
 ):
@@ -846,6 +868,7 @@ def admin_adjust_budget(
     if errors:
         context = _build_detail_context(
             db_session,
+            weave_client,
             project,
             actor,
             errors=errors,
@@ -866,6 +889,7 @@ def admin_adjust_budget(
         db_session.rollback()
         context = _build_detail_context(
             db_session,
+            weave_client,
             project,
             actor,
             errors=exc.errors if isinstance(exc, ValidationFailed) else {"amount_cents": str(exc)},
@@ -880,7 +904,7 @@ def admin_adjust_budget(
         slack_post_admin_override.defer(
             project_id=str(project.id),
             action="admin_adjust_budget",
-            actor_name=actor.user.display_name,
+            actor_sub=actor.user.weave_sub,
             reason=reason,
             extra=f"Amount: {amount_cents / 100:+.2f}",
         )
@@ -894,6 +918,7 @@ def admin_reclaim_budget(
     project_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
     amount: Annotated[str, Form()] = "",
     reason: Annotated[str, Form()] = "",
 ):
@@ -908,6 +933,7 @@ def admin_reclaim_budget(
     if errors:
         context = _build_detail_context(
             db_session,
+            weave_client,
             project,
             actor,
             errors=errors,
@@ -922,6 +948,7 @@ def admin_reclaim_budget(
         db_session.rollback()
         context = _build_detail_context(
             db_session,
+            weave_client,
             project,
             actor,
             errors=exc.errors,
@@ -936,7 +963,7 @@ def admin_reclaim_budget(
         slack_post_admin_override.defer(
             project_id=str(project.id),
             action="admin_reclaim_budget",
-            actor_name=actor.user.display_name,
+            actor_sub=actor.user.weave_sub,
             reason=reason,
             extra=f"Reclaimed: {amount_cents / 100:.2f}",
         )
@@ -950,6 +977,7 @@ def admin_set_hourly_cap(
     project_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
     amount: Annotated[str, Form()] = "",
     reason: Annotated[str, Form()] = "",
 ):
@@ -962,7 +990,13 @@ def admin_set_hourly_cap(
             cap_cents = parse_dollars(amount)
         except InvalidDollarAmount as exc:
             context = _build_detail_context(
-                db_session, project, actor, errors={"cap_cents": str(exc)}, error_form="admin_hourly_cap", posted=posted
+                db_session,
+                weave_client,
+                project,
+                actor,
+                errors={"cap_cents": str(exc)},
+                error_form="admin_hourly_cap",
+                posted=posted,
             )
             return templates.TemplateResponse(request, "projects/detail.html", context, status_code=422)
 
@@ -978,7 +1012,7 @@ def admin_set_hourly_cap(
         db_session.rollback()
         errors = exc.errors if isinstance(exc, ValidationFailed) else {"cap_cents": str(exc)}
         context = _build_detail_context(
-            db_session, project, actor, errors=errors, error_form="admin_hourly_cap", posted=posted
+            db_session, weave_client, project, actor, errors=errors, error_form="admin_hourly_cap", posted=posted
         )
         return templates.TemplateResponse(request, "projects/detail.html", context, status_code=422)
     except InvalidState as exc:
@@ -991,7 +1025,7 @@ def admin_set_hourly_cap(
         slack_post_admin_override.defer(
             project_id=str(project.id),
             action="admin_set_hourly_cap",
-            actor_name=actor.user.display_name,
+            actor_sub=actor.user.weave_sub,
             reason=reason,
             extra=f"Hourly cap per launch: {described}",
         )

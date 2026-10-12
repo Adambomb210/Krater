@@ -61,6 +61,9 @@ tests/             mirrors krater/ layout
   Every state-changing action (`fresh_actor`, the Slack click path) re-checks Weave's directory by `sub` through
   `krater.services.users.authorize`, and fails closed if Weave is down. `users.roles_cached` is for display only.
   Krater has no role tables, no admin users page and no disable switch: those are done in Weave.
+- **Weave owns member data.** Krater stores a member's Patchwork ID (`users.weave_sub`), never their name, email or
+  other personal details: read those from Weave when needed (`krater.services.people`) and record who acted by
+  Patchwork ID (`docs/weave-integration.md` "Member data").
 - **All Weave access goes through `krater.weave`.** Nothing else imports httpx for Weave or knows Weave's URLs.
   Krater asks for `openid profile email groups roles slack`, and calls the directory with a client_credentials token
   of its own app (scope `directory`). Its token for Quilt (scope `quilt`) comes from `WeaveClient.quilt_token`.

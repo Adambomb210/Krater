@@ -113,7 +113,8 @@ def auth_callback(
     request.session.clear()
     request.session[SESSION_USER_ID_KEY] = str(user.id)
     request.session["weave_sub"] = user.weave_sub
-    request.session["display_name"] = user.display_name
+    # The name rides in the signed session cookie only; Krater stores no member names (docs/weave-integration.md).
+    request.session["display_name"] = identity.name or user.weave_sub
 
     return RedirectResponse(next_path, status_code=status.HTTP_302_FOUND)
 

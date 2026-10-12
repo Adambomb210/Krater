@@ -91,8 +91,8 @@ def _slack_ids(session: Session, slack_client: SlackClient, people: list[User]) 
 
 
 def _reviewer_slack_ids(session: Session, slack_client: SlackClient, weave_client: WeaveClient) -> set[str]:
-    """Slack ids for every active user Weave says holds `ganymede:reviewer`: Weave's `slack_id`, else
-    the Krater user row's (`slack_id_for`), else a Slack lookup by an email Weave says is verified."""
+    """Slack ids for every active user Weave says holds `ganymede:reviewer`: Weave's `slack_id`, else the
+    one stored on their Krater user row."""
     ids: set[str] = set()
     for reviewer in weave_client.list_users_with_role(GROUP_REVIEWER):
         if not reviewer.active:
@@ -102,8 +102,6 @@ def _reviewer_slack_ids(session: Session, slack_client: SlackClient, weave_clien
             user = session.scalars(sa.select(User).where(User.weave_sub == reviewer.sub)).first()
             if user is not None:
                 slack_id = slack_id_for(session, slack_client, user)
-            elif reviewer.email_verified and reviewer.email:
-                slack_id = slack_client.lookup_user_by_email(reviewer.email)
         if slack_id:
             ids.add(slack_id)
     return ids

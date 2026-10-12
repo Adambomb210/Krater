@@ -3,54 +3,24 @@ the lookup that links a Krater user to their Slack account.
 
 Signing in through Weave doesn't guarantee Slack membership: Weave signup is open, and new users join
 Slack as single-channel guests until they accept the code of conduct. Weave's `slack_member` answer
-wins when Weave gives one. Otherwise Krater asks Slack itself: the user's Slack account must exist and
-not be deleted, `is_restricted` (a multi-channel guest) or `is_ultra_restricted` (a single-channel
+wins when Weave gives one. Otherwise Krater asks Slack about the `slack_id` Weave gave: the account must
+exist and not be deleted, `is_restricted` (a multi-channel guest) or `is_ultra_restricted` (a single-channel
 guest).
 """
 
 from __future__ import annotations
 
-import logging
-
-import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from krater.models import User
 from krater.slack.client import SlackClient
 
-logger = logging.getLogger(__name__)
-
 
 def slack_id_for(session: Session, slack_client: SlackClient, user: User) -> str | None:
-    """The Slack user id Krater uses for `user`, or `None` if there isn't one.
-
-    The stored `User.slack_user_id` wins (Weave's `slack_id`, or an earlier lookup).
-    Otherwise Slack `users.lookupByEmail` with the user's email, but only if Weave said that email was
-    verified: an unverified address could be anyone's, and a wrong link would let its Slack clicks act
-    as this user. A found id is cached onto the user (flushed, not committed), unless another user
-    already holds it, which is logged and left for an admin to sort out.
-    """
-    if user.slack_user_id:
-        return user.slack_user_id
-    if not user.email_verified or not user.email:
-        return None
-
-    slack_id = slack_client.lookup_user_by_email(user.email)
-    if not slack_id:
-        return None
-
-    holder = session.scalars(sa.select(User).where(User.slack_user_id == slack_id, User.id != user.id)).first()
-    if holder is not None:
-        logger.warning(
-            "Slack account %s matches %s by email but is already linked to user %s; not linking",
-            slack_id,
-            user.id,
-            holder.id,
-        )
-        return None
-    user.slack_user_id = slack_id
-    session.flush()
-    return slack_id
+    """The Slack user id Krater uses for `user`: Weave's `slack_id`, stored on the user at sign-in and at
+    every directory lookup. `None` when Weave hasn't given one. Krater no longer looks Slack accounts up
+    by email, since it keeps no emails (docs/weave-integration.md)."""
+    return user.slack_user_id
 
 
 def is_full_slack_member(

@@ -14,9 +14,15 @@ from krater.weave import RoleMapping, StubWeaveClient
 _counter = itertools.count()
 
 
+#: Weave profile (name, email, email_verified) per test user's sub. Krater stores none of these on `User`
+#: (docs/weave-integration.md), so the factory keeps them here for `register_in_weave`.
+PROFILES: dict[str, tuple[str, str, bool]] = {}
+
+
 @pytest.fixture
 def make_user(db_session: Session):
-    """Factory: create and flush a `User` with a unique `weave_sub`/email."""
+    """Factory: create and flush a `User` with a unique `weave_sub`. The name and email are what the stub Weave
+    will say about them once registered (`make_actor` does that)."""
 
     def _make_user(
         *,
@@ -26,13 +32,8 @@ def make_user(db_session: Session):
         slack_user_id: str | None = None,
     ) -> User:
         n = next(_counter)
-        user = User(
-            weave_sub=f"PWLTEST{n:06d}",
-            display_name=display_name,
-            email=email or f"user{n}@example.com",
-            email_verified=email_verified,
-            slack_user_id=slack_user_id,
-        )
+        user = User(weave_sub=f"PWLTEST{n:06d}", slack_user_id=slack_user_id)
+        PROFILES[user.weave_sub] = (display_name, email or f"user{n}@example.com", email_verified)
         db_session.add(user)
         db_session.flush()
         return user
@@ -53,11 +54,12 @@ def register_in_weave(weave: StubWeaveClient, user: User, groups: frozenset[str]
     """Add `user` to the stub Weave holding the Krater roles `groups`. Roles with no Weave key (such as
     a reviewer tier) are left out."""
     mapping = RoleMapping.default()
+    name, email, email_verified = PROFILES.get(user.weave_sub, ("Test User", f"{user.weave_sub}@example.com", True))
     weave.put_user(
         user.weave_sub,
-        name=user.display_name,
-        email=user.email,
-        email_verified=user.email_verified,
+        name=name,
+        email=email,
+        email_verified=email_verified,
         roles=[mapping.weave_role_key(role) for role in sorted(groups) if role in mapping.role_keys],
         **kwargs,
     )
@@ -73,7 +75,8 @@ def make_actor(db_session: Session, make_user, weave: StubWeaveClient):
         user.roles_cached = sorted(groups)
         db_session.flush()
         register_in_weave(weave, user, groups)
-        return Actor(user=user, groups=groups)
+        name, email, _verified = PROFILES.get(user.weave_sub, ("Test User", None, True))
+        return Actor(user=user, groups=groups, name=name, email=email)
 
     return _make_actor
 

@@ -162,15 +162,14 @@ def test_approve_that_completes_the_project_archives_the_channel(
     assert slack_client.channels[project.slack_channel_id]["archived"] is True
 
 
-def test_an_unknown_slack_id_is_unlinked_even_when_the_email_matches(
+def test_an_unknown_slack_id_is_unlinked(
     db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
-    # No email matching on clicks: only the Slack id Weave reported links a click to a user.
+    # Only the Slack id Weave reported links a click to a user.
     _project, revision = _submitted_revision(db_session, member)
     slack_client = FakeSlackClient()
-    slack_client.register_email(reviewer.user.email, "U_BY_EMAIL")
 
-    _approve(db_session, slack_client, weave, revision, "U_BY_EMAIL")
+    _approve(db_session, slack_client, weave, revision, "U_UNKNOWN")
 
     db_session.refresh(revision)
     assert revision.outcome is RevisionOutcome.PENDING

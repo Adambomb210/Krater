@@ -1,14 +1,14 @@
 """Small parsing helpers for form fields that aren't a plain string: comma-separated tags, and
-comma-separated emails of existing Krater users (credited builders)."""
+comma-separated Patchwork IDs or emails of Ganymede members (credited builders)."""
 
 from __future__ import annotations
 
 import uuid
 
-import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from krater.models import User
+from krater.services import people
+from krater.weave import WeaveClient
 
 
 def parse_tags(raw: str) -> list[str]:
@@ -16,44 +16,36 @@ def parse_tags(raw: str) -> list[str]:
     return [tag.strip() for tag in raw.split(",") if tag.strip()]
 
 
-class UnknownEmails(ValueError):
-    """Raised by `parse_credited_builder_emails` when one or more emails aren't a Krater user's."""
+class UnknownMembers(ValueError):
+    """Raised by `parse_members` when one or more entries aren't a Ganymede member Weave knows."""
 
-    def __init__(self, emails: list[str]) -> None:
-        self.emails = emails
-        super().__init__("Unknown email(s): " + ", ".join(emails))
+    def __init__(self, entries: list[str]) -> None:
+        self.entries = entries
+        super().__init__("Not a Ganymede member: " + ", ".join(entries))
 
 
-def parse_credited_builder_emails(session: Session, raw: str) -> list[uuid.UUID]:
-    """Parse a comma-separated list of emails into the `User.id`s of existing Krater users.
+def parse_members(session: Session, weave_client: WeaveClient, raw: str) -> list[uuid.UUID]:
+    """Parse comma-separated Patchwork IDs or emails into the `User.id`s of Ganymede members, looked up in
+    Weave (`krater.services.people.find_member`). A member who never signed in to Krater gets a user row
+    holding only their Patchwork ID.
 
-    Raises `UnknownEmails` (naming every email that doesn't match a user) rather than silently
-    dropping them -- the caller turns that into a field error.
+    Raises `UnknownMembers` naming every entry Weave doesn't match, rather than silently dropping them;
+    `WeaveUnavailableError` propagates.
     """
-    emails = [email.strip() for email in raw.split(",") if email.strip()]
-    if not emails:
-        return []
-
-    users_by_email = {
-        user.email.lower(): user
-        for user in session.scalars(
-            sa.select(User).where(sa.func.lower(User.email).in_([email.lower() for email in emails]))
-        )
-    }
-
-    unknown = [email for email in emails if email.lower() not in users_by_email]
-    if unknown:
-        raise UnknownEmails(unknown)
-
-    # Preserve input order, de-duplicated.
-    seen: set[uuid.UUID] = set()
+    entries = [entry.strip() for entry in raw.split(",") if entry.strip()]
     ids: list[uuid.UUID] = []
-    for email in emails:
-        user_id = users_by_email[email.lower()].id
-        if user_id not in seen:
-            seen.add(user_id)
+    unknown: list[str] = []
+    for entry in entries:
+        record = people.find_member(weave_client, entry)
+        if record is None:
+            unknown.append(entry)
+            continue
+        user_id = people.user_for(session, record).id
+        if user_id not in ids:
             ids.append(user_id)
+    if unknown:
+        raise UnknownMembers(unknown)
     return ids
 
 
-__all__ = ["UnknownEmails", "parse_credited_builder_emails", "parse_tags"]
+__all__ = ["UnknownMembers", "parse_members", "parse_tags"]

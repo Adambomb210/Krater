@@ -312,20 +312,15 @@ def test_ensure_channel_invites_credited_builders(
     assert _team_invites(db_session, weave, project) == {"U_MEMBER", "U_BUILDER"}
 
 
-def test_ensure_channel_looks_up_unlinked_people_by_verified_email_and_caches_the_id(
+def test_ensure_channel_leaves_out_people_without_a_slack_id_from_weave(
     db_session: Session, member: Actor, reviewer: Actor, make_actor, weave: StubWeaveClient
 ) -> None:
-    unverified_reviewer = make_actor(groups=reviewer.groups, email_verified=False)
+    # No Slack lookups by email: Krater keeps no emails (patchworklabsorg/krater#7).
+    make_actor(groups=reviewer.groups, slack_user_id="U_LINKED")
     project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
     slack_client = FakeSlackClient()
-    slack_client.register_email(member.user.email, "U_BY_EMAIL")
-    slack_client.register_email(reviewer.user.email, "U_REVIEWER_BY_EMAIL")
-    slack_client.register_email(unverified_reviewer.user.email, "U_UNVERIFIED")
 
-    assert _team_invites(db_session, weave, project, slack_client) == {"U_BY_EMAIL", "U_REVIEWER_BY_EMAIL"}
-    assert member.user.slack_user_id == "U_BY_EMAIL"
-    assert reviewer.user.slack_user_id == "U_REVIEWER_BY_EMAIL"
-    assert unverified_reviewer.user.slack_user_id is None
+    assert _team_invites(db_session, weave, project, slack_client) == {"U_LINKED"}
 
 
 def test_sync_reviewer_invites_sees_a_reviewer_role_weave_granted_after_the_channel_exists(

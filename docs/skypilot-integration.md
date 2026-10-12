@@ -59,6 +59,8 @@ Checked against the SkyPilot docs (docs.skypilot.ai) and `skypilot-org/skypilot`
   launch gate rejects any launch outside an approved project's workspace.
 - **Isolation:** each approved project gets its own **private** workspace. `allowed_users` is set to the emails of
   the team members whom Weave lists as active with the `member` role (the same `email` claim oauth2-proxy passes on).
+  The emails come from Weave's directory at each reconcile; Krater stores only the Patchwork IDs of the people it let
+  in (`projects.skypilot_allowed_users`), never the emails.
   A member on two projects can use both workspaces and picks one per launch. Everyone else can't see the workspace at
   all.
 - **Roles:** confirmed by spike (`docs/dev/skypilot-spike.md`, Surprise #5) that SkyPilot's *out-of-the-box* default

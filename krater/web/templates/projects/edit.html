@@ -74,16 +74,16 @@
       </div>
 
       <div class="field">
-        <label for="credited_builder_emails">Credited builders</label>
+        <label for="credited_builders">Credited builders</label>
         <input
           type="text"
-          id="credited_builder_emails"
-          name="credited_builder_emails"
-          value="{{ values.credited_builder_emails }}"
-          placeholder="alice@example.com, bob@example.com"
+          id="credited_builders"
+          name="credited_builders"
+          value="{{ values.credited_builders }}"
+          placeholder="PWL1A2B3C4D5, alice@example.com"
         >
-        <p class="field-hint">Comma-separated emails of existing Krater users.</p>
-        {% if errors.credited_builder_emails %}<p class="field-error">{{ errors.credited_builder_emails }}</p>{% endif %}
+        <p class="field-hint">Comma-separated Patchwork IDs or emails of Ganymede members.</p>
+        {% if errors.credited_builders %}<p class="field-error">{{ errors.credited_builders }}</p>{% endif %}
       </div>
     {% endif %}
 

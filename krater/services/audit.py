@@ -26,6 +26,7 @@ def record(
     """
     event = AuditEvent(
         actor_id=actor.user.id if actor is not None else None,
+        actor_sub=actor.user.weave_sub if actor is not None else None,
         action=action,
         project_id=project.id if project is not None else None,
         payload=payload or {},

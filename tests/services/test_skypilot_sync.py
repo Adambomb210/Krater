@@ -29,7 +29,13 @@ from krater.services.skypilot_sync import (
 from krater.skypilot.errors import SkyPilotRequestFailedError, SkyPilotUnavailableError
 from krater.skypilot.fake import FakeSkyPilotClient
 from krater.weave import StubWeaveClient, WeaveUnavailableError
-from tests.services.conftest import register_in_weave
+from tests.services.conftest import PROFILES, register_in_weave
+
+
+def _email(user) -> str:
+    """The email the stub Weave has for a test user; Krater itself stores none."""
+    return PROFILES[user.weave_sub][1]
+
 
 WARN_PERCENT = 80
 
@@ -63,7 +69,7 @@ def test_approved_project_gets_a_workspace(db_session: Session, member: Actor, r
 
     expected_name = workspace_name_for(project.id)
     assert project.skypilot_workspace == expected_name
-    assert client.workspaces[expected_name] == [member.user.email]
+    assert client.workspaces[expected_name] == [_email(member.user)]
 
 
 def test_a_team_change_updates_allowed_users(
@@ -81,7 +87,7 @@ def test_a_team_change_updates_allowed_users(
 
     sync_workspaces(db_session, client, weave)
 
-    assert client.workspaces[name] == sorted([member.user.email, builder.email])
+    assert client.workspaces[name] == sorted([_email(member.user), _email(builder)])
 
 
 def test_a_completed_project_gets_torn_down(db_session: Session, member: Actor, reviewer: Actor, client, weave) -> None:
@@ -247,7 +253,7 @@ def test_an_active_projects_vanished_workspace_is_recreated(
     sync_workspaces(db_session, client, weave)
 
     assert project.skypilot_workspace == name
-    assert client.workspaces[name] == [member.user.email]
+    assert client.workspaces[name] == [_email(member.user)]
     assert client.list_clusters(name) == []
 
 
@@ -334,7 +340,7 @@ def _team_of_two(session: Session, member: Actor, reviewer: Actor, make_user, we
     projects.start_amendment(session, member, project=project)
     projects.update_draft(session, member, project=project, credited_builder_ids=[builder.id])
     sync_workspaces(session, client := FakeSkyPilotClient(), weave)
-    assert client.workspaces[project.skypilot_workspace] == sorted([member.user.email, builder.email])
+    assert client.workspaces[project.skypilot_workspace] == sorted([_email(member.user), _email(builder)])
     return project, builder, client
 
 
@@ -346,15 +352,14 @@ def test_a_member_who_lost_the_role_is_removed(
     weave.set_roles(builder.weave_sub, [])
     sync_workspaces(db_session, client, weave)
 
-    assert client.workspaces[project.skypilot_workspace] == [member.user.email]
-    assert project.skypilot_allowed_users == [member.user.email]
+    assert client.workspaces[project.skypilot_workspace] == [_email(member.user)]
+    assert project.skypilot_allowed_users == [member.user.weave_sub]
     [event] = _access_removed_events(db_session, project)
     assert event.actor_id is None
     assert event.payload == {
         "workspace": project.skypilot_workspace,
         "user_id": str(builder.id),
         "weave_sub": builder.weave_sub,
-        "email": builder.email,
     }
 
 
@@ -366,7 +371,7 @@ def test_a_member_locked_in_weave_is_removed(
     weave.set_active(builder.weave_sub, False)
     sync_workspaces(db_session, client, weave)
 
-    assert client.workspaces[project.skypilot_workspace] == [member.user.email]
+    assert client.workspaces[project.skypilot_workspace] == [_email(member.user)]
     assert len(_access_removed_events(db_session, project)) == 1
 
 
@@ -375,7 +380,7 @@ def test_an_active_member_stays(db_session: Session, member: Actor, reviewer: Ac
 
     sync_workspaces(db_session, client, weave)
 
-    assert client.workspaces[project.skypilot_workspace] == sorted([member.user.email, builder.email])
+    assert client.workspaces[project.skypilot_workspace] == sorted([_email(member.user), _email(builder)])
     assert _access_removed_events(db_session, project) == []
 
 
@@ -392,7 +397,7 @@ def test_the_removal_is_audited_once_per_removal(
     # Weave gives the role back, then takes it away again: a second removal, so a second event.
     weave.set_roles(builder.weave_sub, ["member"])
     sync_workspaces(db_session, client, weave)
-    assert builder.email in client.workspaces[project.skypilot_workspace]
+    assert _email(builder) in client.workspaces[project.skypilot_workspace]
     weave.set_roles(builder.weave_sub, [])
     sync_workspaces(db_session, client, weave)
 
@@ -411,7 +416,7 @@ def test_a_builder_without_the_role_is_never_added_or_audited(
 
     sync_workspaces(db_session, client, weave)
 
-    assert client.workspaces[project.skypilot_workspace] == [member.user.email]
+    assert client.workspaces[project.skypilot_workspace] == [_email(member.user)]
     assert _access_removed_events(db_session, project) == []
 
 
@@ -426,7 +431,7 @@ def test_a_workspace_from_before_the_stored_list_audits_the_removal(
     weave.set_roles(builder.weave_sub, [])
     sync_workspaces(db_session, client, weave)
 
-    assert client.workspaces[project.skypilot_workspace] == [member.user.email]
+    assert client.workspaces[project.skypilot_workspace] == [_email(member.user)]
     assert len(_access_removed_events(db_session, project)) == 1
 
 
