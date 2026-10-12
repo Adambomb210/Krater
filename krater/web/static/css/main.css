@@ -709,8 +709,8 @@ a.stat .stat__value {
 /* ── Notes and banners ── */
 
 .policy-note,
-.skypilot-hint,
-.skypilot-banner,
+.compute-hint,
+.budget-banner,
 .notice {
   margin: 0 0 var(--space-4);
   padding: var(--space-3) var(--space-4);
@@ -722,26 +722,26 @@ a.stat .stat__value {
   font-size: var(--text-sm);
 }
 
-.skypilot-hint {
+.compute-hint {
   border-left-color: var(--accent);
   background: var(--surface-sunken);
 }
 
-.skypilot-hint code {
+.compute-hint code {
   padding: 0 0.3rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface);
 }
 
-.skypilot-banner {
+.budget-banner {
   border-color: var(--bad-soft);
   border-left-color: var(--bad);
   background: var(--bad-soft);
   font-weight: 600;
 }
 
-.skypilot-banner--warn {
+.budget-banner--warn {
   border-color: var(--warn-soft);
   border-left-color: var(--warn);
   background: var(--warn-soft);
