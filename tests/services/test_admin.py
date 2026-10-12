@@ -19,11 +19,12 @@ from krater.models import (
 from krater.services import budget, projects
 from krater.services.actor import GROUP_ADMIN, GROUP_MEMBER, Actor
 from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
+from tests.factories import new_project
 from tests.services.conftest import add_to_team
 
 
 def _submitted_project(db_session: Session, member: Actor, *, budget_requested_cents: int = 10_000):
-    project = projects.create_project(
+    project = new_project(
         db_session, member, title="Admin Test", write_up="Write-up.", budget_requested_cents=budget_requested_cents
     )
     return projects.submit(db_session, member, project=project)

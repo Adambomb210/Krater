@@ -30,7 +30,7 @@ from krater.models import (
     User,
 )
 from krater.services import budget as budget_service
-from krater.services import people, pricing, slack_membership, teams
+from krater.services import people, slack_membership, teams
 from krater.services import projects as project_service
 from krater.services import screenshots as screenshot_service
 from krater.services.actor import Actor
@@ -40,7 +40,7 @@ from krater.services.launch_rules import LAUNCHABLE_STATUSES, hourly_cap_cents
 from krater.slack import get_slack_client
 from krater.storage import ObjectStore, get_object_store
 from krater.weave import WeaveClient, WeaveUnavailableError, get_weave_client
-from krater.web import estimator_form
+from krater.web import application_form, estimator_form
 from krater.web.csrf import verify_csrf_token
 from krater.web.deps import fresh_actor
 from krater.web.flash import flash
@@ -133,63 +133,65 @@ def _success_redirect(
 
 
 # --------------------------------------------------------------------------------------------------
-# New project
+# The application form: new proposals, and editing proposal/amendment drafts (krater.web.application_form)
 # --------------------------------------------------------------------------------------------------
 
 
-def _new_project_values(*, title: str = "", repo_url: str = "", write_up: str = "", budget_requested: str = "") -> dict:
-    return {"title": title, "repo_url": repo_url, "write_up": write_up, "budget_requested": budget_requested}
-
-
-def _estimator_context(
+def _form_context(
     db_session: Session,
+    actor: Actor,
     *,
-    estimator_gpu: str = "",
-    estimator_hours: str = "",
-    estimator_basis: str = "",
-    estimator_margin_percent: str = "",
-    estimate_summary: str | None = None,
-    estimator_used: str = "",
+    values: dict[str, str],
+    errors: dict[str, str] | None = None,
+    summaries: dict[str, str | None] | None = None,
+    team: list[dict] | None = None,
 ) -> dict:
-    """Shared new/edit-form context for the budget estimator fieldset (`_macros.html`'s
-    `budget_estimator`). `estimator_values` echoes back whatever was posted so a validation-failure
-    round trip doesn't lose the submitter's inputs; falls back to blank defaults on a fresh GET."""
-    defaults = estimator_form.default_estimator_values(get_settings())
     return {
+        "values": values,
+        "errors": errors or {},
+        "summaries": summaries or {"poc": None, "full": None},
         "gpu_options": estimator_form.gpu_options(db_session),
-        "estimator_values": {
-            "estimator_gpu": estimator_gpu or defaults["estimator_gpu"],
-            "estimator_hours": estimator_hours or defaults["estimator_hours"],
-            "estimator_basis": estimator_basis or defaults["estimator_basis"],
-            "estimator_margin_percent": estimator_margin_percent or defaults["estimator_margin_percent"],
-        },
-        "estimate_summary": estimate_summary,
-        "estimator_used": estimator_used,
+        "applicant": {"name": actor.display_name, "email": actor.email, "sub": actor.user.weave_sub},
+        "word_limits": project_service.WORD_LIMITS,
+        "summary_max": project_service.SUMMARY_MAX_CHARS,
+        "other_gpu": estimator_form.OTHER_GPU,
+        "team": team,
     }
 
 
-def _run_estimate(db_session: Session, **fields: str) -> tuple[pricing.BudgetEstimate | None, dict]:
-    """`(result, errors)`: exactly one is truthy. `fields` are the four `estimator_*` posted strings."""
+def _fill_from_action(form_action: str) -> str | None:
+    """The estimator whose "Estimate" button was pressed (the no-JavaScript path), if any."""
+    prefix = form_action.removeprefix("estimate_")
+    return prefix if form_action.startswith("estimate_") and prefix in application_form.SECTIONS else None
+
+
+def _check_teammates(weave_client: WeaveClient, raw: str) -> str | None:
+    """Why the "Invite teammates" entries can't all be invited, or `None` when every one is a Ganymede member."""
     try:
-        return estimator_form.parse_and_estimate(db_session, **fields), {}
-    except ValidationFailed as exc:
-        return None, exc.errors
+        unknown = [
+            entry for entry in application_form.teammate_entries(raw) if people.find_member(weave_client, entry) is None
+        ]
+    except WeaveUnavailableError:
+        return "Weave isn't answering, so Krater can't look your teammates up. Try again shortly."
+    if unknown:
+        return f"No Ganymede member has this Patchwork ID or email: {', '.join(unknown)}."
+    return None
 
 
-def _store_estimate_best_effort(
-    db_session: Session, actor: Actor, *, project: Project, estimator_used: str, **fields: str
-) -> None:
-    """If the submitter used the estimator on this save, recompute it (never trusting anything but the
-    choice of GPU/hours/basis/margin -- see `docs/dev/pricing.md`) and store the breakdown. Best-effort:
-    a stale/removed GPU key here shouldn't block saving the rest of the draft, so a failure is silently
-    skipped rather than surfaced as a field error (unlike the dedicated "Estimate" action, where it is)."""
-    if estimator_used != "1":
-        return
-    result, errors = _run_estimate(db_session, **fields)
-    if result is not None:
-        project_service.set_budget_estimate(db_session, actor, project=project, budget_estimate=result.as_dict())
-    else:
-        del errors  # best-effort; see docstring
+def _invite_teammates(db_session: Session, actor: Actor, weave_client: WeaveClient, project: Project, raw: str) -> None:
+    for entry in application_form.teammate_entries(raw):
+        try:
+            teams.invite(db_session, actor, weave_client, project=project, query=entry)
+        except ValidationFailed as exc:
+            raise ValidationFailed({"teammates": f"{entry}: {exc.errors['member']}"}) from None
+
+
+def _team_rows(weave_client: WeaveClient, session: Session, project: Project) -> list[dict]:
+    users = list(session.scalars(sa.select(User).where(User.id.in_(teams.conflict_user_ids(project)))))
+    names = people.names(weave_client, users)
+    rows = [{"name": names[project.submitter_id], "lead": True}]
+    rows += [{"name": names[m.user_id], "lead": False, "accepted": m.accepted} for m in project.members]
+    return rows
 
 
 @router.get("/projects/new")
@@ -198,84 +200,215 @@ def new_project_form(
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
 ):
-    del actor  # membership itself is enforced by `fresh_actor`; the service checks it again
-    context = {"errors": {}, "values": _new_project_values(), **_estimator_context(db_session)}
+    context = _form_context(db_session, actor, values=application_form.blank_values(get_settings()))
     return templates.TemplateResponse(request, "projects/new.html", context)
 
 
 @router.post("/projects/new", dependencies=[Depends(verify_csrf_token)])
-def create_project(
+async def create_project(
     request: Request,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
-    title: Annotated[str, Form()] = "",
-    repo_url: Annotated[str, Form()] = "",
-    write_up: Annotated[str, Form()] = "",
-    budget_requested: Annotated[str, Form()] = "",
-    form_action: Annotated[str, Form()] = "save",
-    estimator_gpu: Annotated[str, Form()] = "",
-    estimator_hours: Annotated[str, Form()] = "",
-    estimator_basis: Annotated[str, Form()] = "on_demand",
-    estimator_margin_percent: Annotated[str, Form()] = "",
-    estimator_used: Annotated[str, Form()] = "",
+    weave_client: Weave,
 ):
-    estimator_fields = dict(
-        estimator_gpu=estimator_gpu,
-        estimator_hours=estimator_hours,
-        estimator_basis=estimator_basis,
-        estimator_margin_percent=estimator_margin_percent,
-    )
-    values = _new_project_values(title=title, repo_url=repo_url, write_up=write_up, budget_requested=budget_requested)
+    form = await request.form()
+    fill = _fill_from_action(str(form.get("form_action", "save")))
+    posted = application_form.parse(db_session, form, get_settings(), fill=fill)
 
-    if form_action == "estimate":
-        # The no-JS degrade path (docs/SPEC.md's estimator requirement): recompute right now and
-        # re-render with the budget field already filled in, without creating anything yet -- there's
-        # no project to attach a draft estimate to before it's created.
-        result, errors = _run_estimate(db_session, **estimator_fields)
-        estimate_summary = None
-        if result is not None:
-            values["budget_requested"] = cents_to_input(result.total_cents)
-            estimate_summary = estimator_form.summary_text(result)
-            estimator_used = "1"
-        context = {
-            "errors": errors,
-            "values": values,
-            **_estimator_context(
-                db_session, estimate_summary=estimate_summary, estimator_used=estimator_used, **estimator_fields
-            ),
-        }
-        return templates.TemplateResponse(request, "projects/new.html", context, status_code=422 if errors else 200)
+    def _again(status_code: int):
+        context = _form_context(
+            db_session, actor, values=posted.values, errors=posted.errors, summaries=posted.summaries
+        )
+        return templates.TemplateResponse(request, "projects/new.html", context, status_code=status_code)
 
-    errors: dict[str, str] = {}
-    budget_cents = 0
-    raw_budget = budget_requested.strip()
-    if raw_budget:
-        try:
-            budget_cents = parse_dollars(raw_budget)
-        except InvalidDollarAmount as exc:
-            errors["budget_requested_cents"] = str(exc)
-    errors.update(project_service.link_errors(repo_url=repo_url))
+    if fill is not None:
+        # The no-JS "Estimate" button: show the estimate and its amount without creating anything yet.
+        return _again(422 if posted.errors else 200)
+    if not posted.errors and (teammates_error := _check_teammates(weave_client, posted.values["teammates"])):
+        posted.errors["teammates"] = teammates_error
+    if posted.errors:
+        return _again(422)
 
-    if errors:
-        context = {
-            "errors": errors,
-            "values": values,
-            **_estimator_context(db_session, estimator_used=estimator_used, **estimator_fields),
-        }
-        return templates.TemplateResponse(request, "projects/new.html", context, status_code=422)
-
+    changes = dict(posted.changes)
     project = project_service.create_project(
         db_session,
         actor,
-        title=title,
-        write_up=write_up,
-        budget_requested_cents=budget_cents,
-        repo_url=repo_url or None,
+        title=changes.pop("title"),
+        repo_url=changes.pop("repo_url"),
+        write_up=changes.pop("write_up"),
+        budget_requested_cents=changes.pop("budget_requested_cents"),
+        **changes,
     )
-    _store_estimate_best_effort(db_session, actor, project=project, estimator_used=estimator_used, **estimator_fields)
+    try:
+        _invite_teammates(db_session, actor, weave_client, project, posted.values["teammates"])
+    except (ValidationFailed, WeaveUnavailableError) as exc:
+        db_session.rollback()
+        posted.errors["teammates"] = exc.errors["teammates"] if isinstance(exc, ValidationFailed) else str(exc)
+        return _again(422)
     db_session.commit()
-    flash(request, "Draft created.", "success")
+    flash(request, "Draft saved.", "success")
     return RedirectResponse(f"/projects/{project.id}", status_code=303)
+
+
+def _require_editable_draft(project: Project) -> ProjectRevision | None:
+    """The project's current draft, or `None` if there's nothing to edit right now."""
+    draft = project.current_revision
+    if draft is None or draft.submitted_at is not None:
+        return None
+    return draft
+
+
+def _screenshot_entries(store: ObjectStore, draft: ProjectRevision) -> list[dict[str, str]]:
+    """Short-lived presigned GET URLs for a draft's screenshots, for the edit page's thumbnails."""
+    return [{"key": key, "url": store.presign_download(key)} for key in draft.screenshot_keys]
+
+
+def _completion_values(project: Project, draft: ProjectRevision) -> dict:
+    return {
+        "title": project.title,
+        "repo_url": project.repo_url or "",
+        "write_up": draft.write_up,
+        "demo_url": draft.demo_url or "",
+        "tags": ", ".join(draft.tags),
+    }
+
+
+def _edit_context(
+    db_session: Session,
+    weave_client: WeaveClient,
+    store: ObjectStore,
+    actor: Actor,
+    project: Project,
+    draft: ProjectRevision,
+    *,
+    values: dict | None = None,
+    errors: dict[str, str] | None = None,
+    summaries: dict[str, str | None] | None = None,
+) -> dict:
+    """The edit page's context: the application form for a proposal or amendment, the completion form otherwise.
+    `values` defaults to what the draft holds now."""
+    if draft.kind is RevisionKind.COMPLETION:
+        return {
+            "project": project,
+            "draft": draft,
+            "values": values or _completion_values(project, draft),
+            "errors": errors or {},
+            "screenshots": _screenshot_entries(store, draft),
+            "max_screenshots": screenshot_service.MAX_SCREENSHOTS,
+            "max_screenshot_bytes": screenshot_service.MAX_SCREENSHOT_BYTES,
+        }
+    return {
+        "project": project,
+        "draft": draft,
+        **_form_context(
+            db_session,
+            actor,
+            values=values or application_form.values_from_draft(project, draft, get_settings()),
+            errors=errors,
+            summaries=summaries or application_form.summaries_from_draft(draft),
+            team=_team_rows(weave_client, db_session, project),
+        ),
+    }
+
+
+def _editable(request: Request, db_session: Session, actor: Actor, project_id: uuid.UUID):
+    """`(project, draft)` when `actor` may edit the project's draft now; else `(project, None)` after a flash."""
+    project = _get_visible_project(db_session, actor, project_id)
+    if not teams.on_team(project, actor.user.id):
+        raise NotAllowed("Only the project's team may edit it.")
+    draft = _require_editable_draft(project)
+    if draft is None:
+        flash(request, "This project has no draft to edit right now.", "error")
+    return project, draft
+
+
+@router.get("/projects/{project_id}/edit")
+def edit_draft_form(
+    request: Request,
+    project_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
+    store: Annotated[ObjectStore, Depends(get_object_store)],
+):
+    project, draft = _editable(request, db_session, actor, project_id)
+    if draft is None:
+        return _redirect_to_project(project_id)
+    context = _edit_context(db_session, weave_client, store, actor, project, draft)
+    return templates.TemplateResponse(request, "projects/edit.html", context)
+
+
+@router.post("/projects/{project_id}/edit", dependencies=[Depends(verify_csrf_token)])
+async def update_draft(
+    request: Request,
+    project_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
+    store: Annotated[ObjectStore, Depends(get_object_store)],
+):
+    project, draft = _editable(request, db_session, actor, project_id)
+    if draft is None:
+        return _redirect_to_project(project_id)
+    form = await request.form()
+
+    if draft.kind is RevisionKind.COMPLETION:
+        values = {key: str(form.get(key, "")) for key in ("title", "repo_url", "write_up", "demo_url", "tags")}
+        errors = project_service.link_errors(repo_url=values["repo_url"], demo_url=values["demo_url"])
+        if errors:
+            context = _edit_context(
+                db_session, weave_client, store, actor, project, draft, values=values, errors=errors
+            )
+            return templates.TemplateResponse(request, "projects/edit.html", context, status_code=422)
+        project_service.update_draft(
+            db_session,
+            actor,
+            project=project,
+            title=values["title"],
+            repo_url=values["repo_url"] or None,
+            write_up=values["write_up"],
+            demo_url=values["demo_url"] or None,
+            tags=parse_tags(values["tags"]),
+        )
+        db_session.commit()
+        flash(request, "Draft saved.", "success")
+        return RedirectResponse(f"/projects/{project_id}/edit", status_code=303)
+
+    fill = _fill_from_action(str(form.get("form_action", "save")))
+    posted = application_form.parse(db_session, form, get_settings(), fill=fill)
+
+    def _again(status_code: int):
+        context = _edit_context(
+            db_session,
+            weave_client,
+            store,
+            actor,
+            project,
+            draft,
+            values=posted.values,
+            errors=posted.errors,
+            summaries=posted.summaries,
+        )
+        return templates.TemplateResponse(request, "projects/edit.html", context, status_code=status_code)
+
+    if fill is not None:
+        return _again(422 if posted.errors else 200)
+    if not posted.errors and (teammates_error := _check_teammates(weave_client, posted.values["teammates"])):
+        posted.errors["teammates"] = teammates_error
+    if posted.errors:
+        return _again(422)
+
+    project_service.update_draft(db_session, actor, project=project, **posted.changes)
+    try:
+        _invite_teammates(db_session, actor, weave_client, project, posted.values["teammates"])
+    except (ValidationFailed, WeaveUnavailableError) as exc:
+        db_session.rollback()
+        db_session.refresh(project)
+        posted.errors["teammates"] = exc.errors["teammates"] if isinstance(exc, ValidationFailed) else str(exc)
+        return _again(422)
+    db_session.commit()
+    flash(request, "Draft saved.", "success")
+    return RedirectResponse(f"/projects/{project_id}/edit", status_code=303)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -412,192 +545,6 @@ def project_detail(
 
 
 # --------------------------------------------------------------------------------------------------
-# Edit the draft
-# --------------------------------------------------------------------------------------------------
-
-
-def _edit_form_values(session: Session, project: Project, draft: ProjectRevision) -> dict:
-    return {
-        "title": project.title,
-        "repo_url": project.repo_url or "",
-        "write_up": draft.write_up,
-        "budget_requested": cents_to_input(draft.budget_requested_cents),
-        "demo_url": draft.demo_url or "",
-        "tags": ", ".join(draft.tags),
-    }
-
-
-def _require_editable_draft(project: Project) -> ProjectRevision | None:
-    """The project's current draft, or `None` if there's nothing to edit right now."""
-    draft = project.current_revision
-    if draft is None or draft.submitted_at is not None:
-        return None
-    return draft
-
-
-def _screenshot_entries(store: ObjectStore, draft: ProjectRevision) -> list[dict[str, str]]:
-    """Short-lived presigned GET URLs for a draft's screenshots, for the edit page's thumbnails."""
-    return [{"key": key, "url": store.presign_download(key)} for key in draft.screenshot_keys]
-
-
-def _estimator_context_from_draft(db_session: Session, draft: ProjectRevision) -> dict:
-    """`_estimator_context`, prefilled from `draft.budget_estimate` if it has one (so reopening the
-    edit page still shows what the estimator last computed for this draft), else blank defaults."""
-    stored = draft.budget_estimate
-    if not stored:
-        return _estimator_context(db_session)
-    return _estimator_context(
-        db_session,
-        estimator_gpu=pricing.gpu_key(stored["accelerator_name"], stored["accelerator_count"]),
-        estimator_hours=str(stored["hours"]),
-        estimator_basis=stored["basis"],
-        estimator_margin_percent=str(stored["margin_percent"]),
-        estimate_summary=estimator_form.summary_text_from_dict(stored),
-    )
-
-
-@router.get("/projects/{project_id}/edit")
-def edit_draft_form(
-    request: Request,
-    project_id: uuid.UUID,
-    db_session: Annotated[Session, Depends(get_session)],
-    actor: Annotated[Actor, Depends(fresh_actor)],
-    store: Annotated[ObjectStore, Depends(get_object_store)],
-):
-    project = _get_visible_project(db_session, actor, project_id)
-    if not teams.on_team(project, actor.user.id):
-        raise NotAllowed("Only the project's team may edit it.")
-
-    draft = _require_editable_draft(project)
-    if draft is None:
-        flash(request, "This project has no draft to edit right now.", "error")
-        return _redirect_to_project(project_id)
-
-    values = _edit_form_values(db_session, project, draft)
-    context = {
-        "project": project,
-        "draft": draft,
-        "errors": {},
-        "values": values,
-        **_estimator_context_from_draft(db_session, draft),
-    }
-    if draft.kind is RevisionKind.COMPLETION:
-        context["screenshots"] = _screenshot_entries(store, draft)
-        context["max_screenshots"] = screenshot_service.MAX_SCREENSHOTS
-        context["max_screenshot_bytes"] = screenshot_service.MAX_SCREENSHOT_BYTES
-    return templates.TemplateResponse(request, "projects/edit.html", context)
-
-
-@router.post("/projects/{project_id}/edit", dependencies=[Depends(verify_csrf_token)])
-def update_draft(
-    request: Request,
-    project_id: uuid.UUID,
-    db_session: Annotated[Session, Depends(get_session)],
-    actor: Annotated[Actor, Depends(fresh_actor)],
-    weave_client: Weave,
-    store: Annotated[ObjectStore, Depends(get_object_store)],
-    title: Annotated[str, Form()] = "",
-    repo_url: Annotated[str, Form()] = "",
-    write_up: Annotated[str, Form()] = "",
-    budget_requested: Annotated[str, Form()] = "",
-    demo_url: Annotated[str, Form()] = "",
-    tags: Annotated[str, Form()] = "",
-    form_action: Annotated[str, Form()] = "save",
-    estimator_gpu: Annotated[str, Form()] = "",
-    estimator_hours: Annotated[str, Form()] = "",
-    estimator_basis: Annotated[str, Form()] = "on_demand",
-    estimator_margin_percent: Annotated[str, Form()] = "",
-    estimator_used: Annotated[str, Form()] = "",
-):
-    project = _get_visible_project(db_session, actor, project_id)
-    if not teams.on_team(project, actor.user.id):
-        raise NotAllowed("Only the project's team may edit it.")
-
-    draft = _require_editable_draft(project)
-    if draft is None:
-        flash(request, "This project has no draft to edit right now.", "error")
-        return _redirect_to_project(project_id)
-
-    estimator_fields = dict(
-        estimator_gpu=estimator_gpu,
-        estimator_hours=estimator_hours,
-        estimator_basis=estimator_basis,
-        estimator_margin_percent=estimator_margin_percent,
-    )
-    values = {
-        "title": title,
-        "repo_url": repo_url,
-        "write_up": write_up,
-        "budget_requested": budget_requested,
-        "demo_url": demo_url,
-        "tags": tags,
-    }
-
-    if form_action == "estimate":
-        result, errors = _run_estimate(db_session, **estimator_fields)
-        estimate_summary = None
-        if result is not None:
-            values["budget_requested"] = cents_to_input(result.total_cents)
-            estimate_summary = estimator_form.summary_text(result)
-            estimator_used = "1"
-        context = {
-            "project": project,
-            "draft": draft,
-            "errors": errors,
-            "values": values,
-            **_estimator_context(
-                db_session, estimate_summary=estimate_summary, estimator_used=estimator_used, **estimator_fields
-            ),
-        }
-        if draft.kind is RevisionKind.COMPLETION:
-            context["screenshots"] = _screenshot_entries(store, draft)
-            context["max_screenshots"] = screenshot_service.MAX_SCREENSHOTS
-            context["max_screenshot_bytes"] = screenshot_service.MAX_SCREENSHOT_BYTES
-        return templates.TemplateResponse(request, "projects/edit.html", context, status_code=422 if errors else 200)
-
-    errors: dict[str, str] = {}
-    budget_cents = draft.budget_requested_cents
-    raw_budget = budget_requested.strip()
-    if raw_budget:
-        try:
-            budget_cents = parse_dollars(raw_budget)
-        except InvalidDollarAmount as exc:
-            errors["budget_requested_cents"] = str(exc)
-
-    is_completion = draft.kind is RevisionKind.COMPLETION
-    errors.update(project_service.link_errors(repo_url=repo_url, demo_url=demo_url if is_completion else None))
-
-    if errors:
-        context = {
-            "project": project,
-            "draft": draft,
-            "errors": errors,
-            "values": values,
-            **_estimator_context(db_session, estimator_used=estimator_used, **estimator_fields),
-        }
-        if draft.kind is RevisionKind.COMPLETION:
-            context["screenshots"] = _screenshot_entries(store, draft)
-            context["max_screenshots"] = screenshot_service.MAX_SCREENSHOTS
-            context["max_screenshot_bytes"] = screenshot_service.MAX_SCREENSHOT_BYTES
-        return templates.TemplateResponse(request, "projects/edit.html", context, status_code=422)
-
-    update_kwargs: dict = {
-        "title": title,
-        "repo_url": repo_url or None,
-        "write_up": write_up,
-        "budget_requested_cents": budget_cents,
-    }
-    if draft.kind is RevisionKind.COMPLETION:
-        update_kwargs.update(demo_url=demo_url or None, tags=parse_tags(tags))
-
-    project_service.update_draft(db_session, actor, project=project, **update_kwargs)
-    _store_estimate_best_effort(db_session, actor, project=project, estimator_used=estimator_used, **estimator_fields)
-    db_session.commit()
-    flash(request, "Draft saved.", "success")
-    return RedirectResponse(f"/projects/{project_id}/edit", status_code=303)
-
-
-# --------------------------------------------------------------------------------------------------
 # Submitter actions
 # --------------------------------------------------------------------------------------------------
 
@@ -608,6 +555,8 @@ def submit_project(
     project_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
+    store: Annotated[ObjectStore, Depends(get_object_store)],
 ):
     project = _get_visible_project(db_session, actor, project_id)
 
@@ -621,14 +570,11 @@ def submit_project(
         project_service.submit(db_session, actor, project=project)
     except ValidationFailed as exc:
         db_session.rollback()
-        draft = project.current_revision
-        values = _edit_form_values(db_session, project, draft) if draft is not None else {}
-        return templates.TemplateResponse(
-            request,
-            "projects/edit.html",
-            {"project": project, "draft": draft, "errors": exc.errors, "values": values},
-            status_code=422,
+        flash(request, "Some answers are missing or too long. They're marked below.", "error")
+        context = _edit_context(
+            db_session, weave_client, store, actor, project, project.current_revision, errors=exc.errors
         )
+        return templates.TemplateResponse(request, "projects/edit.html", context, status_code=422)
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
 
@@ -646,6 +592,8 @@ def submit_completion(
     project_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
+    store: Annotated[ObjectStore, Depends(get_object_store)],
 ):
     project = _get_visible_project(db_session, actor, project_id)
 
@@ -659,14 +607,11 @@ def submit_completion(
         project_service.submit_completion(db_session, actor, project=project)
     except ValidationFailed as exc:
         db_session.rollback()
-        draft = project.current_revision
-        values = _edit_form_values(db_session, project, draft) if draft is not None else {}
-        return templates.TemplateResponse(
-            request,
-            "projects/edit.html",
-            {"project": project, "draft": draft, "errors": exc.errors, "values": values},
-            status_code=422,
+        flash(request, "Some answers are missing or too long. They're marked below.", "error")
+        context = _edit_context(
+            db_session, weave_client, store, actor, project, project.current_revision, errors=exc.errors
         )
+        return templates.TemplateResponse(request, "projects/edit.html", context, status_code=422)
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
 

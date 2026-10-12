@@ -137,14 +137,22 @@ from `KRATER_PRICING_CATALOG_URL` (defaults to the GitHub URL above), with nothi
 
 ## Estimator: never trust a client-sent rate
 
-The budget estimator on the proposal/amendment draft form posts the *inputs* (GPU key, count, hours,
-pricing basis, safety margin) to the server; `krater.services.pricing.estimate_cost` looks up the
+The application form has two estimators, the proof of concept (`poc_*` fields) and the finished product (`full_*`);
+see `docs/SPEC.md` "The application". Each posts the *inputs* (GPU key, count, hours, pricing basis, safety margin)
+to the server; `krater.services.pricing.estimate_cost` looks up the
 **current** `GpuPrice` row and computes the rate/subtotal/margin/total itself. Nothing about the
 resulting dollar figure is ever accepted from the client — only the choice of which GPU/count/hours/
 basis/margin to price. The computed breakdown (including which `refreshed_at` snapshot priced it) is
 what gets stored on `ProjectRevision.budget_estimate` when the submitter used the estimator, and it's
 recomputed again, from scratch, at draft-save time — a tampered rate in a resubmitted form changes
 nothing.
+
+**Overrides are explicit and visible.** The team may give its own price per card-hour (`*_rate`). That is the one
+rate taken from the client, and it is recorded as such: `rate_source: member`, with Krater's own rate kept beside it
+as `market_rate_cents` (`null` when Krater has none, for example a card picked as "Another card" by name). The
+summary says "the team's own hourly price; Krater's typical is $X/hr". The amount requested (`*_budget`) can also
+differ from the estimate's total; it starts as the total, and the project page flags a large difference
+(`budget_estimate_flag_threshold_percent`). Both estimates are always stored when filled in, whatever was requested.
 
 ## Estimator: Krater's own Vast samples first
 

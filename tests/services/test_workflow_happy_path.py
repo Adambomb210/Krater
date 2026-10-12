@@ -18,11 +18,12 @@ from krater.models import (
 )
 from krater.services import budget, projects
 from krater.services.actor import Actor
+from tests.factories import new_project
 
 
 def test_happy_path_proposal_amendment_and_completion(db_session: Session, member: Actor, reviewer: Actor) -> None:
     # --- Draft & submit the proposal --------------------------------------------------------
-    project = projects.create_project(db_session, member, title="", write_up="", budget_requested_cents=0)
+    project = new_project(db_session, member, title="", write_up="", budget_requested_cents=0)
     assert project.status is ProjectStatus.DRAFT
     assert project.current_revision.number == 1
     assert project.current_revision.kind is RevisionKind.PROPOSAL

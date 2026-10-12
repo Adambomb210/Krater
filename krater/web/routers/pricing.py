@@ -90,8 +90,11 @@ def estimate(
     estimator_hours: Annotated[str, Form()] = "",
     estimator_basis: Annotated[str, Form()] = pricing.BASIS_ON_DEMAND,
     estimator_margin_percent: Annotated[str, Form()] = "",
+    estimator_rate: Annotated[str, Form()] = "",
+    estimator_gpu_other: Annotated[str, Form()] = "",
+    estimator_gpu_count: Annotated[str, Form()] = "",
 ):
-    """JSON estimate for the proposal/amendment draft form's budget estimator widget
+    """JSON estimate for the application form's compute estimators
     (`krater/web/static/js/budget-estimator.js`). Signed-in members only, like every other draft-form
     action; needs no project (the new-project form has none yet). Recomputes entirely server-side --
     see `krater.services.pricing.estimate_cost` -- this never trusts a client-sent rate or total.
@@ -104,6 +107,9 @@ def estimate(
             estimator_hours=estimator_hours,
             estimator_basis=estimator_basis,
             estimator_margin_percent=estimator_margin_percent,
+            estimator_rate=estimator_rate,
+            estimator_gpu_other=estimator_gpu_other,
+            estimator_gpu_count=estimator_gpu_count,
         )
     except ValidationFailed as exc:
         return JSONResponse({"errors": exc.errors}, status_code=422)

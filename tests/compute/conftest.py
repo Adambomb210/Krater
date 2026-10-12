@@ -9,6 +9,7 @@ from krater.models import ReviewDecision
 from krater.services import projects
 from krater.services.actor import Actor
 from krater.vast import FakeVast, VastClient
+from tests.factories import new_project
 from tests.services.conftest import admin, make_actor, make_user, member, weave  # noqa: F401
 
 
@@ -24,9 +25,7 @@ def client(fake: FakeVast) -> VastClient:
 
 @pytest.fixture
 def project(db_session: Session, member: Actor, admin: Actor):  # noqa: F811
-    project = projects.create_project(
-        db_session, member, title="Compute Test", write_up="w", budget_requested_cents=10_000
-    )
+    project = new_project(db_session, member, title="Compute Test", write_up="w", budget_requested_cents=10_000)
     projects.submit(db_session, member, project=project)
     projects.admin_decide(
         db_session, admin, revision=project.current_revision, decision=ReviewDecision.APPROVE, reason="ok"

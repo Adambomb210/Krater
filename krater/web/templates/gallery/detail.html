@@ -7,6 +7,7 @@
   <div>
     <a class="back-link" href="/gallery">&larr; Gallery</a>
     <h1>{{ project.title or "Untitled project" }}</h1>
+    {% if revision and revision.summary %}<p class="page-subtitle">{{ revision.summary }}</p>{% endif %}
     {% if revision and revision.tags %}
       <p class="tag-list page-subtitle">
         {% for tag in revision.tags %}<span class="tag">{{ tag }}</span>{% endfor %}

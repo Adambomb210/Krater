@@ -22,10 +22,11 @@ from krater.models import (
     ComputeJobState,
     ProjectStatus,
 )
-from krater.services import compute_jobs, projects
+from krater.services import compute_jobs
 from krater.services.compute_jobs import JobSpec
 from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
 from krater.vast import FakeVast, VastClient
+from tests.factories import new_project
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=UTC)
 SETTINGS = Settings(compute_mode="vast", compute_max_hourly_cost_cents=500)
@@ -659,7 +660,7 @@ def test_prices_are_checked_against_the_cap(db_session, member, project) -> None
 
 
 def test_a_draft_project_cannot_run_jobs(db_session, member) -> None:  # noqa: F811
-    draft = projects.create_project(db_session, member, title="Draft", write_up="w", budget_requested_cents=100)
+    draft = new_project(db_session, member, title="Draft", write_up="w", budget_requested_cents=100)
     with pytest.raises(InvalidState):
         _submit(db_session, member, draft)
 

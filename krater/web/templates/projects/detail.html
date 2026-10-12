@@ -54,11 +54,58 @@
     </p>
   {% endif %}
 
-  {% if summary.current_revision %}
-    <h2>{{ "Draft" if not summary.current_revision.submitted_at else "Write-up" }}</h2>
-    <p class="write-up">{{ summary.current_revision.write_up | nl2br }}</p>
+  {% set current = summary.current_revision %}
+  {# A completion revision carries the final write-up; the application it reports on is the approved one. #}
+  {% set rev = project.approved_revision if current and current.kind.value == "completion" else current %}
+  {% if current and current.kind.value == "completion" %}
+    <h2>{{ "Final write-up (draft)" if not current.submitted_at else "Final write-up" }}</h2>
+    <p class="write-up">{{ current.write_up | nl2br }}</p>
+    {% if current.demo_url %}<p><a href="{{ current.demo_url }}">Demo</a></p>{% endif %}
+  {% endif %}
+  {% if rev %}
+    <h2>{{ "Draft application" if not rev.submitted_at else ("Approved application" if rev.outcome.value == "approved" else "Application") }}</h2>
+      <div class="answers">
+        {% if rev.summary %}<p class="answer-summary">{{ rev.summary }}</p>{% endif %}
+        <div>
+          <h3>Who they are and their experience</h3>
+          <p class="write-up">{{ rev.experience | nl2br if rev.experience else "Not answered yet." }}</p>
+        </div>
+        <div>
+          <h3>The project: what it is, what it builds on, why it matters</h3>
+          <p class="write-up">{{ rev.write_up | nl2br if rev.write_up else "Not answered yet." }}</p>
+        </div>
+        <div>
+          <h3>Contest or professor</h3>
+          <p>
+            {%- if rev.affiliation == "none" %}Neither
+            {%- else %}{{ {"contest": "A contest", "professor": "A professor", "both": "A contest and a professor"}[rev.affiliation] }}: {{ rev.affiliation_detail }}
+            {%- endif -%}
+          </p>
+        </div>
+        <div>
+          <h3>How they'll use the compute</h3>
+          <p class="write-up">{{ rev.compute_use | nl2br if rev.compute_use else "Not answered yet." }}</p>
+        </div>
+        <div>
+          <h3>{{ "What they need now" if rev.kind.value == "amendment" else "Proof of concept (what approval funds)" }}</h3>
+          <p>
+            <strong>{{ rev.budget_requested_cents | dollars }}</strong> requested.
+            {% if rev.budget_estimate %}<br><span class="muted">Estimate: {{ rev.budget_estimate | estimate_summary }}</span>{% endif %}
+          </p>
+          {% if estimate_mismatch_by_revision.get(rev.id) %}
+            <p class="field-error">The requested amount differs a lot from the estimate.</p>
+          {% endif %}
+        </div>
+        <div>
+          <h3>Finished product (information only)</h3>
+          <p>
+            {% if rev.full_budget_cents %}<strong>{{ rev.full_budget_cents | dollars }}</strong>, roughly.{% else %}Not answered yet.{% endif %}
+            {% if rev.full_budget_estimate %}<br><span class="muted">Estimate: {{ rev.full_budget_estimate | estimate_summary }}</span>{% endif %}
+          </p>
+        </div>
+      </div>
   {% else %}
-    <p class="muted">No write-up yet.</p>
+    <p class="muted">No application yet.</p>
   {% endif %}
 </section>
 

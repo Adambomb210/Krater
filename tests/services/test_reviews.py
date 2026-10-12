@@ -19,11 +19,12 @@ from krater.models import (
 from krater.services import projects
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
+from tests.factories import new_project
 from tests.services.conftest import add_to_team
 
 
 def _submitted_project(db_session: Session, member: Actor, *, budget_requested_cents: int = 10_000):
-    project = projects.create_project(
+    project = new_project(
         db_session,
         member,
         title="Test Project",
@@ -250,7 +251,7 @@ def test_cannot_review_a_non_current_revision(db_session: Session, member: Actor
 
 
 def test_cannot_review_a_draft_revision(db_session: Session, member: Actor, reviewer: Actor) -> None:
-    project = projects.create_project(db_session, member, title="T", write_up="W", budget_requested_cents=1_000)
+    project = new_project(db_session, member, title="T", write_up="W", budget_requested_cents=1_000)
 
     with pytest.raises(InvalidState):
         projects.record_review(

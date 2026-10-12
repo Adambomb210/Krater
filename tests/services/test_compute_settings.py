@@ -7,10 +7,11 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from krater.models import AuditEvent, ComputeSettings
-from krater.services import compute_settings, projects
+from krater.services import compute_settings
 from krater.services.actor import Actor
 from krater.services.compute_settings import FIELDS_BY_NAME, format_value, parse_value
 from krater.services.errors import NotAllowed, ValidationFailed
+from tests.factories import new_project
 
 APPROVED = {
     "reliability_floor_bp": 9500,
@@ -29,7 +30,7 @@ APPROVED = {
 
 
 def _project(db_session: Session, member: Actor):
-    return projects.create_project(db_session, member, title="Compute", write_up="w", budget_requested_cents=1000)
+    return new_project(db_session, member, title="Compute", write_up="w", budget_requested_cents=1000)
 
 
 def _audits(db_session: Session, action: str) -> list[AuditEvent]:

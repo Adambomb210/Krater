@@ -11,6 +11,7 @@ from krater.services import projects, screenshots
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
 from krater.storage.fake import FakeObjectStore
+from tests.factories import new_project
 
 
 @pytest.fixture
@@ -29,9 +30,7 @@ _VALID_SIGNATURES: dict[str, bytes] = {
 
 def _completion_draft(db_session: Session, member: Actor, reviewer: Actor):
     """An approved project with a fresh, unsubmitted completion draft."""
-    project = projects.create_project(
-        db_session, member, title="Rover", write_up="A rover.", budget_requested_cents=100_000
-    )
+    project = new_project(db_session, member, title="Rover", write_up="A rover.", budget_requested_cents=100_000)
     project = projects.submit(db_session, member, project=project)
     projects.record_review(
         db_session,
@@ -100,7 +99,7 @@ def test_non_submitter_cannot_remove(
 
 
 def test_cannot_presign_on_a_non_completion_draft(db_session: Session, member: Actor, store: FakeObjectStore) -> None:
-    project = projects.create_project(db_session, member, title="", write_up="", budget_requested_cents=0)
+    project = new_project(db_session, member, title="", write_up="", budget_requested_cents=0)
     assert project.current_revision.kind.value == "proposal"
 
     with pytest.raises(InvalidState):

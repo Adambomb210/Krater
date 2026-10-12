@@ -154,6 +154,17 @@ def _write_up_excerpt(write_up: str) -> str:
     return write_up[:_MAX_WRITE_UP_EXCERPT_LENGTH].rstrip() + "…"
 
 
+def _budget_fields(revision: ProjectRevision) -> list[dict]:
+    """The amounts on a review message: what approval funds, and for a proposal or amendment the finished product's
+    rough total, which approval doesn't fund."""
+    label = "Proof of concept" if revision.kind is RevisionKind.PROPOSAL else "Requested budget"
+    fields = [{"type": "mrkdwn", "text": f"*{label}:*\n{_format_cents(revision.budget_requested_cents)}"}]
+    if revision.kind is not RevisionKind.COMPLETION and revision.full_budget_cents:
+        amount = _format_cents(revision.full_budget_cents)
+        fields.append({"type": "mrkdwn", "text": f"*Finished product (not requested yet):*\n~{amount}"})
+    return fields
+
+
 def _review_message(project: Project, revision: ProjectRevision) -> tuple[list[dict], str]:
     """The Approve/Reject review message for `revision`. The buttons' `value` carries the revision id,
     per `docs/SPEC.md`, so `/slack/interactions` knows which revision a click is about."""
@@ -164,13 +175,15 @@ def _review_message(project: Project, revision: ProjectRevision) -> tuple[list[d
     text = f"{stage}: {project.title} (revision {revision.number})"
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": header}},
+        {"type": "section", "fields": _budget_fields(revision)},
         {
             "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*Requested budget:*\n{_format_cents(revision.budget_requested_cents)}"}
-            ],
+            # The application's one-sentence summary, when it has one: what reviewers should read first.
+            "text": {
+                "type": "mrkdwn",
+                "text": _escape_mrkdwn(_write_up_excerpt(revision.summary or revision.write_up)),
+            },
         },
-        {"type": "section", "text": {"type": "mrkdwn", "text": _escape_mrkdwn(_write_up_excerpt(revision.write_up))}},
         {
             "type": "actions",
             "block_id": "review_actions",

@@ -151,10 +151,32 @@ Postgres. All money is stored as **integer cents** (`*_cents`). Names are sugges
 
 **GalleryEntry:** a view over `completed` projects plus their approved completion revision. It isn't a separate table.
 
+## The application
+
+The proposal form (`projects/_application.html`) asks, in three parts:
+
+- **You.** Name, email and Patchwork ID are shown from Weave, not asked; country, age and parental approval are
+  Weave's to confirm, not the form's. Then: *Who are you, and what's your experience in this field?* (300 words at most), and *Applying as a
+  group?*: teammates invited by Patchwork ID or email (see "Project teams"; more can be added later).
+- **The project.** A name; *What is your project, in a sentence normal people would understand?* (one sentence, 300
+  characters); *What is it, what does it build on or depart from, and why does it matter?* (the write-up, 500 words at
+  most); an optional repo link; *Are you doing this as part of a contest or with the help of a professor?* (neither, a
+  contest, a professor or both, and which).
+- **Compute.** *How are you going to use the compute?*, then two estimates priced at Vast's current rates: the **proof
+  of concept** and the **finished product**. Each is a card and about how many hours (plus rental type and safety
+  margin), and each can be overridden twice over: the team can give its own price per card-hour (also how a card
+  Krater has no price for is estimated), and can request a different amount than the estimate. Reviewers see the
+  estimate, Krater's own price when the team gave theirs, and the amount requested, flagged when they differ a lot.
+
+Only the proof of concept is approved at first: its amount is `budget_requested_cents`. The finished product's amount
+is information for reviewers and never enters the budget ledger; the team asks for more with an amendment, which
+reuses the form with the proof-of-concept part asking for the new total. Drafts can be saved incomplete or over the
+word limits; submitting needs every answer and both estimates (`krater.services.projects.application_errors`). An
+amendment or a reopened draft starts with every answer of the revision it follows.
+
 ## Proposal & review workflow
 
-1. **Draft.** The submitter fills in a title, requested budget and write-up (repo link optional). They can save and come
-   back later.
+1. **Draft.** The team fills in the application (see "The application"). They can save and come back later.
 2. **Submit.** Krater runs the Slack membership check, freezes the draft into revision N, sets `pending_review`, creates
    the project's private Slack channel if it doesn't exist yet, invites the submitter and all current reviewers
    (every active user Weave's directory lists with the `reviewer` role), posts the review message with Approve/Reject

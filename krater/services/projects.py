@@ -21,6 +21,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import EllipsisType
 from urllib.parse import urlparse
 
 import sqlalchemy as sa
@@ -44,6 +45,36 @@ from krater.models import (
 from krater.services import approval_policy, audit, budget, quilt_events, teams
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
+
+#: "Are you doing this as part of a contest or with the help of a professor?"
+AFFILIATIONS = ("none", "contest", "professor", "both")
+#: Word limits on the application's long answers, checked on submit (drafts may run over while being written).
+WORD_LIMITS = {"experience": 300, "write_up": 500}
+SUMMARY_MAX_CHARS = 300
+
+#: The application's answers that carry over from one revision to the next (amendments, reopened drafts).
+_ANSWER_FIELDS = (
+    "summary",
+    "experience",
+    "write_up",
+    "affiliation",
+    "affiliation_detail",
+    "compute_use",
+    "budget_requested_cents",
+    "budget_estimate",
+    "full_budget_cents",
+    "full_budget_estimate",
+)
+
+
+def word_count(text: str) -> int:
+    """Words as the form's live counter counts them: runs of non-space characters."""
+    return len(text.split())
+
+
+def _answers_of(revision: ProjectRevision) -> dict:
+    return {field: getattr(revision, field) for field in _ANSWER_FIELDS}
+
 
 _TERMINAL_STATUSES = (ProjectStatus.COMPLETED, ProjectStatus.WITHDRAWN)
 
@@ -127,12 +158,13 @@ def create_project(
     write_up: str = "",
     budget_requested_cents: int = 0,
     repo_url: str | None = None,
+    **answers,
 ) -> Project:
     """Start a new project as a draft, owned by `actor`. Ganymede members only.
 
     Creates the `Project` (status `draft`) and its revision 1 (`kind=proposal`, unsubmitted, i.e. a
     draft). Fields may be left at their empty defaults and filled in later via `update_draft`; nothing
-    is validated until `submit`.
+    is validated until `submit`. `answers` are the application's other answers, as `update_draft` takes them.
     """
     if not actor.is_member:
         raise NotAllowed("Only Ganymede members may create a project.")
@@ -156,6 +188,8 @@ def create_project(
 
     project.current_revision = revision
     session.flush()
+    if answers:
+        update_draft(session, actor, project=project, **answers)
     return project
 
 
@@ -166,8 +200,16 @@ def update_draft(
     project: Project,
     title: str | None = None,
     repo_url: str | None = None,
+    summary: str | None = None,
+    experience: str | None = None,
     write_up: str | None = None,
+    affiliation: str | None = None,
+    affiliation_detail: str | None = None,
+    compute_use: str | None = None,
     budget_requested_cents: int | None = None,
+    budget_estimate: dict | None | EllipsisType = ...,
+    full_budget_cents: int | None | EllipsisType = ...,
+    full_budget_estimate: dict | None | EllipsisType = ...,
     demo_url: str | None = None,
     screenshot_keys: list[str] | None = None,
     tags: list[str] | None = None,
@@ -175,7 +217,9 @@ def update_draft(
     """Edit the project's current draft revision in place. The project's team only.
 
     `title`/`repo_url` live on `Project`; every other field lives on the draft revision. Only fields
-    passed (non-`None`) are changed. Raises `InvalidState` if there's no draft to edit right now (the
+    passed (non-`None`) are changed; the two estimates and `full_budget_cents` can be cleared, so for them only a
+    field left out (`...`) is unchanged. Estimates are `BudgetEstimate.as_dict()`, always computed by the server.
+    `affiliation` must be one of `AFFILIATIONS`. Raises `InvalidState` if there's no draft to edit right now (the
     current revision has already been submitted -- call `start_amendment`/`start_completion` first, or
     wait for a review decision to open the next draft).
     """
@@ -190,10 +234,28 @@ def update_draft(
         project.title = title
     if repo_url is not None:
         project.repo_url = _clean_url("repo_url", repo_url)
-    if write_up is not None:
-        draft.write_up = write_up
-    if budget_requested_cents is not None:
-        draft.budget_requested_cents = budget_requested_cents
+    if affiliation is not None and affiliation not in AFFILIATIONS:
+        raise ValidationFailed({"affiliation": "Choose one of the answers."})
+    if summary is not None and len(summary) > SUMMARY_MAX_CHARS:
+        raise ValidationFailed({"summary": f"Keep it to one sentence: {SUMMARY_MAX_CHARS} characters at most."})
+    for field, value in (
+        ("summary", summary),
+        ("experience", experience),
+        ("write_up", write_up),
+        ("affiliation", affiliation),
+        ("affiliation_detail", affiliation_detail),
+        ("compute_use", compute_use),
+        ("budget_requested_cents", budget_requested_cents),
+    ):
+        if value is not None:
+            setattr(draft, field, value)
+    for field, value in (
+        ("budget_estimate", budget_estimate),
+        ("full_budget_cents", full_budget_cents),
+        ("full_budget_estimate", full_budget_estimate),
+    ):
+        if value is not ...:
+            setattr(draft, field, value)
     if demo_url is not None:
         draft.demo_url = _clean_url("demo_url", demo_url)
     if screenshot_keys is not None:
@@ -205,42 +267,20 @@ def update_draft(
     return project
 
 
-def set_budget_estimate(session: Session, actor: Actor, *, project: Project, budget_estimate: dict | None) -> Project:
-    """Set (or, with `None`, clear) the current draft's stored budget-estimate breakdown. Submitter
-    only. Separate from `update_draft` so that field keeps its own explicit "unset" (`None` really does
-    mean "no estimate", not "leave whatever was there") instead of overloading `update_draft`'s
-    "`None` means don't touch this field" convention.
-
-    Called from `krater.web.routers.projects` right after a create/update-draft call, when the
-    submitter used the budget estimator -- see `krater.services.pricing.estimate_cost`, whose result
-    (already recomputed server-side) is what's passed in here as `budget_estimate.as_dict()`.
-    """
-    if not teams.on_team(project, actor.user.id):
-        raise NotAllowed("Only the project's team may edit it.")
-
-    draft = project.current_revision
-    if draft is None or draft.submitted_at is not None:
-        raise InvalidState("This project has no draft to edit right now.")
-
-    draft.budget_estimate = budget_estimate
-    session.flush()
-    return project
-
-
 # --------------------------------------------------------------------------------------------------
 # Submit
 # --------------------------------------------------------------------------------------------------
 
 
 def submit(session: Session, actor: Actor, *, project: Project) -> Project:
-    """Submit the project's draft `proposal`/`amendment` revision for review. Submitter only.
+    """Submit the project's draft `proposal`/`amendment` revision for review. The project's team only.
 
-    Validates a non-empty `Project.title`, a non-empty write-up, and `budget_requested_cents > 0`
-    (`ValidationFailed` otherwise). Freezes the draft (`submitted_at` set) and marks any other revision
-    of this project still `pending` as `superseded` -- only the just-submitted revision's reviews count
-    from here on. A `proposal` draft must come from status `draft`/`changes_requested`, and moves the
-    project to `pending_review`. An `amendment` draft must come from status `approved`, and leaves the
-    project `approved` (it's already reviewable while the approval stands). `InvalidState` otherwise.
+    Validates the whole application (`application_errors`; `ValidationFailed` otherwise). Freezes the draft
+    (`submitted_at` set) and marks any other revision of this project still `pending` as `superseded` -- only the
+    just-submitted revision's reviews count from here on. A `proposal` draft must come from status
+    `draft`/`changes_requested`, and moves the project to `pending_review`. An `amendment` draft must come from
+    status `approved`, and leaves the project `approved` (it's already reviewable while the approval stands).
+    `InvalidState` otherwise.
 
     Use `submit_completion` for a completion revision -- calling this on one raises `InvalidState`.
     """
@@ -259,13 +299,7 @@ def submit(session: Session, actor: Actor, *, project: Project) -> Project:
     elif project.status not in (ProjectStatus.DRAFT, ProjectStatus.CHANGES_REQUESTED):
         raise InvalidState(f"Cannot submit a proposal from status {project.status.value!r}.")
 
-    errors: dict[str, str] = {}
-    if not project.title.strip():
-        errors["title"] = "Title is required."
-    if not draft.write_up.strip():
-        errors["write_up"] = "Write-up is required."
-    if draft.budget_requested_cents <= 0:
-        errors["budget_requested_cents"] = "Requested budget must be greater than zero."
+    errors = application_errors(project, draft)
     if errors:
         raise ValidationFailed(errors)
 
@@ -279,6 +313,40 @@ def submit(session: Session, actor: Actor, *, project: Project) -> Project:
     session.flush()
     quilt_events.sync_project(session, project)
     return project
+
+
+def application_errors(project: Project, draft: ProjectRevision) -> dict[str, str]:
+    """What's missing or too long in a proposal or amendment draft, by form field. Empty when it can be submitted.
+
+    Every question needs an answer. Both compute estimates need a card and hours (`budget_estimate`,
+    `full_budget_estimate`); the proof of concept also needs a requested amount above zero.
+    """
+    errors: dict[str, str] = {}
+    required = {
+        "title": (project.title, "Give the project a name."),
+        "summary": (draft.summary, "Describe the project in one sentence."),
+        "experience": (draft.experience, "Tell reviewers who you are and what experience you have."),
+        "write_up": (draft.write_up, "Explain the project."),
+        "compute_use": (draft.compute_use, "Say how you'll use the compute."),
+    }
+    for field, (value, message) in required.items():
+        if not value.strip():
+            errors[field] = message
+    for field, limit in WORD_LIMITS.items():
+        count = word_count(getattr(draft, field))
+        if count > limit:
+            errors[field] = f"{count} words: keep it to {limit}."
+    if draft.affiliation not in AFFILIATIONS:
+        errors["affiliation"] = "Choose one of the answers."
+    elif draft.affiliation != "none" and not draft.affiliation_detail.strip():
+        errors["affiliation_detail"] = "Name the contest or professor."
+    if not draft.budget_estimate:
+        errors["poc_gpu"] = "Choose the card and hours a proof of concept needs."
+    if draft.budget_requested_cents <= 0:
+        errors["poc_budget"] = "Requested budget must be greater than zero."
+    if not draft.full_budget_estimate:
+        errors["full_gpu"] = "Choose the card and hours the finished product needs (a rough guess is fine)."
+    return errors
 
 
 def _supersede_other_pending_revisions(session: Session, project: Project, *, keep: ProjectRevision) -> None:
@@ -319,7 +387,7 @@ def _next_revision_number(session: Session, project: Project) -> int:
 def start_amendment(session: Session, actor: Actor, *, project: Project) -> ProjectRevision:
     """Open a new draft `amendment` revision on an `approved` project. Submitter only.
 
-    The draft is copied from the project's approved revision (`write_up`, `budget_requested_cents`),
+    The draft is copied from the project's approved revision (every answer, and both estimates),
     ready for the submitter to edit via `update_draft`. Raises `InvalidState` if the project isn't
     `approved`, or if it already has an unsubmitted draft in progress.
     """
@@ -340,8 +408,7 @@ def start_amendment(session: Session, actor: Actor, *, project: Project) -> Proj
         project_id=project.id,
         number=_next_revision_number(session, project),
         kind=RevisionKind.AMENDMENT,
-        write_up=approved.write_up,
-        budget_requested_cents=approved.budget_requested_cents,
+        **_answers_of(approved),
         submitted_at=None,
         outcome=RevisionOutcome.PENDING,
     )
@@ -366,7 +433,7 @@ def _ensure_no_draft_in_progress(project: Project) -> None:
 def start_completion(session: Session, actor: Actor, *, project: Project) -> ProjectRevision:
     """Open a new draft `completion` revision on an `approved` project. Submitter only.
 
-    `write_up`/`budget_requested_cents` start out copied from the approved revision; the
+    The application's answers start out copied from the approved revision; the
     completion-only fields (`demo_url`, `screenshot_keys`, `tags`) start empty
     for the submitter to fill in via `update_draft` before calling `submit_completion`. Raises
     `InvalidState` if the project isn't `approved`, or already has an unsubmitted draft in progress.
@@ -388,8 +455,7 @@ def start_completion(session: Session, actor: Actor, *, project: Project) -> Pro
         project_id=project.id,
         number=_next_revision_number(session, project),
         kind=RevisionKind.COMPLETION,
-        write_up=approved.write_up,
-        budget_requested_cents=approved.budget_requested_cents,
+        **_answers_of(approved),
         submitted_at=None,
         outcome=RevisionOutcome.PENDING,
     )
@@ -624,8 +690,7 @@ def _open_next_draft(session: Session, rejected: ProjectRevision) -> ProjectRevi
         project_id=project.id,
         number=_next_revision_number(session, project),
         kind=rejected.kind,
-        write_up=rejected.write_up,
-        budget_requested_cents=rejected.budget_requested_cents,
+        **_answers_of(rejected),
         demo_url=rejected.demo_url,
         screenshot_keys=list(rejected.screenshot_keys),
         tags=list(rejected.tags),

@@ -53,7 +53,7 @@ def test_member_can_create_a_project(client: TestClient, login_as, db_session: S
             "title": "Rover",
             "repo_url": "https://github.com/x/rover",
             "write_up": "A rover.",
-            "budget_requested": "1,234.50",
+            "poc_budget": "1,234.50",
         },
         follow_redirects=False,
     )
@@ -73,7 +73,7 @@ def test_create_project_rejects_an_invalid_budget(client: TestClient, login_as) 
 
     response = client.post(
         "/projects/new",
-        data={"csrf_token": csrf, "title": "X", "write_up": "Y", "budget_requested": "not-a-number"},
+        data={"csrf_token": csrf, "title": "X", "write_up": "Y", "poc_budget": "not-a-number"},
     )
 
     assert response.status_code == 422
@@ -83,7 +83,7 @@ def test_create_project_rejects_an_invalid_budget(client: TestClient, login_as) 
 def test_create_project_without_csrf_fails(client: TestClient, login_as) -> None:
     login_as(MEMBER_SUB)
 
-    response = client.post("/projects/new", data={"title": "X", "write_up": "Y", "budget_requested": "10"})
+    response = client.post("/projects/new", data={"title": "X", "write_up": "Y", "poc_budget": "10"})
 
     assert response.status_code == 403
 
@@ -164,7 +164,7 @@ def test_submitter_can_edit_and_save_their_draft(
             "title": "Updated",
             "repo_url": "",
             "write_up": "Updated write-up.",
-            "budget_requested": "500",
+            "poc_budget": "500",
         },
         follow_redirects=False,
     )
@@ -212,7 +212,8 @@ def test_submit_with_missing_fields_rerenders_the_edit_form(client: TestClient, 
     response = client.post(f"/projects/{project.id}/submit", data={"csrf_token": csrf})
 
     assert response.status_code == 422
-    assert "required" in response.text.lower()
+    assert "Explain the project." in response.text
+    assert "Requested budget must be greater than zero." in response.text
 
 
 def test_submit_without_csrf_fails(client: TestClient, login_as, create_project) -> None:
@@ -423,7 +424,7 @@ def test_create_project_rejects_a_non_http_repo_link_as_a_field_error(
             "title": "Keep me",
             "repo_url": "ssh://git@example.com/x.git",
             "write_up": "Typed text that must survive.",
-            "budget_requested": "10",
+            "poc_budget": "10",
         },
     )
 
@@ -445,7 +446,7 @@ def test_edit_rejects_a_non_http_repo_link_as_a_field_error(client: TestClient, 
             "title": "T",
             "repo_url": "javascript:alert(1)",
             "write_up": "W",
-            "budget_requested": "1",
+            "poc_budget": "1",
         },
     )
 
@@ -459,7 +460,7 @@ def test_create_project_rejects_a_budget_past_the_maximum(client: TestClient, lo
 
     response = client.post(
         "/projects/new",
-        data={"csrf_token": csrf, "title": "Big", "write_up": "W", "budget_requested": "21,474,836.48"},
+        data={"csrf_token": csrf, "title": "Big", "write_up": "W", "poc_budget": "21,474,836.48"},
     )
 
     assert response.status_code == 422

@@ -19,6 +19,7 @@ from krater.models import (
 )
 from krater.services import budget, budget_alerts, projects
 from tests.compute.test_scheduler import NOW, SETTINGS, _beat, _instance, _pass, _runner_starts, _submit
+from tests.factories import new_project
 
 
 def _running(db_session, member, project, client, fake, **overrides):  # noqa: F811
@@ -74,7 +75,7 @@ def test_spend_becomes_a_vast_estimate_snapshot_and_a_quilt_event(db_session, me
 
 @pytest.fixture
 def small_project(db_session, member, admin):  # noqa: F811
-    project = projects.create_project(db_session, member, title="Small", write_up="w", budget_requested_cents=100)
+    project = new_project(db_session, member, title="Small", write_up="w", budget_requested_cents=100)
     projects.submit(db_session, member, project=project)
     projects.admin_decide(
         db_session, admin, revision=project.current_revision, decision=ReviewDecision.APPROVE, reason="ok"
