@@ -11,13 +11,14 @@ price (which the estimate then uses) and the amount they request.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.orm import Session
 
 from krater.config import Settings
 from krater.services import pricing
 from krater.services.errors import ValidationFailed
-from krater.web.money import InvalidDollarAmount, format_cents, parse_dollars
+from krater.web.money import format_cents
 
 #: The GPU `<select>` value for a card Krater has no price for; the team names it and gives its hourly price.
 OTHER_GPU = "other"
@@ -78,7 +79,8 @@ def values_from_estimate(estimate: dict | None, settings: Settings, prefix: str)
     values[f"{prefix}_basis"] = pricing.BASIS_SPOT if estimate.get("spot_unavailable") else estimate["basis"]
     values[f"{prefix}_margin_percent"] = str(estimate["margin_percent"])
     if from_member:
-        values[f"{prefix}_rate"] = f"{estimate['rate_cents'] / 100:.2f}"
+        microusd = estimate.get("rate_microusd") or estimate["rate_cents"] * 10_000
+        values[f"{prefix}_rate"] = f"{(Decimal(microusd) / 1_000_000).normalize():f}"
     return values
 
 
@@ -98,6 +100,32 @@ def parse_prefixed(session: Session, fields: dict[str, str], prefix: str) -> pri
         raise ValidationFailed(
             {key.replace("estimator_", f"{prefix}_", 1): message for key, message in exc.errors.items()}
         ) from None
+
+
+def parse_hourly_rate(raw: str) -> int:
+    """A price per card-hour typed in dollars (`0.0587`, `$1.20`) as integer micro-dollars. Up to four decimal places,
+    since bids differ by fractions of a cent. Raises `ValueError` with a message to show next to the field."""
+    text = raw.strip().removeprefix("$").strip()
+    try:
+        value = Decimal(text)
+    except InvalidOperation:
+        raise ValueError("Enter a price like 0.25 or 0.0587.") from None
+    if not value.is_finite() or value <= 0:
+        raise ValueError("Enter an hourly price above zero, or leave it blank.")
+    if value.as_tuple().exponent < -4:
+        raise ValueError("Use at most four decimal places, like 0.0587.")
+    if value > 100:
+        raise ValueError("That's more than $100 per card-hour.")
+    return int(value * 1_000_000)
+
+
+def _rate_text(data: dict) -> str:
+    microusd = data.get("rate_microusd")
+    if microusd is None:
+        return format_cents(data["rate_cents"])
+    return (
+        f"${(Decimal(microusd) / 1_000_000).normalize():f}" if microusd % 10_000 else format_cents(microusd // 10_000)
+    )
 
 
 def parse_and_estimate(
@@ -123,11 +151,11 @@ def parse_and_estimate(
     generic 500.
     """
     errors: dict[str, str] = {}
-    rate_override_cents = None
+    rate_override_microusd = None
     if estimator_rate.strip():
         try:
-            rate_override_cents = parse_dollars(estimator_rate.strip())
-        except InvalidDollarAmount as exc:
+            rate_override_microusd = parse_hourly_rate(estimator_rate)
+        except ValueError as exc:
             errors["estimator_rate"] = str(exc)
     if estimator_gpu == OTHER_GPU:
         accelerator_name = " ".join(estimator_gpu_other.split())[:64]
@@ -174,7 +202,7 @@ def parse_and_estimate(
         hours=hours,
         basis=estimator_basis,
         margin_percent=margin_percent,
-        rate_override_cents=rate_override_cents,
+        rate_override_microusd=rate_override_microusd,
     )
 
 
@@ -201,7 +229,7 @@ def summary_text_from_dict(data: dict) -> str:
         source = f"prices from {refreshed_at:%b} {refreshed_at.day}"
     return (
         f"{data['accelerator_count']}× {data['accelerator_name']} × {float(data['hours']):g}h at "
-        f"{format_cents(data['rate_cents'])}/hr ({basis_label}) + {data['margin_percent']}% margin = "
+        f"{_rate_text(data)}/hr ({basis_label}) + {data['margin_percent']}% margin = "
         f"{format_cents(data['total_cents'])} ({source})"
     )
 

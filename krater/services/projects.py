@@ -387,7 +387,8 @@ def _next_revision_number(session: Session, project: Project) -> int:
 def start_amendment(session: Session, actor: Actor, *, project: Project) -> ProjectRevision:
     """Open a new draft `amendment` revision on an `approved` project. Submitter only.
 
-    The draft is copied from the project's approved revision (every answer, and both estimates),
+    The draft is copied from the project's approved revision (every answer, and both estimates). Its "what you
+    need now" estimate starts as the finished product's, and its requested total as the current ceiling plus that,
     ready for the submitter to edit via `update_draft`. Raises `InvalidState` if the project isn't
     `approved`, or if it already has an unsubmitted draft in progress.
     """
@@ -404,11 +405,17 @@ def start_amendment(session: Session, actor: Actor, *, project: Project) -> Proj
     if approved is None:
         raise InvalidState("This project has no approved revision to amend.")
 
+    answers = _answers_of(approved)
+    if approved.full_budget_estimate:
+        # The next stage is usually the finished product: start from its estimate, on top of what's approved.
+        extra = approved.full_budget_cents or approved.full_budget_estimate["total_cents"]
+        answers["budget_estimate"] = approved.full_budget_estimate
+        answers["budget_requested_cents"] = budget.ceiling_cents(session, project) + extra
     draft = ProjectRevision(
         project_id=project.id,
         number=_next_revision_number(session, project),
         kind=RevisionKind.AMENDMENT,
-        **_answers_of(approved),
+        **answers,
         submitted_at=None,
         outcome=RevisionOutcome.PENDING,
     )

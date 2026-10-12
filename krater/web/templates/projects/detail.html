@@ -89,7 +89,10 @@
         <div>
           <h3>{{ "What they need now" if rev.kind.value == "amendment" else "Proof of concept (what approval funds)" }}</h3>
           <p>
-            <strong>{{ rev.budget_requested_cents | dollars }}</strong> requested.
+            <strong>{{ rev.budget_requested_cents | dollars }}</strong>
+            {%- if rev.kind.value == "amendment" %} new total requested
+              {%- if rev is sameas current and amendment_adds_cents is not none %} ({{ "adds" if amendment_adds_cents >= 0 else "cuts" }} {{ amendment_adds_cents | abs | dollars }} to the {{ summary.ceiling_cents | dollars }} approved now){% endif %}.
+            {%- else %} requested.{% endif %}
             {% if rev.budget_estimate %}<br><span class="muted">Estimate: {{ rev.budget_estimate | estimate_summary }}</span>{% endif %}
           </p>
           {% if estimate_mismatch_by_revision.get(rev.id) %}

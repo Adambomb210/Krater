@@ -99,8 +99,11 @@ def test_an_amendment_starts_with_every_answer_of_the_approved_revision(
     draft = projects.start_amendment(db_session, member, project=project)
 
     approved = project.approved_revision
-    for field in ("summary", "experience", "write_up", "compute_use", "budget_estimate", "full_budget_cents"):
+    for field in ("summary", "experience", "write_up", "compute_use", "full_budget_estimate", "full_budget_cents"):
         assert getattr(draft, field) == getattr(approved, field)
+    # What it needs now starts as the finished product, on top of the approved budget.
+    assert draft.budget_estimate == approved.full_budget_estimate
+    assert draft.budget_requested_cents == 100 + approved.full_budget_cents
 
 
 def test_submit_fails_without_a_draft(db_session: Session, member: Actor, reviewer: Actor) -> None:

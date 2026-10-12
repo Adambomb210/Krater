@@ -147,8 +147,9 @@ what gets stored on `ProjectRevision.budget_estimate` when the submitter used th
 recomputed again, from scratch, at draft-save time — a tampered rate in a resubmitted form changes
 nothing.
 
-**Overrides are explicit and visible.** The team may give its own price per card-hour (`*_rate`). That is the one
-rate taken from the client, and it is recorded as such: `rate_source: member`, with Krater's own rate kept beside it
+**Overrides are explicit and visible.** The team may give its own price per card-hour (`*_rate`, up to four
+decimal places, kept as `rate_microusd`). That is the one rate taken from the client, and it is recorded as such:
+`rate_source: member`, with Krater's own rate kept beside it
 as `market_rate_cents` (`null` when Krater has none, for example a card picked as "Another card" by name). The
 summary says "the team's own hourly price; Krater's typical is $X/hr". The amount requested (`*_budget`) can also
 differ from the estimate's total; it starts as the total, and the project page flags a large difference

@@ -21,7 +21,8 @@ from datetime import UTC, datetime
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from krater.models import Project, ProjectMember, ProjectStatus
+from krater.models import ComputeJob, Project, ProjectMember, ProjectStatus
+from krater.models.compute_job import FINISHED_JOB_STATES
 from krater.services import audit, people
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
@@ -128,7 +129,9 @@ def decline(session: Session, actor: Actor, *, member_id: uuid.UUID) -> Project:
 def remove(session: Session, actor: Actor, *, project: Project, member_id: uuid.UUID) -> None:
     """Remove a member or cancel an invitation. The lead or an admin can remove anyone; a member can leave.
 
-    The lead can't be removed: they answer for the project. Writes an audit event.
+    The lead can't be removed: they answer for the project. Nor can anyone with a job or box on the project that
+    hasn't finished: it would keep running on the project's budget and secrets after they left. Writes an audit
+    event.
     """
     member = next((m for m in project.members if m.id == member_id), None)
     if member is None:
@@ -137,6 +140,21 @@ def remove(session: Session, actor: Actor, *, project: Project, member_id: uuid.
     if not (leaving or actor.user.id == project.submitter_id or actor.is_admin):
         raise NotAllowed("Only the project's lead or an admin can remove someone from its team.")
     _require_open(project)
+    unfinished = session.scalar(
+        sa.select(sa.func.count())
+        .select_from(ComputeJob)
+        .where(
+            ComputeJob.project_id == project.id,
+            ComputeJob.submitter_id == member.user_id,
+            ComputeJob.state.not_in(FINISHED_JOB_STATES),
+        )
+    )
+    if unfinished:
+        who = "You have" if leaving else "They have"
+        raise InvalidState(
+            f"{who} {unfinished} job{'s' if unfinished != 1 else ''} or box{'es' if unfinished != 1 else ''} on this "
+            "project that hasn't finished. Cancel them first: they use the project's budget and secrets."
+        )
     sub = member.user.weave_sub
     project.members.remove(member)
     session.flush()

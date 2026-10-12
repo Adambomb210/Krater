@@ -80,9 +80,15 @@ def summaries_from_draft(draft: ProjectRevision) -> dict[str, str | None]:
     }
 
 
-def parse(session: Session, form: Mapping[str, str], settings: Settings, *, fill: str | None = None) -> Posted:
+def parse(
+    session: Session, form: Mapping[str, str], settings: Settings, *, fill: str | None = None, base_cents: int = 0
+) -> Posted:
     """Read the posted application. `fill` names an estimator (`poc`, `full`) whose amount should be replaced by its
-    estimate: the no-JavaScript "Estimate" button."""
+    estimate: the no-JavaScript "Estimate" button.
+
+    `base_cents` is the budget approved so far, for an amendment: its first estimate is the extra compute the next
+    stage needs, while its amount is the project's new total, so a filled-in amount is `base_cents` plus the
+    estimate. The total can still be typed lower (an amendment may cut the budget)."""
     keys = [*ANSWERS, *_estimator_keys(), *(f"{prefix}_budget" for prefix in SECTIONS), "teammates"]
     values = blank_values(settings) | {key: str(form[key]) for key in keys if key in form}
     posted = Posted(values=values)
@@ -108,7 +114,8 @@ def parse(session: Session, form: Mapping[str, str], settings: Settings, *, fill
                 posted.errors |= exc.errors
         posted.summaries[prefix] = estimator_form.summary_text(estimate) if estimate else None
         if estimate is not None and (fill == prefix or not values[f"{prefix}_budget"].strip()):
-            values[f"{prefix}_budget"] = cents_to_input(estimate.total_cents)
+            base = base_cents if prefix == "poc" else 0
+            values[f"{prefix}_budget"] = cents_to_input(base + estimate.total_cents)
 
         amount = None
         raw = values[f"{prefix}_budget"].strip()

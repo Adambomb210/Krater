@@ -26,7 +26,9 @@
     var otherFields = widget.querySelector('[data-role="other-gpu"]');
     if (!prefix || !estimateButton || !amount) return;
 
-    var lastEstimate = null; // the server's last total, as dollars
+    // An amendment's amount is the project's new total: what's approved so far plus the estimated extra compute.
+    var baseCents = parseInt(widget.getAttribute("data-base-cents") || "0", 10) || 0;
+    var lastEstimate = null; // the amount the last estimate fills in, as dollars
     var amountFollows = !amount.value; // the amount tracks the estimate until the team types their own
     var timer = null;
     var requestNumber = 0;
@@ -111,7 +113,8 @@
             showUseButton();
             return;
           }
-          lastEstimate = result.data.total_dollars;
+          var totalCents = Math.round(parseFloat(result.data.total_dollars) * 100) + baseCents;
+          lastEstimate = (totalCents / 100).toFixed(2);
           setStatus("Estimate: " + result.data.summary);
           if (amountFollows) amount.value = lastEstimate;
           showUseButton();
