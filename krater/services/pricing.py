@@ -31,6 +31,8 @@ VALID_BASES = (BASIS_ON_DEMAND, BASIS_SPOT)
 #: Where an estimate's rate came from (`BudgetEstimate.rate_source`).
 SOURCE_CATALOG = "catalog"
 SOURCE_SAMPLES = "krater_samples"
+# The team typed its own hourly price (a card Krater has no price for, or a price they expect to get).
+SOURCE_MEMBER = "member"
 #: Krater's samples are used once a GPU has at least `SAMPLE_MIN_SPAN` of them within `SAMPLE_WINDOW`.
 SAMPLE_WINDOW = timedelta(days=7)
 SAMPLE_MIN_SPAN = timedelta(days=1)
@@ -214,11 +216,14 @@ class BudgetEstimate:
     rate_source: str = SOURCE_CATALOG
     # Interruptible was asked for but Krater has no interruptible price for this GPU yet, so `basis` is on demand.
     spot_unavailable: bool = False
+    # With `SOURCE_MEMBER`: what Krater's own prices say per GPU-hour, for reviewers to compare; `None` if it has none.
+    market_rate_cents: int | None = None
 
     def as_dict(self) -> dict:
         return {
             "rate_source": self.rate_source,
             "spot_unavailable": self.spot_unavailable,
+            "market_rate_cents": self.market_rate_cents,
             "accelerator_name": self.accelerator_name,
             "accelerator_count": self.accelerator_count,
             "hours": self.hours,
@@ -275,6 +280,35 @@ def sampled_rate_cents(
     return math.ceil(median_microusd / 10_000), max(times)
 
 
+@dataclass(frozen=True)
+class _MarketRate:
+    rate_cents: int
+    refreshed_at: datetime
+    source: str
+    basis: str
+    spot_unavailable: bool
+
+
+def _market_rate(
+    session: Session, *, accelerator_name: str, accelerator_count: int, basis: str, now: datetime
+) -> _MarketRate | None:
+    """Krater's price per GPU-hour: its own Vast samples, else the catalog. Interruptible falls back to on demand
+    (`spot_unavailable`) when Krater has no interruptible price for the GPU. `None` when it has no price at all."""
+    sampled = sampled_rate_cents(session, accelerator_name=accelerator_name, basis=basis, now=now)
+    price = get_price(session, accelerator_name=accelerator_name, accelerator_count=accelerator_count)
+    spot_unavailable = False
+    if basis == BASIS_SPOT and sampled is None and (price is None or price.spot_min_cents is None):
+        basis, spot_unavailable = BASIS_ON_DEMAND, True
+        sampled = sampled_rate_cents(session, accelerator_name=accelerator_name, basis=BASIS_ON_DEMAND, now=now)
+    if sampled is not None:
+        rate_cents, refreshed_at = sampled
+        return _MarketRate(rate_cents, refreshed_at, SOURCE_SAMPLES, basis, spot_unavailable)
+    if price is None:
+        return None
+    rate_cents = price.spot_min_cents if basis == BASIS_SPOT else price.on_demand_median_cents
+    return _MarketRate(rate_cents, price.refreshed_at, SOURCE_CATALOG, basis, spot_unavailable)
+
+
 def estimate_cost(
     session: Session,
     *,
@@ -283,6 +317,7 @@ def estimate_cost(
     hours: float,
     basis: str,
     margin_percent: int,
+    rate_override_cents: int | None = None,
     now: datetime | None = None,
 ) -> BudgetEstimate:
     """Recompute a budget estimate from Krater's own Vast samples, or else its current `GpuPrice` (catalog) row.
@@ -290,6 +325,9 @@ def estimate_cost(
     Interruptible (`BASIS_SPOT`, Krater's default) prices at the typical bid Krater sampled. SkyPilot's catalog has no
     interruptible prices, so a GPU Krater hasn't sampled yet is priced on demand instead, and the estimate says so
     (`spot_unavailable`): an upper bound, never a refusal.
+
+    `rate_override_cents` is the team's own price per GPU-hour. It replaces Krater's rate (`SOURCE_MEMBER`), works
+    for a card Krater has no price for, and keeps Krater's rate beside it (`market_rate_cents`) for reviewers.
 
     Raises `ValidationFailed` (field name -> message, matching every other form-validating service
     call) for bad input or an accelerator/basis Krater has no current pricing for -- callers show these
@@ -306,32 +344,25 @@ def estimate_cost(
         errors["estimator_basis"] = "Choose a pricing basis."
     if margin_percent < 0:
         errors["estimator_margin_percent"] = "Safety margin can't be negative."
+    if rate_override_cents is not None and rate_override_cents <= 0:
+        errors["estimator_rate"] = "Enter an hourly price above zero, or leave it blank."
     if errors:
         raise ValidationFailed(errors)
 
-    sampled = sampled_rate_cents(session, accelerator_name=accelerator_name, basis=basis, now=now or datetime.now(UTC))
-    price = get_price(session, accelerator_name=accelerator_name, accelerator_count=accelerator_count)
-    if price is None and sampled is None:
-        raise ValidationFailed({"estimator_gpu": f"No current pricing for {accelerator_name}×{accelerator_count}."})
-
-    rate_source = SOURCE_CATALOG
-    spot_unavailable = False
-    if basis == BASIS_SPOT and sampled is None and (price is None or price.spot_min_cents is None):
-        basis, spot_unavailable = BASIS_ON_DEMAND, True
-        sampled = sampled_rate_cents(
-            session, accelerator_name=accelerator_name, basis=BASIS_ON_DEMAND, now=now or datetime.now(UTC)
+    now = now or datetime.now(UTC)
+    market = _market_rate(
+        session, accelerator_name=accelerator_name, accelerator_count=accelerator_count, basis=basis, now=now
+    )
+    if rate_override_cents is not None:
+        rate_cents, refreshed_at, rate_source, spot_unavailable = rate_override_cents, now, SOURCE_MEMBER, False
+        market_rate_cents = market.rate_cents if market is not None and market.basis == basis else None
+    elif market is None:
+        raise ValidationFailed(
+            {"estimator_gpu": f"No current pricing for {accelerator_name}×{accelerator_count}: enter an hourly price."}
         )
-        if price is None and sampled is None:
-            raise ValidationFailed({"estimator_gpu": f"No current pricing for {accelerator_name}×{accelerator_count}."})
-    if sampled is not None:
-        rate_cents, refreshed_at = sampled
-        rate_source = SOURCE_SAMPLES
-    elif basis == BASIS_SPOT:
-        rate_cents = price.spot_min_cents
-        refreshed_at = price.refreshed_at
     else:
-        rate_cents = price.on_demand_median_cents
-        refreshed_at = price.refreshed_at
+        rate_cents, refreshed_at, rate_source = market.rate_cents, market.refreshed_at, market.source
+        basis, spot_unavailable, market_rate_cents = market.basis, market.spot_unavailable, None
 
     subtotal_cents = round(rate_cents * accelerator_count * hours)
     margin_cents = round(subtotal_cents * margin_percent / 100)
@@ -349,6 +380,7 @@ def estimate_cost(
         refreshed_at=refreshed_at,
         rate_source=rate_source,
         spot_unavailable=spot_unavailable,
+        market_rate_cents=market_rate_cents,
     )
 
 
@@ -356,6 +388,7 @@ __all__ = [
     "BASIS_ON_DEMAND",
     "BASIS_SPOT",
     "SOURCE_CATALOG",
+    "SOURCE_MEMBER",
     "SOURCE_SAMPLES",
     "VALID_BASES",
     "BudgetEstimate",

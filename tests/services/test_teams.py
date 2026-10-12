@@ -19,11 +19,12 @@ from krater.services import approval_policy, projects, teams
 from krater.services.actor import GROUP_MEMBER, GROUP_REVIEWER, Actor
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
 from krater.weave import StubWeaveClient
+from tests.factories import new_project
 from tests.services.conftest import PROFILES, add_to_team
 
 
 def _project(db_session: Session, lead: Actor):
-    return projects.create_project(db_session, lead, title="Rover", write_up="w", budget_requested_cents=1000)
+    return new_project(db_session, lead, title="Rover", write_up="w", budget_requested_cents=1000)
 
 
 def _email(actor: Actor) -> str:

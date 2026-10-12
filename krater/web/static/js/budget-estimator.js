@@ -1,61 +1,59 @@
 /*
- * Budget estimator widget for the proposal/amendment draft form (projects/new.html, projects/edit.html).
- * Vanilla JS, no build step, no CDN dependencies -- served straight from /static (CSP forbids inline
- * scripts; see krater/web/security_headers.py).
+ * The compute estimators on the application form (krater/web/templates/projects/_application.html): one fieldset
+ * per estimator, `data-estimator="<prefix>"` (`poc`, `full`), with fields named `<prefix>_gpu`, `<prefix>_hours` and
+ * so on, and the amount the team requests in `<prefix>_budget`.
+ * Vanilla JS, no build step, served from /static (CSP forbids inline scripts; see krater/web/security_headers.py).
  *
- * Without this file, the widget's "Estimate" button (krater/web/templates/_macros.html's
- * budget_estimator macro) is a plain form submit: the whole page reloads, and the server
- * (krater.web.routers.projects) recomputes the estimate and re-renders the page with the requested-
- * budget field already filled in. That's the no-JS baseline this file enhances, never replaces.
- *
- * With JS: clicking "Estimate" is intercepted (no page reload) and instead POSTs the same fields to
- * /pricing/estimate (krater.web.routers.pricing), which recomputes server-side exactly the way the
- * no-JS path does -- this widget never computes a rate/total itself, only displays what the server
- * returns. The result is shown, plus a "Use this estimate" button that copies the computed dollar
- * amount into the requested-budget field and marks the hidden `estimator_used` field, so a later
- * "Save draft"/"Create" submit tells the server this draft's budget came from the estimator (the
- * server then stores its own freshly-recomputed breakdown on the revision -- see
- * krater.services.projects.set_budget_estimate).
+ * Without this file each estimator's "Estimate" button is a plain submit (form_action=estimate_<prefix>) and the
+ * server fills the amount in (krater.web.application_form). With it, the estimate updates as the fields change: the
+ * fields go to /pricing/estimate (krater.web.routers.pricing) as `estimator_*`, and the server computes the total,
+ * never this file. The amount follows the estimate until the team types their own; then "Use the estimate" puts
+ * the estimate back. Whatever is in the amount when the form is saved is what's requested: reviewers see both.
  */
 (function () {
   "use strict";
 
-  function init() {
-    var widget = document.getElementById("budget-estimator");
-    if (!widget) return;
+  var FIELDS = ["gpu", "gpu_other", "gpu_count", "hours", "basis", "margin_percent", "rate"];
 
-    var form = widget.closest("form");
+  function setUp(widget) {
+    var prefix = widget.getAttribute("data-estimator");
     var estimateUrl = widget.getAttribute("data-estimate-url");
     var csrfToken = widget.getAttribute("data-csrf-token");
     var estimateButton = widget.querySelector('[data-role="estimate-button"]');
     var useButton = widget.querySelector('[data-role="use-estimate-button"]');
     var resultEl = widget.querySelector('[data-role="estimate-result"]');
-    var usedField = widget.querySelector('[data-role="estimator-used"]');
-    var budgetField = form ? form.querySelector("#budget_requested") : null;
-    if (!form || !estimateButton || !budgetField) return;
+    var amount = widget.querySelector('[data-role="amount"]');
+    var otherFields = widget.querySelector('[data-role="other-gpu"]');
+    if (!prefix || !estimateButton || !amount) return;
 
-    var fieldNames = ["estimator_gpu", "estimator_hours", "estimator_basis", "estimator_margin_percent"];
-    var errorClearTargets = ["estimator_gpu", "estimator_hours", "estimator_basis", "estimator_margin_percent"];
+    var lastEstimate = null; // the server's last total, as dollars
+    var amountFollows = !amount.value; // the amount tracks the estimate until the team types their own
+    var timer = null;
+    var requestNumber = 0;
 
-    function clearFieldErrors() {
-      errorClearTargets.forEach(function (name) {
-        var input = widget.querySelector('[name="' + name + '"]');
-        if (!input) return;
-        var error = input.parentElement.querySelector(".field-error");
-        if (error) error.textContent = "";
-      });
+    function input(field) {
+      return widget.querySelector('[name="' + prefix + "_" + field + '"]');
     }
 
-    function showFieldError(name, message) {
-      var input = widget.querySelector('[name="' + name + '"]');
-      if (!input) return;
-      var error = input.parentElement.querySelector(".field-error");
+    function errorFor(field) {
+      var el = input(field);
+      if (!el) return null;
+      var error = el.parentElement.querySelector(".field-error");
       if (!error) {
         error = document.createElement("p");
         error.className = "field-error";
-        input.parentElement.appendChild(error);
+        el.parentElement.appendChild(error);
       }
-      error.textContent = message;
+      return error;
+    }
+
+    function clearErrors() {
+      FIELDS.forEach(function (field) {
+        var el = input(field);
+        var error = el && el.parentElement.querySelector(".field-error");
+        if (error) error.textContent = "";
+        if (el) el.removeAttribute("aria-invalid");
+      });
     }
 
     function setStatus(message) {
@@ -64,26 +62,30 @@
       resultEl.hidden = !message;
     }
 
-    function formBody() {
-      var params = new URLSearchParams();
-      params.append("csrf_token", csrfToken);
-      fieldNames.forEach(function (name) {
-        var input = widget.querySelector('[name="' + name + '"]');
-        params.append(name, input ? input.value : "");
-      });
-      return params;
+    function showUseButton() {
+      if (useButton) useButton.hidden = !(lastEstimate && amount.value.replace(/[$,\s]/g, "") !== lastEstimate);
     }
 
-    estimateButton.addEventListener("click", function (event) {
-      event.preventDefault();
-      clearFieldErrors();
-      if (useButton) useButton.hidden = true;
-      setStatus("Estimating…");
+    function isBlank() {
+      return !input("gpu").value && !input("hours").value;
+    }
 
+    function estimate() {
+      if (isBlank()) {
+        setStatus("");
+        return;
+      }
+      var params = new URLSearchParams();
+      params.append("csrf_token", csrfToken);
+      FIELDS.forEach(function (field) {
+        var el = input(field);
+        params.append("estimator_" + field, el ? el.value : "");
+      });
+      var mine = ++requestNumber;
       fetch(estimateUrl, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: formBody(),
+        body: params,
       })
         .then(function (response) {
           return response.json().then(function (data) {
@@ -91,39 +93,75 @@
           });
         })
         .then(function (result) {
+          if (mine !== requestNumber) return; // a newer estimate is on its way
+          clearErrors();
           if (!result.ok) {
             var errors = (result.data && result.data.errors) || {};
-            var messages = [];
-            Object.keys(errors).forEach(function (name) {
-              showFieldError(name, errors[name]);
-              messages.push(errors[name]);
+            Object.keys(errors).forEach(function (key) {
+              var field = key.replace(/^estimator_/, "");
+              // Only complain about fields the team has filled in; a half-finished estimator is fine.
+              var el = input(field);
+              if (el && (el.value || field === "rate" || field === "gpu_other")) {
+                var error = errorFor(field);
+                if (error) error.textContent = errors[key];
+              }
             });
-            setStatus(messages.length ? "" : "Could not compute an estimate.");
+            setStatus("");
+            lastEstimate = null;
+            showUseButton();
             return;
           }
+          lastEstimate = result.data.total_dollars;
           setStatus("Estimate: " + result.data.summary);
-          if (useButton) {
-            useButton.hidden = false;
-            useButton.setAttribute("data-total-dollars", result.data.total_dollars);
-          }
+          if (amountFollows) amount.value = lastEstimate;
+          showUseButton();
         })
         .catch(function () {
-          setStatus("Could not reach the pricing service. Try again, or use the no-JavaScript Estimate button.");
+          if (mine === requestNumber) setStatus("Couldn't reach Krater's prices. Use the Estimate button instead.");
         });
+    }
+
+    function soon() {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(estimate, 350);
+    }
+
+    FIELDS.forEach(function (field) {
+      var el = input(field);
+      if (!el) return;
+      el.addEventListener(el.tagName === "SELECT" ? "change" : "input", soon);
+    });
+
+    input("gpu").addEventListener("change", function () {
+      if (otherFields) otherFields.hidden = input("gpu").value !== "other";
+    });
+
+    amount.addEventListener("input", function () {
+      amountFollows = !amount.value;
+      showUseButton();
+    });
+
+    estimateButton.addEventListener("click", function (event) {
+      event.preventDefault();
+      window.clearTimeout(timer);
+      estimate();
     });
 
     if (useButton) {
       useButton.addEventListener("click", function () {
-        var total = useButton.getAttribute("data-total-dollars");
-        if (!total) return;
-        budgetField.value = total;
-        if (usedField) usedField.value = "1";
-        // Confirm the copy; otherwise the click looks like it did nothing when the budget field is
-        // scrolled out of view above the estimator.
-        useButton.hidden = true;
-        setStatus((resultEl ? resultEl.textContent : "") + " Copied into the requested budget.");
+        if (!lastEstimate) return;
+        amount.value = lastEstimate;
+        amountFollows = true;
+        showUseButton();
       });
     }
+
+    // Know the current estimate from the start, so "Use the estimate" can show for an amount saved earlier.
+    if (!isBlank()) estimate();
+  }
+
+  function init() {
+    Array.prototype.forEach.call(document.querySelectorAll("[data-estimator]"), setUp);
   }
 
   if (document.readyState === "loading") {

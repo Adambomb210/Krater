@@ -2853,3 +2853,60 @@ pre.log {
 .invitation-list:last-child {
   margin-bottom: 0;
 }
+
+/* ----------------------------------------------------------------------------------------------------------
+   The application form (projects/_application.html)
+   ---------------------------------------------------------------------------------------------------------- */
+
+fieldset.choice-list {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+fieldset.choice-list legend {
+  width: 100%;
+  margin-bottom: var(--space-2);
+  padding: 0;
+}
+
+.word-count {
+  margin-top: var(--space-1);
+}
+
+.word-count--over {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.estimator__more summary {
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.estimator__more[open] summary {
+  margin-bottom: var(--space-3);
+}
+
+/* The application as reviewers read it on the project page. */
+.answers {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.answers h3 {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+
+.answers p {
+  margin: 0;
+}
+
+.answer-summary {
+  font-size: var(--text-lg);
+  font-weight: 500;
+}

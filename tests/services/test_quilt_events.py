@@ -40,6 +40,7 @@ from krater.services.quilt_events import (
     SUBMISSION_UPDATED,
     event_id,
 )
+from tests.factories import new_project
 
 
 def _rows(session: Session, project: Project) -> list[QuiltOutbox]:
@@ -56,9 +57,7 @@ def _types(session: Session, project: Project) -> list[str]:
 
 
 def _submit(session: Session, member: Actor, *, budget_cents: int = 100_000, title: str = "Rover") -> Project:
-    project = projects.create_project(
-        session, member, title=title, write_up="A rover.", budget_requested_cents=budget_cents
-    )
+    project = new_project(session, member, title=title, write_up="A rover.", budget_requested_cents=budget_cents)
     return projects.submit(session, member, project=project)
 
 
@@ -94,14 +93,14 @@ def _entry(session: Session, project: Project) -> BudgetEntry:
 
 
 def test_a_draft_sends_nothing(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="x", budget_requested_cents=5)
+    project = new_project(db_session, member, title="Rover", write_up="x", budget_requested_cents=5)
     quilt_events.sync_project(db_session, project)
 
     assert _rows(db_session, project) == []
 
 
 def test_withdrawing_a_draft_sends_nothing(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="x", budget_requested_cents=5)
+    project = new_project(db_session, member, title="Rover", write_up="x", budget_requested_cents=5)
     projects.withdraw(db_session, member, project=project)
 
     assert _rows(db_session, project) == []
@@ -426,7 +425,7 @@ def test_a_new_commitment_covers_earlier_overspend_before_the_release_cap(
 
 
 def test_the_outbox_row_is_part_of_the_callers_transaction(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="x", budget_requested_cents=5)
+    project = new_project(db_session, member, title="Rover", write_up="x", budget_requested_cents=5)
     nested = db_session.begin_nested()
     projects.submit(db_session, member, project=project)
     assert len(_rows(db_session, project)) == 1
@@ -439,7 +438,7 @@ def test_the_outbox_row_is_part_of_the_callers_transaction(db_session: Session, 
 
 
 def test_a_failed_submit_writes_nothing(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(db_session, member, title="", write_up="x", budget_requested_cents=5)
+    project = new_project(db_session, member, title="", write_up="x", budget_requested_cents=5)
     with pytest.raises(ValidationFailed):
         projects.submit(db_session, member, project=project)
 
@@ -460,7 +459,7 @@ def test_sync_is_idempotent(db_session: Session, member: Actor, reviewer: Actor)
 def test_backfill_enqueues_existing_projects_once(
     db_session: Session, member: Actor, reviewer: Actor, admin: Actor
 ) -> None:
-    draft = projects.create_project(db_session, member, title="Draft", write_up="x", budget_requested_cents=5)
+    draft = new_project(db_session, member, title="Draft", write_up="x", budget_requested_cents=5)
     completed = _approved(db_session, member, reviewer, budget_cents=100_000)
     _spend(db_session, completed, 40_000)
     projects.start_completion(db_session, member, project=completed)

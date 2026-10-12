@@ -1,10 +1,11 @@
-"""Shared helpers for the budget-estimator fieldset on the proposal/amendment draft form
-(`projects/new.html`, `projects/edit.html`) and its JSON endpoint (`krater.web.routers.pricing`).
+"""Shared helpers for the compute estimators on the application form (`projects/_application.html`: one for the
+proof of concept, one for the finished product) and their JSON endpoint (`krater.web.routers.pricing`).
 
-The estimator posts plain strings (a GPU key, hours, basis, margin) that both the no-JS form-submit
-path and the JS `fetch` path need to parse and validate the same way -- factored out here so the two
-don't drift. See `docs/dev/pricing.md`: the server always recomputes the rate/total itself
-(`krater.services.pricing.estimate_cost`); nothing here ever trusts a client-sent dollar figure.
+An estimator posts plain strings (a GPU key, or another card's name and count, hours, basis, margin, and an optional
+hourly price of the team's own) that the no-JS form-submit path and the JS `fetch` path parse and validate the same
+way. See `docs/dev/pricing.md`: the server always recomputes the total itself
+(`krater.services.pricing.estimate_cost`). The team can override two things, both visible to reviewers: the hourly
+price (which the estimate then uses) and the amount they request.
 """
 
 from __future__ import annotations
@@ -16,7 +17,13 @@ from sqlalchemy.orm import Session
 from krater.config import Settings
 from krater.services import pricing
 from krater.services.errors import ValidationFailed
-from krater.web.money import format_cents
+from krater.web.money import InvalidDollarAmount, format_cents, parse_dollars
+
+#: The GPU `<select>` value for a card Krater has no price for; the team names it and gives its hourly price.
+OTHER_GPU = "other"
+#: The posted fields of one estimator, without its prefix (`estimator_` on the JSON endpoint, `poc_`/`full_` on the
+#: application form).
+FIELDS = ("gpu", "gpu_other", "gpu_count", "hours", "basis", "margin_percent", "rate")
 
 
 def gpu_options(session: Session) -> list[dict[str, str | bool]]:
@@ -43,15 +50,54 @@ def gpu_options(session: Session) -> list[dict[str, str | bool]]:
     return options
 
 
-def default_estimator_values(settings: Settings) -> dict[str, str]:
-    """Blank estimator field values for a fresh new/edit form -- no GPU/hours chosen yet, interruptible
-    basis (what Krater Compute rents by default), the configured default safety margin."""
-    return {
-        "estimator_gpu": "",
-        "estimator_hours": "",
-        "estimator_basis": pricing.BASIS_SPOT,
-        "estimator_margin_percent": str(settings.budget_estimate_default_margin_percent),
-    }
+def default_estimator_values(settings: Settings, prefix: str = "estimator") -> dict[str, str]:
+    """Blank field values for one estimator on a fresh form -- no GPU/hours chosen yet, interruptible basis (what
+    Krater Compute rents by default), the configured default safety margin, Krater's own hourly price."""
+    values = {f"{prefix}_{field}": "" for field in FIELDS}
+    values[f"{prefix}_basis"] = pricing.BASIS_SPOT
+    values[f"{prefix}_margin_percent"] = str(settings.budget_estimate_default_margin_percent)
+    values[f"{prefix}_gpu_count"] = "1"
+    return values
+
+
+def values_from_estimate(estimate: dict | None, settings: Settings, prefix: str) -> dict[str, str]:
+    """The estimator's field values that reproduce a stored estimate (`BudgetEstimate.as_dict()`), for an edit form.
+    A card that isn't in Krater's price list comes back as "another card"."""
+    values = default_estimator_values(settings, prefix)
+    if not estimate:
+        return values
+    name, count = estimate["accelerator_name"], int(estimate["accelerator_count"])
+    from_member = estimate.get("rate_source") == pricing.SOURCE_MEMBER
+    if from_member and estimate.get("market_rate_cents") is None:
+        values[f"{prefix}_gpu"] = OTHER_GPU
+        values[f"{prefix}_gpu_other"] = name
+        values[f"{prefix}_gpu_count"] = str(count)
+    else:
+        values[f"{prefix}_gpu"] = pricing.gpu_key(name, count)
+    values[f"{prefix}_hours"] = f"{float(estimate['hours']):g}"
+    values[f"{prefix}_basis"] = pricing.BASIS_SPOT if estimate.get("spot_unavailable") else estimate["basis"]
+    values[f"{prefix}_margin_percent"] = str(estimate["margin_percent"])
+    if from_member:
+        values[f"{prefix}_rate"] = f"{estimate['rate_cents'] / 100:.2f}"
+    return values
+
+
+def is_blank(fields: dict[str, str], prefix: str = "estimator") -> bool:
+    """Whether the team hasn't started this estimator: no card and no hours."""
+    return not fields.get(f"{prefix}_gpu", "").strip() and not fields.get(f"{prefix}_hours", "").strip()
+
+
+def parse_prefixed(session: Session, fields: dict[str, str], prefix: str) -> pricing.BudgetEstimate:
+    """`parse_and_estimate` for the estimator whose fields start with `prefix` (`poc`, `full`). Errors come back
+    keyed by those same field names."""
+    try:
+        return parse_and_estimate(
+            session, **{f"estimator_{field}": fields.get(f"{prefix}_{field}", "") for field in FIELDS}
+        )
+    except ValidationFailed as exc:
+        raise ValidationFailed(
+            {key.replace("estimator_", f"{prefix}_", 1): message for key, message in exc.errors.items()}
+        ) from None
 
 
 def parse_and_estimate(
@@ -61,18 +107,50 @@ def parse_and_estimate(
     estimator_hours: str,
     estimator_basis: str,
     estimator_margin_percent: str,
+    estimator_rate: str = "",
+    estimator_gpu_other: str = "",
+    estimator_gpu_count: str = "",
 ) -> pricing.BudgetEstimate:
     """Validate the raw posted strings and compute the estimate.
+
+    `estimator_gpu` is a `pricing.gpu_key`, or `OTHER_GPU` with the card named in `estimator_gpu_other` and counted
+    in `estimator_gpu_count`; another card needs `estimator_rate`, the team's price per GPU-hour in dollars, which
+    otherwise is optional and replaces Krater's own.
 
     Raises `ValidationFailed` (field name -> message, keyed the same as the form's `name=` attributes)
     for anything wrong -- an empty/unparseable field, an unknown GPU key, or a GPU Krater currently has
     no pricing for -- so callers can always show it as a field error next to the widget rather than a
     generic 500.
     """
-    parsed = pricing.parse_gpu_key(estimator_gpu)
-    if parsed is None:
-        raise ValidationFailed({"estimator_gpu": "Choose a GPU type."})
-    accelerator_name, accelerator_count = parsed
+    errors: dict[str, str] = {}
+    rate_override_cents = None
+    if estimator_rate.strip():
+        try:
+            rate_override_cents = parse_dollars(estimator_rate.strip())
+        except InvalidDollarAmount as exc:
+            errors["estimator_rate"] = str(exc)
+    if estimator_gpu == OTHER_GPU:
+        accelerator_name = " ".join(estimator_gpu_other.split())[:64]
+        if not accelerator_name:
+            errors["estimator_gpu_other"] = "Name the card."
+        try:
+            accelerator_count = int(estimator_gpu_count or "1")
+            if not 1 <= accelerator_count <= 16:
+                raise ValueError
+        except ValueError:
+            errors["estimator_gpu_count"] = "Between 1 and 16 cards."
+            accelerator_count = 1
+        if not estimator_rate.strip():
+            errors["estimator_rate"] = "Give this card's price per hour."
+    else:
+        parsed = pricing.parse_gpu_key(estimator_gpu)
+        if parsed is None:
+            errors["estimator_gpu"] = "Choose a GPU type."
+            accelerator_name, accelerator_count = "", 0
+        else:
+            accelerator_name, accelerator_count = parsed
+    if errors:
+        raise ValidationFailed(errors)
 
     try:
         hours = float(estimator_hours)
@@ -96,6 +174,7 @@ def parse_and_estimate(
         hours=hours,
         basis=estimator_basis,
         margin_percent=margin_percent,
+        rate_override_cents=rate_override_cents,
     )
 
 
@@ -111,7 +190,12 @@ def summary_text_from_dict(data: dict) -> str:
     basis_label = "interruptible" if data["basis"] == pricing.BASIS_SPOT else "on-demand"
     if data.get("spot_unavailable"):
         basis_label = "on-demand; no interruptible prices for this GPU yet"
-    if data.get("rate_source") == pricing.SOURCE_SAMPLES:
+    if data.get("rate_source") == pricing.SOURCE_MEMBER:
+        market = data.get("market_rate_cents")
+        source = "the team's own hourly price" + (
+            f"; Krater's typical is {format_cents(market)}/hr" if market is not None else "; Krater has no price for it"
+        )
+    elif data.get("rate_source") == pricing.SOURCE_SAMPLES:
         source = f"Krater's Vast prices, median of the week to {refreshed_at:%b} {refreshed_at.day}"
     else:
         source = f"prices from {refreshed_at:%b} {refreshed_at.day}"
@@ -127,9 +211,14 @@ def summary_text(result: pricing.BudgetEstimate) -> str:
 
 
 __all__ = [
+    "FIELDS",
+    "OTHER_GPU",
     "default_estimator_values",
     "gpu_options",
+    "is_blank",
     "parse_and_estimate",
+    "parse_prefixed",
+    "values_from_estimate",
     "summary_text",
     "summary_text_from_dict",
 ]

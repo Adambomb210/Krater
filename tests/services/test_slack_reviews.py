@@ -10,10 +10,11 @@ from krater.services import projects, slack_reviews
 from krater.services.actor import GROUP_MEMBER, GROUP_REVIEWER, Actor
 from krater.slack.fake import FakeSlackClient
 from krater.weave import StubWeaveClient, WeaveUnavailableError
+from tests.factories import new_project
 
 
 def _submitted_revision(db_session: Session, member: Actor):
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     project = projects.submit(db_session, member, project=project)
     # Mirrors production: the submitting web request commits before the Slack job (which may itself
     # roll back on a domain error) ever runs, in a fresh session of its own.
@@ -136,7 +137,7 @@ def test_approve_that_completes_the_project_archives_the_channel(
     db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
     reviewer.user.slack_user_id = "U_REVIEWER"
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     project = projects.submit(db_session, member, project=project)
     projects.record_review(
         db_session,
