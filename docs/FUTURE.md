@@ -50,7 +50,7 @@ this list covers what comes after, plus loose ends from building v1.
 
 - **Untested with 0.13.0's CLI:** `sky exec`, `sky jobs launch` and `sky serve up` going through the launch gate for
   real. They have no `--dryrun`, so they need a real Vast key. Resource labels on Vast are also untested. See
-  [dev/skypilot-spike.md](dev/skypilot-spike.md).
+  `docs/dev/skypilot-spike.md` (removed with SkyPilot; see git history).
 - **Image allowlist in the launch gate,** to stop crypto mining or other abuse. It becomes more important if donated
   compute happens (below).
 - **Shared rate limiting.** The limiter is per-process in memory, so limits multiply with the number of web workers. Move
