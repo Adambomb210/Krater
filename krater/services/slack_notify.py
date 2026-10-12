@@ -94,8 +94,8 @@ def _slack_ids(session: Session, slack_client: SlackClient, people: list[User]) 
 
 
 def _reviewer_slack_ids(session: Session, slack_client: SlackClient, weave_client: WeaveClient) -> set[str]:
-    """Slack ids for every active user Weave says holds `ganymede:reviewer`: Weave's `slack_id`, else
-    the Krater user row's (`slack_id_for`), else a Slack lookup by an email Weave says is verified."""
+    """Slack ids for every active user Weave says holds `ganymede:reviewer`: Weave's `slack_id`, else the
+    one stored on their Krater user row."""
     ids: set[str] = set()
     for reviewer in weave_client.list_users_with_role(GROUP_REVIEWER):
         if not reviewer.active:
@@ -105,8 +105,6 @@ def _reviewer_slack_ids(session: Session, slack_client: SlackClient, weave_clien
             user = session.scalars(sa.select(User).where(User.weave_sub == reviewer.sub)).first()
             if user is not None:
                 slack_id = slack_id_for(session, slack_client, user)
-            elif reviewer.email_verified and reviewer.email:
-                slack_id = slack_client.lookup_user_by_email(reviewer.email)
         if slack_id:
             ids.add(slack_id)
     return ids
@@ -401,7 +399,8 @@ def _box_message(session: Session, slack_client: SlackClient, event: AuditEvent,
     payload = event.payload or {}
     owner = session.get(User, uuid.UUID(payload["owner_id"])) if payload.get("owner_id") else None
     slack_id = slack_id_for(session, slack_client, owner) if owner is not None else None
-    who = f"<@{slack_id}>" if slack_id else _escape_mrkdwn(owner.display_name if owner else "Someone")
+    # Without a Slack id there is no name to fall back on: Krater stores none (docs/weave-integration.md).
+    who = f"<@{slack_id}>" if slack_id else "Box owner"
     name = _escape_mrkdwn(payload.get("job_name", "a box"))
     link = f"{get_settings().base_url.rstrip('/')}/projects/{project.id}/compute/{payload.get('job_id', '')}"
     hours = payload.get("destroy_after_hours")

@@ -43,10 +43,10 @@ def test_full_stub_sign_in_flow(client: TestClient, db_session: Session) -> None
     assert callback.headers["location"] == "/"
 
     user = db_session.execute(select(User).where(User.weave_sub == MEMBER_SUB)).scalar_one()
-    assert user.display_name == "Mia Member"
     assert user.roles_cached == ["ganymede:member"]
     assert user.slack_user_id == "U0001MEMBER"  # from Weave's `slack_id` claim
-    assert user.email_verified is True
+    # The name lives in the session cookie only, never in Krater's database.
+    assert "Mia Member" in client.get("/").text
     assert user.last_login_at is not None
 
     # 4. The signed-in page shows the user's name and a sign-out control.

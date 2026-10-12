@@ -18,7 +18,7 @@ from krater.models import (
 
 
 def test_create_project_with_revisions_and_budget_entry(db_session: Session) -> None:
-    user = User(weave_sub="PWL0000TEST", display_name="Ada Lovelace", email="ada@example.com")
+    user = User(weave_sub="PWL0000TEST")
     db_session.add(user)
     db_session.flush()
 
@@ -67,7 +67,7 @@ def test_create_project_with_revisions_and_budget_entry(db_session: Session) -> 
     assert fetched_project.status is ProjectStatus.APPROVED
     assert fetched_project.current_revision_id == revision_2.id
     assert fetched_project.approved_revision_id == revision_2.id
-    assert fetched_project.submitter.email == "ada@example.com"
+    assert fetched_project.submitter.weave_sub == "PWL0000TEST"
 
     revisions = (
         db_session.query(ProjectRevision).filter_by(project_id=project.id).order_by(ProjectRevision.number).all()

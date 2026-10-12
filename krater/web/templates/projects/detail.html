@@ -101,7 +101,7 @@
         <ul class="review-list">
           {% for review in revision.reviews %}
             <li>
-              <strong>{{ users_by_id[review.reviewer_id].display_name if review.reviewer_id in users_by_id else "Unknown reviewer" }}</strong>
+              <strong>{{ names_by_id.get(review.reviewer_id, "Unknown reviewer") }}</strong>
               {{ macros.decision_badge(review.decision) }}
               {% if review.reason %}<span class="muted"> &mdash; {{ review.reason }}</span>{% endif %}
             </li>

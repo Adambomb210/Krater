@@ -127,32 +127,15 @@ class _DirectoryWebClient:
             raise self.error
         return {"ok": True, "user": self.user}
 
-    def users_lookupByEmail(self, **kwargs: Any) -> dict:  # noqa: N802 -- slack_sdk's method name
-        if self.error is not None:
-            raise self.error
-        return {"ok": True, "user": self.user}
 
-
-@pytest.mark.parametrize(
-    "profile,expected",
-    [({"email": "ada@example.com"}, "ada@example.com"), ({}, None), ({"email": ""}, None)],
-    ids=["email", "no-email", "blank-email"],
-)
-def test_get_user_info_reads_the_guest_flags_and_the_profile_email(profile: dict, expected: str | None) -> None:
-    user = {"id": "U1", "deleted": False, "is_restricted": True, "is_ultra_restricted": False, "profile": profile}
+def test_get_user_info_reads_the_guest_flags() -> None:
+    user = {"id": "U1", "deleted": False, "is_restricted": True, "is_ultra_restricted": False, "profile": {}}
 
     info = _client(_DirectoryWebClient(user)).get_user_info("U1")  # type: ignore[arg-type]
 
     assert info is not None
     assert info.is_restricted is True
-    assert info.email == expected
 
 
 def test_get_user_info_is_none_for_an_unknown_user() -> None:
     assert _client(_DirectoryWebClient(error=_api_error("user_not_found"))).get_user_info("U404") is None  # type: ignore[arg-type]
-
-
-def test_lookup_user_by_email_returns_the_id_or_none() -> None:
-    assert _client(_DirectoryWebClient({"id": "U7"})).lookup_user_by_email("a@example.com") == "U7"  # type: ignore[arg-type]
-    missing = _client(_DirectoryWebClient(error=_api_error("users_not_found")))  # type: ignore[arg-type]
-    assert missing.lookup_user_by_email("nobody@example.com") is None

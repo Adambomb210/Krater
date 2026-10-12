@@ -1,8 +1,8 @@
 """Users and authorization: turning what Weave says about a person into a `User` row and an `Actor`.
 
 Weave owns roles. Sign-in reads them from the id_token's `roles` claim; every later authorization
-check (`authorize`) asks Weave's directory again, by `weave_sub`. The copies Krater keeps on the user
-row (`roles_cached`, `slack_user_id`, `email_verified`) are for display and Slack lookups only.
+check (`authorize`) asks Weave's directory again, by `weave_sub`. The user row keeps no name or email
+(docs/weave-integration.md); `roles_cached` and `slack_user_id` are for display and Slack clicks only.
 """
 
 from __future__ import annotations
@@ -22,8 +22,7 @@ from krater.weave import WeaveClient, WeaveIdentity, WeaveUser
 
 def _link_slack_id(session: Session, user: User, slack_id: str | None) -> None:
     """Store Weave's `slack_id` on `user`. Weave is the source of truth, so another user row that still
-    holds the same id (a stale link) loses it. A missing `slack_id` leaves the stored one alone: it may
-    have come from Krater's own Slack email lookup."""
+    holds the same id (a stale link) loses it. A missing `slack_id` leaves the stored one alone."""
     if not slack_id or user.slack_user_id == slack_id:
         return
     session.execute(
@@ -36,15 +35,9 @@ def _apply(
     session: Session,
     user: User,
     *,
-    name: str,
-    email: str,
-    email_verified: bool,
     slack_id: str | None,
     roles: frozenset[str],
 ) -> None:
-    user.display_name = name or email or user.weave_sub
-    user.email = email
-    user.email_verified = email_verified
     user.roles_cached = sorted(roles)
     _link_slack_id(session, user, slack_id)
     session.flush()
@@ -53,8 +46,8 @@ def _apply(
 def upsert_user_from_identity(session: Session, identity: WeaveIdentity) -> User:
     """Create or update the `User` row for `identity`, by `weave_sub`.
 
-    Refreshes the display name, email, `email_verified`, `roles_cached` and (if Weave sent one)
-    `slack_user_id`. Leaves `last_login_at` alone. Flushes but does not commit.
+    Refreshes `roles_cached` and (if Weave sent one) `slack_user_id`. Leaves `last_login_at` alone. Flushes but
+    does not commit.
     """
     user = session.execute(sa.select(User).where(User.weave_sub == identity.sub)).scalar_one_or_none()
     if user is None:
@@ -63,9 +56,6 @@ def upsert_user_from_identity(session: Session, identity: WeaveIdentity) -> User
     _apply(
         session,
         user,
-        name=identity.name,
-        email=identity.email,
-        email_verified=identity.email_verified,
         slack_id=identity.slack_id,
         roles=identity.roles,
     )
@@ -73,13 +63,10 @@ def upsert_user_from_identity(session: Session, identity: WeaveIdentity) -> User
 
 
 def refresh_user_from_weave(session: Session, user: User, record: WeaveUser) -> None:
-    """Update `user`'s cached fields from a fresh directory record. Flushes but does not commit."""
+    """Update `user`'s cached roles and Slack id from a fresh directory record. Flushes but does not commit."""
     _apply(
         session,
         user,
-        name=record.name,
-        email=record.email,
-        email_verified=record.email_verified,
         slack_id=record.slack_id,
         roles=record.roles,
     )
@@ -116,7 +103,8 @@ def authorize(session: Session, weave_client: WeaveClient, user: User, *, fresh:
 
     Raises `NotAMember` if Weave doesn't know the user (or won't let them use Krater), lists them as
     inactive, or no longer gives them `ganymede:member`. `WeaveUnavailableError` propagates: callers
-    fail closed. Refreshes the user's cached fields from the record (flushed, not committed).
+    fail closed. Refreshes the user's cached roles from the record (flushed, not committed). The actor
+    carries the record's name and email for this request only.
     """
     record = weave_client.get_user(user.weave_sub, fresh=fresh)
     if record is None or not record.active:
@@ -124,7 +112,7 @@ def authorize(session: Session, weave_client: WeaveClient, user: User, *, fresh:
     refresh_user_from_weave(session, user, record)
     if GROUP_MEMBER not in record.roles:
         raise NotAMember("Weave no longer lists you as an active Ganymede member")
-    return Actor(user=user, groups=record.roles, slack_member=record.slack_member)
+    return Actor(user=user, groups=record.roles, slack_member=record.slack_member, name=record.name, email=record.email)
 
 
 def cached_actor(user: User) -> Actor:

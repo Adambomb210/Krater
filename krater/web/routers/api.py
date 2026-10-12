@@ -189,8 +189,8 @@ def cli_config():
 @router.get("/me")
 def me(actor: Me):
     return {
-        "name": actor.user.display_name,
-        "email": actor.user.email,
+        "name": actor.display_name,
+        "email": actor.email,
         "member": actor.is_member,
         "reviewer": actor.is_reviewer,
         "admin": actor.is_admin,

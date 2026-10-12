@@ -25,6 +25,15 @@ class Actor:
     # Weave's `slack_member` from the same lookup; `None` when Weave didn't say (or for an actor not
     # built from a fresh lookup). The Slack membership gate prefers it over asking Slack.
     slack_member: bool | None = None
+    # The name and email Weave gave in the same lookup. Kept only for this request: Krater stores no
+    # member data (docs/weave-integration.md). Empty for an actor not built from a lookup.
+    name: str = ""
+    email: str | None = None
+
+    @property
+    def display_name(self) -> str:
+        """The actor's name, else their Patchwork ID."""
+        return self.name or self.user.weave_sub
 
     def in_group(self, group: str) -> bool:
         return group in self.groups

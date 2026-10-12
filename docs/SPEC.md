@@ -89,15 +89,13 @@ join Slack as single-channel guests until they accept the code of conduct, and S
 channel.
 
 - On draft → submit, Krater uses Weave's `slack_member` from the fresh directory record when Weave gives one.
-- When Weave doesn't say, Krater asks Slack. It finds the user's Slack account: the stored `users.slack_user_id` (from
-  Weave's `slack_id`), else Slack `users.lookupByEmail` with the user's email, **only if Weave said it's verified** (the
-  id found is cached). Then `users.info`: the account must exist and not be deleted, `is_restricted` or
-  `is_ultra_restricted`. No Slack account means the check fails.
+- When Weave doesn't say, Krater asks Slack about the user's `users.slack_user_id` (Weave's `slack_id`) with
+  `users.info`: the account must exist and not be deleted, `is_restricted` or `is_ultra_restricted`. No Slack id
+  from Weave means the check fails. Krater keeps no emails, so it never looks Slack accounts up by email.
 - If Slack can't be reached, the submission fails with an error rather than guessing either way.
 - If the check fails, the user can still save drafts but sees "Join the Patchwork Labs Slack and accept the code of
   conduct to submit", with a link to Weave.
-- Channel invites resolve the submitter and credited builders the same way (stored id, else lookup by verified email,
-  cached). Reviewers come from Weave's directory (`?role=reviewer`), with Weave's `slack_id`. Krater doesn't pre-filter
+- Channel invites use the team's stored Slack ids (from Weave). Reviewers come from Weave's directory (`?role=reviewer`), with Weave's `slack_id`. Krater doesn't pre-filter
   guests: invites use Slack's `force` flag, and anyone Slack refuses (a guest, a deactivated or stale id) is skipped and
   logged, so one person's Slack account never stops the channel, the rest of the team's invites or the review message.
 
@@ -105,10 +103,10 @@ channel.
 
 Postgres. All money is stored as **integer cents** (`*_cents`). Names are suggestions; refine during implementation.
 
-**User** (a cache of the Weave identity; holds no role data of its own)
-- `id`, `weave_sub` (Weave's `p_id`, e.g. `PWL5A1B2C3D4`; unique), `display_name`, `email`, `email_verified`,
-  `slack_user_id` (nullable, unique; Weave's `slack_id`, else found by email), `roles_cached` (the Krater role names
-  Weave reported last; display only), `last_login_at`
+**User** (Krater's handle on a Weave account; no names, emails or role data of its own, see
+[weave-integration.md](weave-integration.md#member-data))
+- `id`, `weave_sub` (Weave's `p_id`, e.g. `PWL5A1B2C3D4`; unique), `slack_user_id` (nullable, unique; Weave's
+  `slack_id`), `roles_cached` (the Krater role names Weave reported last; display only), `last_login_at`
 
 **Project**
 - `id`, `title`, `submitter_id`, `status`, `current_revision_id`, `approved_revision_id`, `repo_url`,
@@ -200,9 +198,8 @@ archived when the project ends up `completed` or `withdrawn`.
 mirrored into Krater in v1; the project page links to the channel instead.
 
 **App requirements**
-- Bot scopes: `groups:write`, `groups:write.invites`, `chat:write`, `users:read`, `users:read.email` (when Weave has no
-  `slack_id` or `slack_member` for someone, the membership gate and channel invites find their Slack account by
-  verified email).
+- Bot scopes: `groups:write`, `groups:write.invites`, `chat:write`, `users:read` (the membership gate, when Weave has
+  no `slack_member` for someone).
 - An HTTPS interactivity endpoint on the portal, reachable by Slack.
 - Slack signature verification (`X-Slack-Signature` with the signing secret, and a check on how old the timestamp is).
   Weave's `SlackSignatureVerification` concern is a working reference.

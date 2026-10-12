@@ -12,10 +12,11 @@ from sqlalchemy.orm import Session
 
 from krater.db import get_session
 from krater.models import Project, ProjectRevision, ProjectStatus, User
-from krater.services import budget
+from krater.services import budget, people
 from krater.services import projects as project_service
 from krater.services.errors import NotFound
 from krater.storage import ObjectStore, get_object_store
+from krater.weave import WeaveClient, get_weave_client
 from krater.web.templates import templates
 
 router = APIRouter()
@@ -52,7 +53,12 @@ def gallery_index(request: Request, db_session: Annotated[Session, Depends(get_s
 
 
 @router.get("/gallery/{project_id}")
-def gallery_detail(request: Request, project_id: uuid.UUID, db_session: Annotated[Session, Depends(get_session)]):
+def gallery_detail(
+    request: Request,
+    project_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    weave_client: Annotated[WeaveClient, Depends(get_weave_client)],
+):
     project = project_service.get_project(db_session, project_id=project_id)
     if project.status is not ProjectStatus.COMPLETED:
         raise NotFound(f"No completed project with id {project_id}.")
@@ -60,9 +66,10 @@ def gallery_detail(request: Request, project_id: uuid.UUID, db_session: Annotate
     # A completed project's `current_revision` is its approved completion revision: approving a
     # completion moves the project straight to `completed` without opening another draft.
     revision = project.current_revision
-    builders = []
+    builders: list[str] = []
     if revision is not None and revision.credited_builder_ids:
-        builders = list(db_session.scalars(sa.select(User).where(User.id.in_(revision.credited_builder_ids))))
+        users = db_session.scalars(sa.select(User).where(User.id.in_(revision.credited_builder_ids)))
+        builders = list(people.names(weave_client, users).values())
 
     spend_cents = budget.latest_spend_cents(db_session, project)
     screenshot_urls = _screenshot_urls(get_object_store(), revision)

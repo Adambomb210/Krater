@@ -1,5 +1,8 @@
-"""User: a cache of the Weave identity. Roles live in Weave; `roles_cached` is for display only (see
-CLAUDE.md)."""
+"""User: Krater's handle on a Weave account, keyed by `weave_sub` (the Patchwork ID).
+
+Weave stores member data. Krater keeps no name or email here: it reads them from Weave when it needs
+them (`krater.services.people`). Roles live in Weave too; `roles_cached` is for display only (see
+CLAUDE.md and docs/weave-integration.md)."""
 
 from __future__ import annotations
 
@@ -24,12 +27,7 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "users"
 
     weave_sub: Mapped[str] = mapped_column(sa.String(64), unique=True, nullable=False)
-    display_name: Mapped[str] = mapped_column(sa.String(255), nullable=False)
-    email: Mapped[str] = mapped_column(sa.String(255), nullable=False)
-    # Whether Weave said `email` was verified, as of the latest sign-in or directory lookup. The Slack
-    # email lookup only trusts a verified email.
-    email_verified: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False, server_default=sa.false())
-    # Weave's `slack_id`, else found by a Slack email lookup. Only maps a Slack click to a Krater user;
+    # Weave's `slack_id`, as of the latest sign-in or directory lookup. Only maps a Slack click to a Krater user;
     # the click is then re-checked against Weave by `weave_sub`. Unique so a click maps to one user.
     slack_user_id: Mapped[str | None] = mapped_column(sa.String(64), unique=True, nullable=True)
     # Krater role names (`ganymede:*`) Weave last reported, at sign-in or a directory lookup. Display and
@@ -43,4 +41,4 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     audit_events: Mapped[list[AuditEvent]] = relationship(back_populates="actor")
 
     def __repr__(self) -> str:
-        return f"<User {self.weave_sub} {self.display_name!r}>"
+        return f"<User {self.weave_sub}>"

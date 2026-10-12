@@ -25,12 +25,6 @@ this list covers what comes after, plus loose ends from building v1.
 - **Decide what happens exactly at the ceiling** (patchworklabsorg/krater#2). Today warnings go out at 80% and teardown happens at 100% with no
   grace period, which can kill a long training run just past the limit. Consider a small admin-configurable grace margin.
 
-## Roles and accounts
-
-- **Cache Slack email-lookup misses.** Krater calls `users.lookupByEmail` for anyone without a stored Slack id each
-  time it builds a channel's invite list (misses aren't cached). Fine at Ganymede's size; cache misses for a while if
-  Slack rate limits show up.
-
 ## Weave follow-ups
 
 - **[weave#118](https://github.com/patchworklabsorg/weave/issues/118): require joining Slack as part of membership.**

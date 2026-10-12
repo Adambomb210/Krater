@@ -37,7 +37,7 @@ _REVIEWER = frozenset({"ganymede:member", "ganymede:reviewer"})
 
 def _make_user(session: Session, tag: str) -> User:
     unique = uuid.uuid4().hex
-    user = User(weave_sub=f"RACE-{tag}-{unique}", display_name=f"Race {tag}", email=f"race-{tag}-{unique}@example.com")
+    user = User(weave_sub=f"RACE-{tag}-{unique}")
     session.add(user)
     session.flush()
     return user

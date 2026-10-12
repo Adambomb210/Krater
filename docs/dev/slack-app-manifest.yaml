@@ -15,7 +15,6 @@ oauth_config:
       - groups:write
       - groups:write.invites
       - users:read
-      - users:read.email
 settings:
   interactivity:
     is_enabled: true

@@ -31,8 +31,9 @@ def test_upsert_creates_then_updates_the_same_user(db_session: Session) -> None:
     )
 
     assert updated.id == created.id
-    assert updated.display_name == "Renamed"
-    assert updated.email == "new@example.com"
+    # Krater keeps no name or email (patchworklabsorg/krater#7).
+    assert not hasattr(updated, "display_name")
+    assert not hasattr(updated, "email")
     assert updated.roles_cached == [GROUP_ADMIN, GROUP_MEMBER]
     # Weave sent no slack_id the second time: the stored one stays.
     assert updated.slack_user_id == "U_ONE"
@@ -94,8 +95,9 @@ def test_authorize_builds_an_actor_from_the_directory(db_session: Session, weave
     assert actor.slack_member is True
     # The cached copies follow Weave.
     assert signed_in.roles_cached == [GROUP_MEMBER]
-    assert signed_in.display_name == "New Name"
     assert signed_in.slack_user_id == "U_DIR"
+    # The name and email ride on the actor for this request only.
+    assert (actor.name, actor.email) == ("New Name", "signin@example.com")
 
 
 def test_authorize_uses_the_group_fallback_when_roles_are_absent(

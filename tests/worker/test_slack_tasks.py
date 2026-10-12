@@ -93,16 +93,21 @@ def test_slack_post_admin_override_calls_through() -> None:
     with (
         patch("krater.worker.app.slack_notify.post_admin_override") as mock_notify,
         patch("krater.worker.app.get_slack_client"),
+        patch("krater.worker.app.get_weave_client") as mock_weave,
         patch("krater.worker.app.get_sessionmaker") as mock_get_sessionmaker,
     ):
         fake_session = mock_get_sessionmaker.return_value.return_value
+        mock_weave.return_value.get_user.return_value.name = "Ana"
 
         slack_post_admin_override.func(
-            project_id="00000000-0000-0000-0000-000000000001", action="admin_approve", actor_name="Ana", reason="why"
+            project_id="00000000-0000-0000-0000-000000000001", action="admin_approve", actor_sub="PWL1", reason="why"
         )
 
         mock_notify.assert_called_once()
         assert mock_notify.call_args.kwargs["action"] == "admin_approve"
+        # The job carries the Patchwork ID; the name comes from Weave when the notice is posted.
+        mock_weave.return_value.get_user.assert_called_once_with("PWL1")
+        assert mock_notify.call_args.kwargs["actor_name"] == "Ana"
         fake_session.commit.assert_called_once()
 
 

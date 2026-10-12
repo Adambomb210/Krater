@@ -178,17 +178,6 @@ class LiveSlackClient:
 
     # -- Directory -------------------------------------------------------------------------------------
 
-    def lookup_user_by_email(self, email: str) -> str | None:
-        try:
-            response = self._client.users_lookupByEmail(email=email)
-        except SlackApiError as exc:
-            if _slack_error_code(exc) == "users_not_found":
-                return None
-            raise _request_failed("users.lookupByEmail", exc) from exc
-        except SlackClientError as exc:
-            raise _unavailable("users.lookupByEmail", exc) from exc
-        return response["user"]["id"]
-
     def get_user_info(self, slack_user_id: str) -> SlackUserInfo | None:
         try:
             response = self._client.users_info(user=slack_user_id)
@@ -199,13 +188,11 @@ class LiveSlackClient:
         except SlackClientError as exc:
             raise _unavailable("users.info", exc) from exc
         user = response["user"]
-        email = (user.get("profile") or {}).get("email")
         return SlackUserInfo(
             slack_id=user["id"],
             deleted=bool(user.get("deleted", False)),
             is_restricted=bool(user.get("is_restricted", False)),
             is_ultra_restricted=bool(user.get("is_ultra_restricted", False)),
-            email=email if isinstance(email, str) and email else None,
         )
 
 

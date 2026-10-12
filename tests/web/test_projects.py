@@ -209,12 +209,12 @@ def test_edit_rejects_an_unknown_credited_builder_email(client: TestClient, logi
             "budget_requested": "100",
             "demo_url": "",
             "tags": "",
-            "credited_builder_emails": "nobody-like-this@example.com",
+            "credited_builders": "nobody-like-this@example.com",
         },
     )
 
     assert response.status_code == 422
-    assert "Unknown email" in response.text
+    assert "Not a Ganymede member" in response.text
 
 
 # --------------------------------------------------------------------------------------------------

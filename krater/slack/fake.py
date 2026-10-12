@@ -9,7 +9,6 @@ users (whose `slack_id` stub sign-in stores). The one exception is the fixture's
 
 from __future__ import annotations
 
-import dataclasses
 import itertools
 
 from krater.slack.types import SlackUserInfo
@@ -30,7 +29,6 @@ class FakeSlackClient:
         self._ts_seq = itertools.count(1)
         self.opened_views: list[dict] = []
         self.ephemeral_messages: list[tuple[str, str]] = []  # (response_url, text)
-        self._emails_to_slack_id: dict[str, str] = {}
         # slack_id -> SlackUserInfo override; any id not listed here answers as a full active member.
         self._user_info: dict[str, SlackUserInfo] = {
             DEV_GUEST_SLACK_ID: SlackUserInfo(
@@ -39,7 +37,6 @@ class FakeSlackClient:
         }
         # ids that should answer `None` from `get_user_info`, as for an unknown/deleted-from-Slack id.
         self._missing_user_ids: set[str] = set()
-        self.email_lookups: list[str] = []
 
     # -- SlackClient protocol ------------------------------------------------------------------------
 
@@ -73,35 +70,15 @@ class FakeSlackClient:
     def post_ephemeral_via_response_url(self, response_url: str, text: str) -> None:
         self.ephemeral_messages.append((response_url, text))
 
-    def lookup_user_by_email(self, email: str) -> str | None:
-        self.email_lookups.append(email)
-        return self._emails_to_slack_id.get(email.lower())
-
     def get_user_info(self, slack_user_id: str) -> SlackUserInfo | None:
         if slack_user_id in self._missing_user_ids:
             return None
-        email = self._email_for(slack_user_id)
         if slack_user_id in self._user_info:
-            info = self._user_info[slack_user_id]
-            return info if info.email is not None or email is None else dataclasses.replace(info, email=email)
+            return self._user_info[slack_user_id]
         # Unknown ids answer as a full, active member -- see module docstring.
-        return SlackUserInfo(
-            slack_id=slack_user_id, deleted=False, is_restricted=False, is_ultra_restricted=False, email=email
-        )
-
-    def _email_for(self, slack_user_id: str) -> str | None:
-        return next((email for email, sid in self._emails_to_slack_id.items() if sid == slack_user_id), None)
+        return SlackUserInfo(slack_id=slack_user_id, deleted=False, is_restricted=False, is_ultra_restricted=False)
 
     # -- Test helpers ----------------------------------------------------------------------------------
-
-    def register_email(self, email: str, slack_user_id: str) -> None:
-        """Make `lookup_user_by_email(email)` resolve to `slack_user_id`, and `get_user_info` report
-        that email for it."""
-        self._emails_to_slack_id[email.lower()] = slack_user_id
-
-    def unregister_email(self, email: str) -> None:
-        """Undo `register_email`."""
-        self._emails_to_slack_id.pop(email.lower(), None)
 
     def set_user_info(
         self,
@@ -110,7 +87,6 @@ class FakeSlackClient:
         deleted: bool = False,
         is_restricted: bool = False,
         is_ultra_restricted: bool = False,
-        email: str | None = None,
     ) -> None:
         """Override what `get_user_info(slack_user_id)` answers, e.g. to simulate a guest or a
         deactivated account. `unset_user_info` (or a missing id) restores the "full member" default."""
@@ -119,7 +95,6 @@ class FakeSlackClient:
             deleted=deleted,
             is_restricted=is_restricted,
             is_ultra_restricted=is_ultra_restricted,
-            email=email,
         )
 
     def unset_user_info(self, slack_user_id: str) -> None:

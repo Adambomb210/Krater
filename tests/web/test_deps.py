@@ -42,9 +42,6 @@ def _make_request(session_data: dict) -> object:
 def _make_user(db_session: Session, *, roles_cached: list[str] | None = None) -> User:
     user = User(
         weave_sub=SUB,
-        display_name="Dep Test",
-        email="dep@example.com",
-        email_verified=True,
         roles_cached=roles_cached or [],
     )
     db_session.add(user)

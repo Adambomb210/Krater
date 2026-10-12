@@ -106,25 +106,6 @@ def test_a_member_with_no_slack_account_cannot_submit(
     assert project.status is ProjectStatus.DRAFT
 
 
-def test_a_member_found_by_email_can_submit_and_gets_linked(
-    client: TestClient, login_as, create_project, db_session: Session
-) -> None:
-    member = login_as(OTHER_MEMBER_SUB)
-    slack_client = get_slack_client()
-    slack_client.register_email(member.email, "U0009BYMAIL")
-    try:
-        project = create_project(member, title="T", write_up="W", budget_requested_cents=100)
-
-        response = _post_submit(client, project.id)
-    finally:
-        slack_client.unregister_email(member.email)
-
-    assert response.status_code == 303
-    db_session.refresh(project)
-    assert project.status is ProjectStatus.PENDING_REVIEW
-    assert member.slack_user_id == "U0009BYMAIL"
-
-
 def test_a_slack_guest_cannot_submit_a_completion(
     client: TestClient, login_as, approved_project, db_session: Session
 ) -> None:
