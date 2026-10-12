@@ -3,6 +3,8 @@ grant nothing until accepted, but an invitee already can't review the project.""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy.orm import Session
 
@@ -10,6 +12,10 @@ from krater.models import (
     ApprovalPolicy,
     ApprovalStage,
     AuditEvent,
+    ComputeEscalation,
+    ComputeJob,
+    ComputeJobKind,
+    ComputeJobState,
     ProjectStatus,
     ReviewDecision,
     ReviewSource,
@@ -192,3 +198,35 @@ def test_an_approval_from_a_reviewer_who_later_joins_the_team_stops_counting(
 
     assert revision.outcome is RevisionOutcome.PENDING
     assert "1 more approval" in approval_policy.explain(db_session, revision)
+
+
+def test_nobody_leaves_or_is_removed_with_a_job_still_running(db_session: Session, member: Actor, make_actor) -> None:
+    teammate = make_actor(groups=frozenset({GROUP_MEMBER}))
+    project = _project(db_session, member)
+    row = add_to_team(db_session, project, teammate)
+    job = ComputeJob(
+        project_id=project.id,
+        submitter_id=teammate.user.id,
+        kind=ComputeJobKind.BOX,
+        name="box",
+        image="ubuntu",
+        gpu_names=["RTX4090"],
+        disk_gb=32,
+        target_microusd=100_000,
+        max_microusd=200_000,
+        max_wait_minutes=60,
+        on_max_wait=ComputeEscalation.KEEP_WAITING,
+        max_runtime_minutes=60,
+        state=ComputeJobState.STOPPED,
+        queued_at=datetime.now(UTC),
+    )
+    db_session.add(job)
+    db_session.flush()
+
+    for actor in (teammate, member):
+        with pytest.raises(InvalidState, match="hasn't finished"):
+            teams.remove(db_session, actor, project=project, member_id=row.id)
+
+    job.state = ComputeJobState.CANCELLED
+    teams.remove(db_session, member, project=project, member_id=row.id)
+    assert project.members == []

@@ -174,7 +174,9 @@ The proposal form (`projects/_application.html`) asks, in three parts:
 
 Only the proof of concept is approved at first: its amount is `budget_requested_cents`. The finished product's amount
 is information for reviewers and never enters the budget ledger; the team asks for more with an amendment, which
-reuses the form with the proof-of-concept part asking for the new total. Drafts can be saved incomplete or over the
+reuses the form. There the first estimate is the extra compute the next stage needs (it starts as the finished
+product's estimate), and the amount is the project's new total: the budget approved so far plus that estimate,
+which the team can change, lower included. Drafts can be saved incomplete or over the
 word limits; submitting needs every answer and both estimates (`krater.services.projects.application_errors`). An
 amendment or a reopened draft starts with every answer of the revision it follows.
 
@@ -245,7 +247,9 @@ invite a Ganymede member by Patchwork ID or email, at any time until the project
 finds them in Weave's directory and stores only their Patchwork ID. The invitation grants nothing until they accept
 it from their Krater home page or the project page; then they can do everything the lead can except withdraw the
 project or remove others: edit and submit drafts, start amendments and the completion, see compute output and files,
-manage project secrets, and run jobs and boxes. A member can leave; the lead or an admin can remove anyone.
+manage project secrets, and run jobs and boxes. A member can leave; the lead or an admin can remove anyone, but not
+while that person has a job or box on the project that hasn't finished (it would keep running on the project's
+budget and secrets).
 
 Being invited already counts as a conflict of interest: an invitee can't review the project, and an approval from a
 reviewer who later joins (or is invited to) the team stops counting toward the approval policy. Invitations, joins,

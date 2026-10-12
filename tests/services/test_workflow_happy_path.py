@@ -66,7 +66,8 @@ def test_happy_path_proposal_amendment_and_completion(db_session: Session, membe
     # --- Amend: decrease the budget -----------------------------------------------------------
     amendment = projects.start_amendment(db_session, member, project=project)
     assert amendment.kind is RevisionKind.AMENDMENT
-    assert amendment.budget_requested_cents == 100_000  # copied from the approved revision
+    # Starts as the approved budget plus the finished product's estimate ($100 in the test application).
+    assert amendment.budget_requested_cents == 110_000
 
     projects.update_draft(db_session, member, project=project, budget_requested_cents=60_000)
     project = projects.submit(db_session, member, project=project)

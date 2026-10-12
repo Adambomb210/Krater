@@ -219,7 +219,9 @@ def test_an_amendment_decrease_sends_budget_released(db_session: Session, member
 def test_an_unchanged_amendment_budget_is_skipped(db_session: Session, member: Actor, reviewer: Actor) -> None:
     project = _approved(db_session, member, reviewer, budget_cents=100_000)
     projects.start_amendment(db_session, member, project=project)
-    projects.update_draft(db_session, member, project=project, write_up="A bigger rover.")
+    projects.update_draft(
+        db_session, member, project=project, write_up="A bigger rover.", budget_requested_cents=100_000
+    )
     projects.submit(db_session, member, project=project)
     _approve(db_session, reviewer, project)
 

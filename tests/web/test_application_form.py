@@ -11,8 +11,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from krater.models import GpuPrice, Project, ProjectMember, ProjectRevision, ProjectStatus
+from krater.services import budget
 from krater.services import projects as project_service
-from tests.conftest import MEMBER_SUB, OTHER_MEMBER_SUB, get_csrf_token
+from tests.conftest import MEMBER_SUB, OTHER_MEMBER_SUB, REVIEWER_SUB, get_csrf_token
+from tests.factories import estimate
 
 ANSWERS = {
     "title": "Cave Rover",
@@ -214,7 +216,7 @@ def test_a_saved_application_reloads_into_the_form_and_submits(
     edit = client.get(f"{project_url}/edit").text
     assert 'value="A rover that maps caves."' in edit
     assert '<option value="A100:1" selected>' in edit
-    assert 'value="0.90"' in edit
+    assert 'value="0.9"' in edit
 
     detail = client.get(project_url)
     submitted = client.post(
@@ -244,3 +246,72 @@ def test_submitting_an_unfinished_application_marks_whats_missing(client: TestCl
         "Choose the card and hours the finished product needs (a rough guess is fine).",
     ):
         assert message in response.text
+
+
+def test_a_price_can_be_a_fraction_of_a_cent(client: TestClient, login_as, db_session: Session) -> None:
+    login_as(MEMBER_SUB)
+    _seed_price(db_session)
+
+    response = _create(client, poc_rate="0.0587")
+
+    estimate = _revision(db_session, response).budget_estimate
+    # $0.0587 x 40h = $2.348
+    assert (estimate["rate_microusd"], estimate["total_cents"]) == (58_700, 235)
+    assert "$0.0587/hr" in client.get(response.headers["location"]).text
+    assert 'value="0.0587"' in client.get(f"{response.headers['location']}/edit").text
+
+    refused = _create(client, poc_rate="0.05875")
+    assert refused.status_code == 422 and "at most four decimal places" in refused.text
+
+
+def test_an_amendment_adds_its_estimate_to_the_approved_budget(
+    client: TestClient, login_as, db_session: Session, approved_project
+) -> None:
+    member = login_as(MEMBER_SUB)
+    reviewer = login_as(REVIEWER_SUB)
+    _seed_price(db_session, median_cents=100)
+    # Proof of concept approved at $40; the finished product estimated at $400.
+    project = approved_project(
+        member,
+        reviewer,
+        budget_requested_cents=4_000,
+        budget_estimate=estimate(4_000, name="A100", hours=40.0),
+        full_budget_cents=40_000,
+        full_budget_estimate=estimate(40_000, name="A100", hours=400.0),
+    )
+    login_as(MEMBER_SUB)
+    page = client.get(f"/projects/{project.id}")
+    client.post(f"/projects/{project.id}/amend", data={"csrf_token": get_csrf_token(page.text)})
+
+    # The amendment starts from the finished product's estimate, on top of the $40 approved.
+    edit = client.get(f"/projects/{project.id}/edit").text
+    assert re.search(r'name="poc_budget"[^>]*value="440.00"', edit)
+    assert 'data-base-cents="4000"' in edit
+
+    # Estimating 100 more hours at $1/h fills in the new total: $40 + $100.
+    posted = {
+        "csrf_token": get_csrf_token(edit),
+        **ANSWERS,
+        "poc_hours": "100",
+        "poc_budget": "999",
+        "form_action": "estimate_poc",
+    }
+    response = client.post(f"/projects/{project.id}/edit", data=posted)
+    assert re.search(r'name="poc_budget"[^>]*value="140.00"', response.text)
+
+    saved = client.post(
+        f"/projects/{project.id}/edit",
+        data={**posted, "poc_budget": "140.00", "form_action": "save"},
+        follow_redirects=False,
+    )
+    assert saved.status_code == 303
+    detail = client.get(f"/projects/{project.id}").text
+    assert "adds $100.00 to the $40.00 approved now" in detail
+    assert "differs a lot" not in detail
+
+    client.post(f"/projects/{project.id}/submit", data={"csrf_token": get_csrf_token(detail)})
+    login_as(REVIEWER_SUB)
+    page = client.get(f"/projects/{project.id}")
+    client.post(f"/projects/{project.id}/review", data={"csrf_token": get_csrf_token(page.text), "decision": "approve"})
+    db_session.expire_all()
+    assert budget.ceiling_cents(db_session, project_service.get_project(db_session, project_id=project.id)) == 14_000

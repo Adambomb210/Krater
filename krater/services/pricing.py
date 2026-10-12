@@ -218,12 +218,16 @@ class BudgetEstimate:
     spot_unavailable: bool = False
     # With `SOURCE_MEMBER`: what Krater's own prices say per GPU-hour, for reviewers to compare; `None` if it has none.
     market_rate_cents: int | None = None
+    # The team's own price per GPU-hour in micro-dollars, exactly as typed: bids are often a fraction of a cent
+    # ($0.0587/h). `rate_cents` is that rounded, for display; the totals use this. `None` for Krater's rates.
+    rate_microusd: int | None = None
 
     def as_dict(self) -> dict:
         return {
             "rate_source": self.rate_source,
             "spot_unavailable": self.spot_unavailable,
             "market_rate_cents": self.market_rate_cents,
+            "rate_microusd": self.rate_microusd,
             "accelerator_name": self.accelerator_name,
             "accelerator_count": self.accelerator_count,
             "hours": self.hours,
@@ -317,7 +321,7 @@ def estimate_cost(
     hours: float,
     basis: str,
     margin_percent: int,
-    rate_override_cents: int | None = None,
+    rate_override_microusd: int | None = None,
     now: datetime | None = None,
 ) -> BudgetEstimate:
     """Recompute a budget estimate from Krater's own Vast samples, or else its current `GpuPrice` (catalog) row.
@@ -326,8 +330,9 @@ def estimate_cost(
     interruptible prices, so a GPU Krater hasn't sampled yet is priced on demand instead, and the estimate says so
     (`spot_unavailable`): an upper bound, never a refusal.
 
-    `rate_override_cents` is the team's own price per GPU-hour. It replaces Krater's rate (`SOURCE_MEMBER`), works
-    for a card Krater has no price for, and keeps Krater's rate beside it (`market_rate_cents`) for reviewers.
+    `rate_override_microusd` is the team's own price per GPU-hour, in micro-dollars. It replaces Krater's rate
+    (`SOURCE_MEMBER`), works for a card Krater has no price for, and keeps Krater's rate beside it
+    (`market_rate_cents`) for reviewers.
 
     Raises `ValidationFailed` (field name -> message, matching every other form-validating service
     call) for bad input or an accelerator/basis Krater has no current pricing for -- callers show these
@@ -344,7 +349,7 @@ def estimate_cost(
         errors["estimator_basis"] = "Choose a pricing basis."
     if margin_percent < 0:
         errors["estimator_margin_percent"] = "Safety margin can't be negative."
-    if rate_override_cents is not None and rate_override_cents <= 0:
+    if rate_override_microusd is not None and rate_override_microusd <= 0:
         errors["estimator_rate"] = "Enter an hourly price above zero, or leave it blank."
     if errors:
         raise ValidationFailed(errors)
@@ -353,8 +358,15 @@ def estimate_cost(
     market = _market_rate(
         session, accelerator_name=accelerator_name, accelerator_count=accelerator_count, basis=basis, now=now
     )
-    if rate_override_cents is not None:
-        rate_cents, refreshed_at, rate_source, spot_unavailable = rate_override_cents, now, SOURCE_MEMBER, False
+    rate_microusd = None
+    if rate_override_microusd is not None:
+        rate_microusd = rate_override_microusd
+        rate_cents, refreshed_at, rate_source, spot_unavailable = (
+            round(rate_microusd / 10_000),
+            now,
+            SOURCE_MEMBER,
+            False,
+        )
         market_rate_cents = market.rate_cents if market is not None and market.basis == basis else None
     elif market is None:
         raise ValidationFailed(
@@ -364,7 +376,10 @@ def estimate_cost(
         rate_cents, refreshed_at, rate_source = market.rate_cents, market.refreshed_at, market.source
         basis, spot_unavailable, market_rate_cents = market.basis, market.spot_unavailable, None
 
-    subtotal_cents = round(rate_cents * accelerator_count * hours)
+    if rate_microusd is not None:
+        subtotal_cents = round(rate_microusd * accelerator_count * hours / 10_000)
+    else:
+        subtotal_cents = round(rate_cents * accelerator_count * hours)
     margin_cents = round(subtotal_cents * margin_percent / 100)
 
     return BudgetEstimate(
@@ -381,6 +396,7 @@ def estimate_cost(
         rate_source=rate_source,
         spot_unavailable=spot_unavailable,
         market_rate_cents=market_rate_cents,
+        rate_microusd=rate_microusd,
     )
 
 

@@ -145,8 +145,10 @@ def _form_context(
     errors: dict[str, str] | None = None,
     summaries: dict[str, str | None] | None = None,
     team: list[dict] | None = None,
+    base_cents: int = 0,
 ) -> dict:
     return {
+        "base_cents": base_cents,
         "values": values,
         "errors": errors or {},
         "summaries": summaries or {"poc": None, "full": None},
@@ -307,8 +309,14 @@ def _edit_context(
             errors=errors,
             summaries=summaries or application_form.summaries_from_draft(draft),
             team=_team_rows(weave_client, db_session, project),
+            base_cents=_amendment_base(db_session, project, draft),
         ),
     }
+
+
+def _amendment_base(session: Session, project: Project, draft: ProjectRevision) -> int:
+    """What an amendment's estimate adds to: the budget approved so far. Zero for a proposal."""
+    return budget_service.ceiling_cents(session, project) if draft.kind is RevisionKind.AMENDMENT else 0
 
 
 def _editable(request: Request, db_session: Session, actor: Actor, project_id: uuid.UUID):
@@ -375,7 +383,9 @@ async def update_draft(
         return RedirectResponse(f"/projects/{project_id}/edit", status_code=303)
 
     fill = _fill_from_action(str(form.get("form_action", "save")))
-    posted = application_form.parse(db_session, form, get_settings(), fill=fill)
+    posted = application_form.parse(
+        db_session, form, get_settings(), fill=fill, base_cents=_amendment_base(db_session, project, draft)
+    )
 
     def _again(status_code: int):
         context = _edit_context(
@@ -472,18 +482,27 @@ def _build_detail_context(
 
     screenshots = _screenshot_entries(get_object_store(), current) if current is not None else []
 
-    # For each revision that used the budget estimator (`budget_estimate` set), whether its actually
-    # -requested budget has drifted far enough from that stored estimate to flag for reviewers -- e.g.
-    # the submitter estimated one thing, then hand-edited the requested amount well past it.
+    # For each revision with an estimate, whether the amount it asks for has drifted far enough from that estimate to
+    # flag for reviewers -- e.g. the team estimated one thing, then typed a requested amount well past it. An
+    # amendment's estimate is the extra compute, so it's compared with what the amendment adds to the ceiling; that's
+    # only known while it's undecided, so a decided amendment isn't flagged.
     threshold_percent = get_settings().budget_estimate_flag_threshold_percent
     estimate_mismatch_by_revision: dict[uuid.UUID, bool] = {}
+    amendment_adds_cents = None
+    if current is not None and current.kind is RevisionKind.AMENDMENT and current.outcome is RevisionOutcome.PENDING:
+        amendment_adds_cents = current.budget_requested_cents - summary.ceiling_cents
     for revision in revisions:
         estimate = revision.budget_estimate
-        if not estimate:
+        if not estimate or revision.kind is RevisionKind.COMPLETION:
             continue
+        asked_cents = revision.budget_requested_cents
+        if revision.kind is RevisionKind.AMENDMENT:
+            if revision is not current or amendment_adds_cents is None:
+                continue
+            asked_cents = amendment_adds_cents
         total_cents = estimate.get("total_cents", 0)
         if total_cents > 0:
-            diff_percent = abs(revision.budget_requested_cents - total_cents) / total_cents * 100
+            diff_percent = abs(asked_cents - total_cents) / total_cents * 100
             estimate_mismatch_by_revision[revision.id] = diff_percent > threshold_percent
 
     return {
@@ -493,6 +512,7 @@ def _build_detail_context(
         "screenshots": screenshots,
         "revisions": revisions,
         "estimate_mismatch_by_revision": estimate_mismatch_by_revision,
+        "amendment_adds_cents": amendment_adds_cents,
         "names_by_id": names_by_id,
         "is_lead": is_lead,
         "is_team": is_team,

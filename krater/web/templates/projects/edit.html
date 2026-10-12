@@ -45,7 +45,7 @@
         {% if errors.write_up %}<p class="field-error">{{ errors.write_up }}</p>{% endif %}
       </div>
     {% else %}
-      {{ application.application_fields(values, errors, summaries, gpu_options, applicant, word_limits, summary_max, other_gpu, kind=draft.kind.value, team=team) }}
+      {{ application.application_fields(values, errors, summaries, gpu_options, applicant, word_limits, summary_max, other_gpu, kind=draft.kind.value, team=team, base_cents=base_cents) }}
     {% endif %}
 
     {% if draft.kind.value == "completion" %}
