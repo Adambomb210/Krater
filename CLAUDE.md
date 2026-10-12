@@ -6,7 +6,7 @@ Guidance for Claude Code (and humans) working in this repo.
 
 Krater is the Project Ganymede portal (Patchwork Labs): proposal review, compute budget allocation/enforcement, and a
 public gallery. **Read `docs/SPEC.md` before changing behavior.** Integration contracts live in
-`docs/weave-integration.md` (sign-in and roles), `docs/skypilot-integration.md` (budget enforcement) and
+`docs/weave-integration.md` (sign-in and roles) and
 `docs/quilt-integration.md` (submission and budget events to Quilt).
 
 ## Stack

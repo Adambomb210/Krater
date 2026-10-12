@@ -13,8 +13,8 @@ It's a **temporary** choice (see `docs/SPEC.md`'s "Open questions" #1) -- MinIO 
 its community edition stopped publishing images in 2025; a long-term provider is still to be picked.
 
 Credentials come from `KRATER_S3_ACCESS_KEY_ID`/`KRATER_S3_SECRET_ACCESS_KEY` (defaults: `krater` /
-`krater-dev-secret` for local dev), written into a JSON identity file at container start the same way
-the `skypilot` service generates its config -- so no secret is ever committed.
+`krater-dev-secret` for local dev), written into a JSON identity file at container start, so no secret is
+ever committed.
 
 The bucket and its CORS policy are created by `krater.storage.ensure_bucket`, which the one-shot
 `migrate` service runs right after `alembic upgrade head` (retrying until `storage` answers; skipped
@@ -25,7 +25,7 @@ Outside Compose, run it yourself with `uv run python -m krater.storage.ensure_bu
 
 | Var | Meaning |
 | --- | --- |
-| `KRATER_S3_MODE` | `fake` (default; in-memory, no network) or `live`. Like `KRATER_SKYPILOT_MODE`, the app refuses to start with `fake` when `KRATER_ENV=production`. |
+| `KRATER_S3_MODE` | `fake` (default; in-memory, no network) or `live`. Like `KRATER_PRICING_MODE`, the app refuses to start with `fake` when `KRATER_ENV=production`. |
 | `KRATER_S3_ENDPOINT_URL` | The **internal** endpoint Krater's own process uses for server-side calls (`head`, `delete`): `http://storage:8333` inside Docker Compose, `http://localhost:8333` running the portal directly against `docker compose up storage`. |
 | `KRATER_S3_PUBLIC_ENDPOINT_URL` | The endpoint a **browser** can reach, embedded in every presigned URL handed to it (direct uploads, thumbnails). In dev this is the same host as above (`http://localhost:8333`, since the browser and the portal are both on your machine); in a real deployment it has to be whatever public hostname/port the `storage` container is actually exposed on -- these two vars are *not* interchangeable, and a presigned URL built from the wrong one embeds a host the browser can't reach (see `krater/storage/live.py`'s docstring). |
 | `KRATER_S3_BUCKET` | Default `krater-screenshots`. |

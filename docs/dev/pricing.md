@@ -1,5 +1,9 @@
 # GPU pricing: source, refresh, and how the estimator uses it
 
+> Krater no longer runs SkyPilot (removed on 2026-10-11), but `/pricing` and the budget estimator
+> still read SkyPilot's public Vast catalog CSV, now through `krater/pricing/catalog.py`. The "why" below is kept as
+> written; its references to the SkyPilot integration and spike docs are history (see git).
+
 `/pricing` (public) and the proposal-form budget estimator both need "what does a GPU cost on Vast"
 figures. This documents where those figures come from, why, how they refresh, what happens when the
 source is unreachable, and how to run a refresh by hand.
@@ -81,7 +85,7 @@ a one-line check the next time `docs/skypilot-integration.md` is revisited.
 
 ## What Krater stores
 
-`krater.skypilot.SkyPilotClient.list_gpu_prices()` (both `LiveSkyPilotClient` and `FakeSkyPilotClient`)
+`krater.pricing.catalog` (`LiveCatalog`, or `FakeCatalog` with `KRATER_PRICING_MODE=fake`) `.list_gpu_prices()`
 returns one `GpuOffer` per CSV row (accelerator name/count, vCPUs, host memory, device (VRAM) memory
 parsed out of the `GpuInfo` column, on-demand price, spot price, region). `krater.services.pricing`
 aggregates these **per (accelerator name, accelerator count)** — the granularity the estimator and the
@@ -108,14 +112,14 @@ A row with `Price <= 0` is dropped before aggregating (not a usable on-demand qu
   of `/pricing` should show a stable "as of" time rather than the DB churning throughout the day).
   Wraps `krater.services.pricing.refresh_prices`.
 - **CLI**: `uv run python -m krater.pricing.refresh_once` — same call, for a manual refresh or a first
-  seed against a fresh database (mirrors `krater.skypilot.reconcile_once`'s pattern).
+  seed against a fresh database.
 - **Atomic replace**: `refresh_prices` fetches and aggregates *before* touching the database, then does
   `DELETE FROM gpu_prices` + re-`INSERT` inside the caller's transaction. Since the fetch/parse/
   aggregate step happens first and raises straight through on any failure, a failure never reaches the
   delete — existing rows are left exactly as they were. The caller (the periodic task, the CLI) commits
   only on success.
 - **Fail soft**: if the GitHub fetch fails (network error, non-200, unparseable CSV), `refresh_prices`
-  raises `SkyPilotUnavailableError`/`SkyPilotRequestFailedError` and the periodic task logs and returns
+  raises `CatalogError` and the periodic task logs and returns
   without committing anything — last-refreshed prices (and their `refreshed_at`) stay exactly as they
   were, and `/pricing` keeps showing them with their true (now older) "as of" date. There's no separate
   DB write for "stale" — staleness is just `refreshed_at` getting old, which the page always shows.
@@ -127,11 +131,9 @@ KRATER_DATABASE_URL=postgresql+psycopg://root:root@localhost:5432/krater_dev \
   uv run python -m krater.pricing.refresh_once
 ```
 
-Prints the number of `(accelerator, count)` groups written. Uses `KRATER_SKYPILOT_MODE` like everything
-else in `krater.skypilot` — `fake` (dev default) refreshes from `FakeSkyPilotClient`'s canned catalog,
-`live` fetches the real CSV from `KRATER_SKYPILOT_CATALOG_URL` (defaults to the GitHub URL above; a
-`KRATER_SKYPILOT_MODE=live` deployment never needs a real SkyPilot *server* running for this specific
-call, only network access to GitHub).
+Prints the number of `(accelerator, count)` groups written. Uses `KRATER_PRICING_MODE` (old name
+`KRATER_SKYPILOT_MODE`): `fake` (dev default) refreshes from `FakeCatalog`'s canned catalog, `live` fetches the real CSV
+from `KRATER_PRICING_CATALOG_URL` (defaults to the GitHub URL above), with nothing but network access to GitHub.
 
 ## Estimator: never trust a client-sent rate
 

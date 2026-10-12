@@ -2,46 +2,44 @@
 
 Revised Sep 26, 2026. Supersedes the Sep 24 draft (drafted with @Adam). Roles live in Weave (maintainer decision,
 Oct 7, 2026; see "Roles & authentication").
-The previous draft was checked against the Weave codebase and the SkyPilot docs and source. This revision fixes the
-places where it assumed capabilities that don't exist. The integration details are in
-[weave-integration.md](weave-integration.md), [skypilot-integration.md](skypilot-integration.md) and
+The previous draft was checked against the Weave codebase. This revision fixes the places where it assumed
+capabilities that don't exist. The integration details are in [weave-integration.md](weave-integration.md) and
 [quilt-integration.md](quilt-integration.md).
+
+**Compute (Oct 11, 2026):** SkyPilot was dropped. This release runs with compute off: it approves and tracks budgets
+but launches no machines. Krater Compute, Krater's own Vast.ai layer, follows in its own release and adds launching,
+spend tracking and the budget hard stop.
 
 ## What changed from the Sep 24 draft
 
 | Area | Sep 24 draft | This revision | Why |
 | --- | --- | --- | --- |
-| Budget enforcement | Handed to "SkyPilot's internal budgeting" | **Krater enforces it**, using a SkyPilot admin policy and a spend reconciler | SkyPilot has no dollar budgets, only per-instance `max_hourly_cost` and estimated `cost-report` |
+| Budget enforcement | Handed to "SkyPilot's internal budgeting" | **Krater enforces it** itself (with Krater Compute) | SkyPilot has no dollar budgets, only per-instance `max_hourly_cost` and estimated `cost-report`; it was dropped |
 | Reviewer role | "A claim Krater reads from Weave" | **Weave owns roles** as app-defined roles on Krater's Weave app, sent in a `roles` claim and re-checked through Weave's directory API | Weave's original claims had no roles; the Weave work adds app roles and a directory API |
 | Slack membership | "Weave users are already Slack members" | **Only full Slack members can submit**, checked with Weave's `slack_member`, else with Slack itself | Weave signup is open, new users are single-channel guests, and some never join Slack |
 | Reviews | Attached to the project | Attached to a **project revision** | Otherwise approvals of an old version count toward a resubmitted one |
 | Amendments | Approved → back through review | Approved project **stays approved** while an amendment revision is reviewed | Otherwise compute is cut off during review |
 | Budget | `budget_approved` column + `BudgetReclaim` table | **Append-only budget ledger** | One place for the ceiling and for the audit trail |
 | Comments | Mirrored from Slack into Krater's DB | **Not mirrored in v1**; Krater links to the channel | Mirroring means handling Slack edits, deletes and threads, for little gain |
-| Deployment | "Two containers" | Portal, worker, Postgres, SkyPilot API server (+ optional sign-in proxy) | That's what it actually takes |
+| Deployment | "Two containers" | Portal, worker, Postgres, object storage | That's what it actually takes |
 
 ## Overview & scope
 
 **Krater** is the web portal for Project Ganymede (Patchwork Labs). It does three things:
 
 1. Reviews and approves member-submitted project proposals.
-2. Allocates a dollar-denominated compute budget to approved projects, and **enforces** it against SkyPilot.
+2. Allocates a dollar-denominated compute budget to approved projects.
 3. Hosts a public gallery of completed Ganymede projects.
 
-**Out of scope:** running compute. SkyPilot, renting GPUs mainly from Vast.ai, runs in its own deployment. Krater doesn't
-schedule or run jobs, but it *does* own:
-
-- provisioning a SkyPilot workspace for each approved project;
-- gating launches against the project's remaining budget;
-- tearing down a project's clusters once it's over budget.
-
-SkyPilot has no budget feature of its own to hand that off to (see [skypilot-integration.md](skypilot-integration.md)).
+**Not in this release:** running compute. Approved projects show "Launching machines from Krater isn't open yet."
+Krater Compute, Krater's own Vast.ai layer, adds launching machines against a project's budget, spend tracking and
+the hard stop at the ceiling.
 
 **Core capabilities**
 
 - Proposal submission, with drafts and resubmission after rejection
 - A configurable approval policy (reviewer sign-off), with review happening in a private Slack channel per project
-- Dollar-based compute budgets, enforced through SkyPilot
+- Dollar-based compute budgets (enforced once Krater Compute launches machines)
 - A two-stage lifecycle: proposal review, then a separate completion review before a project goes public
 - A public gallery of completed, open-source projects
 - Admin override at every stage, fully audited
@@ -111,8 +109,8 @@ Postgres. All money is stored as **integer cents** (`*_cents`). Names are sugges
 
 **Project**
 - `id`, `title`, `submitter_id`, `status`, `current_revision_id`, `approved_revision_id`, `repo_url`,
-  `slack_channel_id`, `skypilot_workspace`, `skypilot_allowed_users` (the list the reconciler last sent),
-  `created_at`, `updated_at`
+  `slack_channel_id`, `max_hourly_cost_cents` (nullable; the admin's per-project hourly cap), `created_at`,
+  `updated_at`
 - `status` values:
   - `draft`
   - `pending_review`
@@ -137,8 +135,8 @@ Postgres. All money is stored as **integer cents** (`*_cents`). Names are sugges
 - `id`, `project_id`, `kind` (`initial_approval` | `amendment` | `admin_adjustment` | `reclaim`), `amount_cents`
   (signed), `actor_id`, `reason`, `revision_id` (nullable), `created_at`
 
-**SpendSnapshot** (written by the reconciler; see [skypilot-integration.md](skypilot-integration.md))
-- `id`, `project_id`, `estimated_spend_cents`, `source` (`skypilot_cost_report`), `taken_at`
+**SpendSnapshot** (written by the compute layer; none until Krater Compute)
+- `id`, `project_id`, `estimated_spend_cents`, `source`, `taken_at`
 
 **ApprovalPolicy** (configuration, not code)
 - `id`, `stage` (`proposal` | `completion`), `min_budget_cents` (nullable; for tiering by budget size),
@@ -165,8 +163,8 @@ Postgres. All money is stored as **integer cents** (`*_cents`). Names are sugges
    - rejects self-review (submitter or credited builder);
    - records the Review against the current revision;
    - asks `ApprovalPolicyService` whether the policy is now satisfied.
-4. **Approve.** When the policy is satisfied, the revision is approved, a `BudgetEntry(initial_approval)` is written, the
-   project's SkyPilot workspace is provisioned, and the project moves to `approved`.
+4. **Approve.** When the policy is satisfied, the revision is approved, a `BudgetEntry(initial_approval)` is written, and the
+   project moves to `approved`.
 5. **Reject.** A reason is required. The project moves to `changes_requested`, and the submitter edits and resubmits
    (step 2, same project, new revision).
 6. **Amend.** An `approved` project can have its scope or budget amended. This creates an `amendment` revision reviewed
@@ -217,7 +215,7 @@ tags) and submits them as a `completion` revision. The project moves to `pending
 the same channel, under the `completion` stage policy.
 
 - **Approved:** the project becomes `completed`. It's published to the gallery, spend is frozen at its final value,
-  unspent budget is reclaimed to the ledger, and the SkyPilot workspace is torn down.
+  unspent budget is reclaimed to the ledger, and (with compute) its machines are destroyed.
 - **Rejected:** the project moves to `completion_changes_requested`. The submitter revises and resubmits.
 
 **Public gallery** (no auth). Each entry shows the write-up, screenshots, demo link, repo link, credited builders,
@@ -230,14 +228,10 @@ Uploads use presigned URLs, and only objects from approved completion revisions 
 
 - The **ceiling** is the sum of the project's `BudgetEntry` rows. Approvals, amendments, admin adjustments and reclaims
   all add entries, so the ledger doubles as the audit trail.
-- **Spend** is SkyPilot's estimate (catalog price × uptime), pulled regularly by the reconciler. It's an estimate:
-  Vast's live prices and disk charges mean the real bill differs. Show it as "≈ $X estimated", and reconcile against Vast
-  billing out of band.
-- **Enforcement** (details in [skypilot-integration.md](skypilot-integration.md)):
-  - Every launch goes through Krater's admin policy endpoint. It's rejected if the project isn't `approved` or its
-    estimated spend has reached the ceiling. Allowed launches are forced to autodown and capped with `max_hourly_cost`.
-  - The reconciler warns the project channel at 80% of the ceiling, and tears down the project's clusters and managed
-    jobs at 100%.
+- **Spend** comes from the compute layer, shown as "≈ $X estimated". With compute off it stays at zero.
+- **Enforcement** arrives with Krater Compute: launches only for `approved` projects with budget left, every machine
+  capped at the project's hourly cap, a warning in the project channel at 80% of the ceiling, and its machines
+  stopped at 100%.
 - **No automatic expiry.** Stalled projects are reclaimed manually by an admin (`BudgetEntry(reclaim)`).
 - **Quilt.** Krater tells Quilt (Patchwork Labs finance) about each submission, each ledger entry and each change of
   spend, through Quilt's patch API. The events go through an outbox table in the same transaction as the change.
@@ -248,7 +242,7 @@ Uploads use presigned URLs, and only objects from approved completion revisions 
 At any point an admin can:
 - approve or reject at either review stage, bypassing `ApprovalPolicy`;
 - adjust an approved project's budget up or down, or reclaim unspent funds;
-- set a project's own hourly cap for SkyPilot launches, or put it back to the default;
+- set a project's own hourly cap for machines, or put it back to the default;
 - withdraw a project.
 
 The exception is the admin's own project (they submitted it, or are a credited builder on its current revision): they
@@ -261,38 +255,27 @@ Every override writes an `AuditEvent` with who, what, when and a required reason
 
 ## Deployment architecture
 
-Everything runs in Docker and is defined in one Compose file, so it can run on any host. The existing host (alastor) is
-arm64; SkyPilot publishes arm64 images, so that works.
+Everything runs in Docker and is defined in one Compose file, so it can run on any host, including the existing arm64
+host (alastor).
 
 | Service | What it is |
 | --- | --- |
-| `portal` | FastAPI web app: UI, OIDC, Slack endpoints, public gallery, SkyPilot admin-policy endpoint |
-| `worker` | Same image, runs background jobs: Slack work, the spend reconciler, reviewer-channel sync, events to Quilt |
+| `portal` | FastAPI web app: UI, OIDC, Slack endpoints, public gallery |
+| `worker` | Same image, runs background jobs: Slack work, reviewer-channel sync, price refresh, events to Quilt |
 | `db` | Postgres |
-| `skypilot` | SkyPilot API server with the Vast credentials; out of scope except for its configuration |
 | `storage` | Temporary self-hosted S3-compatible storage (SeaweedFS) for gallery screenshots, until a provider is chosen |
-| `auth-proxy` | oauth2-proxy with Weave as the OIDC issuer; members sign in to the SkyPilot CLI and dashboard through it |
 
-Networking:
-- Slack must reach `portal` over public HTTPS.
-- The admin-policy endpoint (the launch gate) must be **publicly reachable** at `KRATER_PUBLIC_URL`: SkyPilot calls it
-  from members' own machines as well as from the `skypilot` container. Its URL token is visible to every member, so the
-  endpoint has no side effects and only the server-side call's decision is enforced. See
-  [skypilot-integration.md](skypilot-integration.md) and [dev/production.md](dev/production.md).
+Networking: Slack must reach `portal` over public HTTPS. See [dev/production.md](dev/production.md).
 
-**Stack:** Python + FastAPI + Postgres. Python matters because Krater imports SkyPilot's own request decoder
-(`sky.admin_policy.UserRequest`) and client SDK, rather than reimplementing SkyPilot's wire format.
+**Stack:** Python + FastAPI + Postgres.
 
 ## Open questions
 
 1. **Screenshot storage provider.** Temporarily a self-hosted SeaweedFS container (`storage` in docker-compose).
    MinIO was ruled out because its community edition stopped publishing images in 2025. Still to pick a long-term
    provider (e.g. R2/B2/S3, or keep SeaweedFS with backups). A reminder is set to circle back.
-2. **How members use SkyPilot:** decided. One private SkyPilot workspace per project, and members sign in to SkyPilot
-   with Weave (oauth2-proxy). The proxy doesn't limit sign-in to members; private workspaces and the launch gate do
-   the limiting. See
-   [skypilot-integration.md §0](skypilot-integration.md#0-member-access-one-workspace-per-project-sign-in-with-weave).
-   Still to confirm in the spike: the full flow on Docker Compose.
+2. **How members run compute:** decided. Not SkyPilot (dropped Oct 11, 2026): Krater Compute, Krater's own Vast.ai
+   layer, in its own release.
 3. **What happens at the ceiling.** Proposed: warn at 80%, block new launches and tear down at 100%, with no grace
    period. Consider a small admin-configurable grace so a running training job isn't killed at 100.1%.
 4. **Weave changes:** resolved. Krater needs the Weave stack patchworklabsorg/weave#156 to #161, plus app roles
@@ -308,4 +291,4 @@ Designed for, not built now:
 - **Multi-approval policy:** new `ApprovalPolicy` rows with `min_approvals > 1`.
 - **Reviewer tiers by budget size:** `ApprovalPolicy.min_budget_cents` plus `required_group`.
 - **Comment mirroring from Slack,** if the channel link turns out not to be enough.
-- **Reconciling against real Vast billing** instead of SkyPilot's estimates.
+- **Reconciling against real Vast billing** (Krater Compute does this).

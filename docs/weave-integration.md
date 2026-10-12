@@ -45,8 +45,6 @@ clicks and for navigation. It stores no names, emails or other personal details:
 - **Finding a member** (a teammate, a credited builder) takes a Patchwork ID, looked up directly, or an email,
   matched against `?role=member` because the directory has no search by email. Krater then stores the Patchwork ID.
 - **Slack** uses Weave's `slack_id` only. Krater never looks Slack accounts up by email.
-- **SkyPilot** knows users by email, so the reconciler reads the team's emails from the directory's member list on
-  each run and sends them to the workspace; Krater keeps only their Patchwork IDs.
 - **The signed-in name** shown in the header comes from the id_token and lives in the signed session cookie only.
 
 When a member asks for their data to be deleted, Krater holds nothing to delete beyond their Patchwork ID and the
@@ -154,8 +152,7 @@ The gate prefers Weave's `slack_member` from the fresh directory record. When We
 
 Do it in Weave: remove their Krater roles or their access to the Krater app, and revoke their tokens. The next action
 they take in Krater is refused straight away: actions never use the directory cache. Pages they already have open
-can keep showing what they could see for up to 60 seconds. The next SkyPilot reconcile removes them from every
-project workspace (see [skypilot-integration.md](skypilot-integration.md), "Offboarding").
+can keep showing what they could see for up to 60 seconds.
 
 ## Stub mode
 
