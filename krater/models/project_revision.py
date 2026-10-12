@@ -42,9 +42,6 @@ class ProjectRevision(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     screenshot_keys: Mapped[list[str]] = mapped_column(
         ARRAY(sa.String), nullable=False, default=list, server_default="{}"
     )
-    credited_builder_ids: Mapped[list[uuid.UUID]] = mapped_column(
-        ARRAY(UUID(as_uuid=True)), nullable=False, default=list, server_default="{}"
-    )
     tags: Mapped[list[str]] = mapped_column(ARRAY(sa.String), nullable=False, default=list, server_default="{}")
 
     # Null until the revision is actually submitted for review (vs. a draft edited in place).

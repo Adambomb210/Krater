@@ -119,7 +119,6 @@ def test_full_workflow_through_http(client: TestClient, login_as) -> None:
             "budget_requested": "600.00",
             "demo_url": "https://example.com/rover-demo",
             "tags": "rover, ganymede",
-            "credited_builder_emails": "",
         },
         follow_redirects=False,
     )

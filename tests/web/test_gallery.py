@@ -81,6 +81,8 @@ def test_gallery_detail_shows_a_completed_project(
     assert "Gallery Project" in detail_response.text
     assert "ganymede" in detail_response.text
     assert "example.com/demo" in detail_response.text
+    # The team, by the names Weave has for them now.
+    assert "Built by" in detail_response.text and "Mia Member" in detail_response.text
 
 
 def test_gallery_detail_404s_for_a_non_completed_project(client: TestClient, login_as, submitted_project) -> None:

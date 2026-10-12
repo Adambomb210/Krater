@@ -15,6 +15,7 @@ from krater.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
     from krater.models.budget_entry import BudgetEntry
+    from krater.models.project_member import ProjectMember
     from krater.models.project_revision import ProjectRevision
     from krater.models.spend_snapshot import SpendSnapshot
     from krater.models.user import User
@@ -72,6 +73,10 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     budget_entries: Mapped[list[BudgetEntry]] = relationship(back_populates="project")
     spend_snapshots: Mapped[list[SpendSnapshot]] = relationship(back_populates="project")
+    # The team besides the lead (`submitter`), including pending invitations; see `krater.services.teams`.
+    members: Mapped[list[ProjectMember]] = relationship(
+        back_populates="project", order_by="ProjectMember.created_at", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<Project {self.title!r} status={self.status.value}>"

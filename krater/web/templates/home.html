@@ -37,7 +37,7 @@
   </li>
   <li>
     <h2>Show</h2>
-    <p>Completed projects go into the public gallery, with their write-up, demo and builders.</p>
+    <p>Completed projects go into the public gallery, with their write-up, demo and team.</p>
   </li>
 </ul>
 {% else %}
@@ -66,6 +66,32 @@
     </a>
   {% endif %}
 </nav>
+{% endif %}
+
+{% if invitations %}
+  <section class="card" aria-labelledby="invitations">
+    <h2 id="invitations">Team invitations</h2>
+    <ul class="invitation-list">
+      {% for invitation, lead in invitations %}
+        <li class="invitation">
+          <div class="invitation__text">
+            <a class="cell-title" href="/projects/{{ invitation.project.id }}">{{ invitation.project.title or "Untitled proposal" }}</a>
+            <span class="cell-sub">{{ lead }} asked you to join their team.</span>
+          </div>
+          <div class="invitation__actions">
+            <form method="post" action="/projects/{{ invitation.project.id }}/team/{{ invitation.id }}/accept">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="button button--small button--primary">Join</button>
+            </form>
+            <form method="post" action="/projects/{{ invitation.project.id }}/team/{{ invitation.id }}/decline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="button button--small">Decline</button>
+            </form>
+          </div>
+        </li>
+      {% endfor %}
+    </ul>
+  </section>
 {% endif %}
 
 {% if my_projects %}

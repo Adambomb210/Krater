@@ -19,6 +19,7 @@ from krater.models import (
 from krater.services import projects
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
+from tests.services.conftest import add_to_team
 
 
 def _submitted_project(db_session: Session, member: Actor, *, budget_requested_cents: int = 10_000):
@@ -61,11 +62,11 @@ def test_submitter_cannot_review_their_own_submission(db_session: Session, make_
         )
 
 
-def test_credited_builder_cannot_review(db_session: Session, member: Actor, make_actor) -> None:
+@pytest.mark.parametrize("accepted", [True, False], ids=["on-the-team", "invited"])
+def test_a_teammate_or_invitee_cannot_review(db_session: Session, member: Actor, make_actor, accepted: bool) -> None:
     builder = make_actor(groups=frozenset({"ganymede:member", "ganymede:reviewer"}))
     project = _submitted_project(db_session, member)
-    project.current_revision.credited_builder_ids = [builder.user.id]
-    db_session.flush()
+    add_to_team(db_session, project, builder, accepted=accepted)
 
     with pytest.raises(NotAllowed):
         projects.record_review(

@@ -33,6 +33,7 @@ from krater.models import (
     SlackNotification,
     User,
 )
+from krater.services import teams
 from krater.services.actor import GROUP_REVIEWER
 from krater.services.budget_alerts import AUDIT_BUDGET_TEARDOWN, AUDIT_BUDGET_WARNING
 from krater.services.compute_jobs import AUDIT_BOX_DESTROY_SOON, AUDIT_BOX_DESTROYED, AUDIT_BOX_STOPPED
@@ -113,12 +114,9 @@ def _reviewer_slack_ids(session: Session, slack_client: SlackClient, weave_clien
 def _team_slack_ids(
     session: Session, slack_client: SlackClient, weave_client: WeaveClient, *, project: Project
 ) -> list[str]:
-    """The submitter, the current revision's credited builders, and every current Ganymede reviewer --
-    everyone `docs/SPEC.md` says should be in a project's channel -- resolved to Slack user ids."""
-    people = [project.submitter]
-    revision = project.current_revision
-    if revision is not None and revision.credited_builder_ids:
-        people.extend(session.scalars(sa.select(User).where(User.id.in_(revision.credited_builder_ids))))
+    """The project's team (its lead and accepted members) and every current Ganymede reviewer -- everyone
+    `docs/SPEC.md` says should be in a project's channel -- resolved to Slack user ids."""
+    people = list(session.scalars(sa.select(User).where(User.id.in_(teams.team_user_ids(project)))))
     ids = _slack_ids(session, slack_client, people) | _reviewer_slack_ids(session, slack_client, weave_client)
     return sorted(ids)
 
@@ -128,7 +126,7 @@ def ensure_channel(session: Session, slack_client: SlackClient, weave_client: We
 
     Idempotent: creates the channel only if `project.slack_channel_id` is unset. Always (re-)invites the
     current team -- cheap, and safe to re-run (`docs/SPEC.md`: "safe to retry: already_in_channel counts
-    as success") -- so a team change (a new reviewer, a newly-credited builder) is picked up every call.
+    as success") -- so a team change (a new reviewer, a teammate who just joined) is picked up every call.
     """
     if project.slack_channel_id is None:
         channel_id = slack_client.create_channel(channel_name_for(project))

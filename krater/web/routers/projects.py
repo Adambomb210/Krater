@@ -30,7 +30,7 @@ from krater.models import (
     User,
 )
 from krater.services import budget as budget_service
-from krater.services import people, pricing, slack_membership
+from krater.services import people, pricing, slack_membership, teams
 from krater.services import projects as project_service
 from krater.services import screenshots as screenshot_service
 from krater.services.actor import Actor
@@ -39,17 +39,18 @@ from krater.services.errors import InvalidState, NotAllowed, NotFound, Validatio
 from krater.services.launch_rules import LAUNCHABLE_STATUSES, hourly_cap_cents
 from krater.slack import get_slack_client
 from krater.storage import ObjectStore, get_object_store
-from krater.weave import WeaveClient, get_weave_client
+from krater.weave import WeaveClient, WeaveUnavailableError, get_weave_client
 from krater.web import estimator_form
 from krater.web.csrf import verify_csrf_token
 from krater.web.deps import fresh_actor
 from krater.web.flash import flash
-from krater.web.forms import UnknownMembers, parse_members, parse_tags
+from krater.web.forms import parse_tags
 from krater.web.money import InvalidDollarAmount, cents_to_input, format_cents, parse_dollars
 from krater.web.templates import templates
 from krater.worker.app import (
     kick_quilt_delivery,
     slack_archive_channel,
+    slack_invite_team,
     slack_notify_decision,
     slack_notify_revision_submitted,
     slack_post_admin_override,
@@ -85,13 +86,13 @@ def _enforce_slack_membership(db_session: Session, actor: Actor) -> str | None:
 
 
 # --------------------------------------------------------------------------------------------------
-# Visibility: the submitter, reviewers and admins only -- anyone else gets a 404, not a 403, so a
-# project's existence doesn't leak to members who have no relationship to it.
+# Visibility: the team (and people invited to it), reviewers and admins only -- anyone else gets a 404, not a 403,
+# so a project's existence doesn't leak to members who have no relationship to it.
 # --------------------------------------------------------------------------------------------------
 
 
 def _can_view(actor: Actor, project: Project) -> bool:
-    return actor.user.id == project.submitter_id or actor.is_reviewer or actor.is_admin
+    return teams.has_conflict(project, actor.user.id) or actor.is_reviewer or actor.is_admin
 
 
 def _get_visible_project(session: Session, actor: Actor, project_id: uuid.UUID) -> Project:
@@ -296,22 +297,34 @@ def _build_detail_context(
     revisions = sorted(project.revisions, key=lambda revision: revision.number, reverse=True)
 
     reviewer_ids = {review.reviewer_id for revision in revisions for review in revision.reviews}
-    builder_ids: set[uuid.UUID] = set()
-    for revision in revisions:
-        builder_ids.update(revision.credited_builder_ids)
-    user_ids = reviewer_ids | builder_ids
-    users = list(session.scalars(sa.select(User).where(User.id.in_(user_ids)))) if user_ids else []
+    user_ids = reviewer_ids | {project.submitter_id} | {member.user_id for member in project.members}
+    users = list(session.scalars(sa.select(User).where(User.id.in_(user_ids))))
     names_by_id = people.names(weave_client, users)
+    subs_by_id = {user.id: user.weave_sub for user in users}
 
-    is_submitter = actor.user.id == project.submitter_id
+    is_lead = actor.user.id == project.submitter_id
+    is_team = teams.on_team(project, actor.user.id)
+    conflicted = teams.has_conflict(project, actor.user.id)
+    team_open = project.status not in teams.CLOSED_STATUSES
+    team = [{"name": names_by_id[project.submitter_id], "sub": subs_by_id[project.submitter_id], "lead": True}]
+    for member in project.members:
+        team.append(
+            {
+                "id": member.id,
+                "name": names_by_id[member.user_id],
+                "sub": subs_by_id[member.user_id],
+                "accepted": member.accepted,
+                "is_me": member.user_id == actor.user.id,
+                "can_remove": team_open and (is_lead or actor.is_admin or member.user_id == actor.user.id),
+            }
+        )
+    my_invitation = next((m for m in project.members if m.user_id == actor.user.id and not m.accepted), None)
     current = project.current_revision
     has_draft = current is not None and current.submitted_at is None
     current_is_pending = (
         current is not None and current.submitted_at is not None and current.outcome is RevisionOutcome.PENDING
     )
-    is_credited_builder = current is not None and actor.user.id in current.credited_builder_ids
-
-    can_review = actor.is_reviewer and not is_submitter and not is_credited_builder and current_is_pending
+    can_review = actor.is_reviewer and not conflicted and current_is_pending
 
     compute_mode = get_settings().compute_mode
     budget_flag = None
@@ -348,22 +361,26 @@ def _build_detail_context(
         "revisions": revisions,
         "estimate_mismatch_by_revision": estimate_mismatch_by_revision,
         "names_by_id": names_by_id,
-        "is_submitter": is_submitter,
+        "is_lead": is_lead,
+        "is_team": is_team,
+        "team": team,
+        "my_invitation": my_invitation,
+        "can_invite": team_open and (is_team or actor.is_admin),
         "is_admin": actor.is_admin,
         "show_compute_off_notice": compute_mode == "off" and project.status in LAUNCHABLE_STATUSES,
         "compute_vast": compute_mode == "vast",
         "has_draft": has_draft,
-        "can_edit_draft": is_submitter and has_draft,
-        "can_submit": is_submitter and has_draft and current.kind is not RevisionKind.COMPLETION,
-        "can_submit_completion": is_submitter and has_draft and current.kind is RevisionKind.COMPLETION,
-        "can_start_amendment": is_submitter and project.status is ProjectStatus.APPROVED and not has_draft,
-        "can_start_completion": is_submitter and project.status is ProjectStatus.APPROVED and not has_draft,
-        "can_withdraw": is_submitter and project.status not in _TERMINAL_STATUSES,
+        "can_edit_draft": is_team and has_draft,
+        "can_submit": is_team and has_draft and current.kind is not RevisionKind.COMPLETION,
+        "can_submit_completion": is_team and has_draft and current.kind is RevisionKind.COMPLETION,
+        "can_start_amendment": is_team and project.status is ProjectStatus.APPROVED and not has_draft,
+        "can_start_completion": is_team and project.status is ProjectStatus.APPROVED and not has_draft,
+        "can_withdraw": is_lead and project.status not in _TERMINAL_STATUSES,
         "can_review": can_review,
         # Admin overrides on your own project: deciding it is off entirely, and adding budget is refused by the
         # service (cutting it is still allowed), so the page explains why instead of offering the form.
-        "admin_own_project": actor.is_admin and (is_submitter or is_credited_builder),
-        "can_admin_decide": actor.is_admin and current_is_pending and not is_submitter and not is_credited_builder,
+        "admin_own_project": actor.is_admin and conflicted,
+        "can_admin_decide": actor.is_admin and current_is_pending and not conflicted,
         "can_admin_adjust_budget": actor.is_admin
         and project.status in (ProjectStatus.APPROVED, ProjectStatus.PENDING_COMPLETION_REVIEW),
         "can_admin_reclaim": actor.is_admin and summary.ceiling_cents > 0,
@@ -400,10 +417,6 @@ def project_detail(
 
 
 def _edit_form_values(session: Session, project: Project, draft: ProjectRevision) -> dict:
-    builder_ids = ""
-    if draft.credited_builder_ids:
-        users = session.scalars(sa.select(User).where(User.id.in_(draft.credited_builder_ids)))
-        builder_ids = ", ".join(sorted(user.weave_sub for user in users))
     return {
         "title": project.title,
         "repo_url": project.repo_url or "",
@@ -411,7 +424,6 @@ def _edit_form_values(session: Session, project: Project, draft: ProjectRevision
         "budget_requested": cents_to_input(draft.budget_requested_cents),
         "demo_url": draft.demo_url or "",
         "tags": ", ".join(draft.tags),
-        "credited_builders": builder_ids,
     }
 
 
@@ -453,8 +465,8 @@ def edit_draft_form(
     store: Annotated[ObjectStore, Depends(get_object_store)],
 ):
     project = _get_visible_project(db_session, actor, project_id)
-    if actor.user.id != project.submitter_id:
-        raise NotAllowed("Only the submitter may edit this project.")
+    if not teams.on_team(project, actor.user.id):
+        raise NotAllowed("Only the project's team may edit it.")
 
     draft = _require_editable_draft(project)
     if draft is None:
@@ -490,7 +502,6 @@ def update_draft(
     budget_requested: Annotated[str, Form()] = "",
     demo_url: Annotated[str, Form()] = "",
     tags: Annotated[str, Form()] = "",
-    credited_builders: Annotated[str, Form()] = "",
     form_action: Annotated[str, Form()] = "save",
     estimator_gpu: Annotated[str, Form()] = "",
     estimator_hours: Annotated[str, Form()] = "",
@@ -499,8 +510,8 @@ def update_draft(
     estimator_used: Annotated[str, Form()] = "",
 ):
     project = _get_visible_project(db_session, actor, project_id)
-    if actor.user.id != project.submitter_id:
-        raise NotAllowed("Only the submitter may edit this project.")
+    if not teams.on_team(project, actor.user.id):
+        raise NotAllowed("Only the project's team may edit it.")
 
     draft = _require_editable_draft(project)
     if draft is None:
@@ -520,7 +531,6 @@ def update_draft(
         "budget_requested": budget_requested,
         "demo_url": demo_url,
         "tags": tags,
-        "credited_builders": credited_builders,
     }
 
     if form_action == "estimate":
@@ -554,12 +564,6 @@ def update_draft(
         except InvalidDollarAmount as exc:
             errors["budget_requested_cents"] = str(exc)
 
-    builder_ids = list(draft.credited_builder_ids)
-    if draft.kind is RevisionKind.COMPLETION:
-        try:
-            builder_ids = parse_members(db_session, weave_client, credited_builders)
-        except UnknownMembers as exc:
-            errors["credited_builders"] = f"Not a Ganymede member: {', '.join(exc.entries)}"
     is_completion = draft.kind is RevisionKind.COMPLETION
     errors.update(project_service.link_errors(repo_url=repo_url, demo_url=demo_url if is_completion else None))
 
@@ -584,7 +588,7 @@ def update_draft(
         "budget_requested_cents": budget_cents,
     }
     if draft.kind is RevisionKind.COMPLETION:
-        update_kwargs.update(demo_url=demo_url or None, tags=parse_tags(tags), credited_builder_ids=builder_ids)
+        update_kwargs.update(demo_url=demo_url or None, tags=parse_tags(tags))
 
     project_service.update_draft(db_session, actor, project=project, **update_kwargs)
     _store_estimate_best_effort(db_session, actor, project=project, estimator_used=estimator_used, **estimator_fields)
@@ -736,6 +740,99 @@ def withdraw_project(
             )
 
     return _success_redirect(db_session, request, project_id, "Project withdrawn.", after_commit=_notify)
+
+
+# --------------------------------------------------------------------------------------------------
+# Team: invite, accept or decline, remove or leave (krater.services.teams)
+# --------------------------------------------------------------------------------------------------
+
+
+@router.post("/projects/{project_id}/team", dependencies=[Depends(verify_csrf_token)])
+def invite_team_member(
+    request: Request,
+    project_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
+    member: Annotated[str, Form()] = "",
+):
+    project = _get_visible_project(db_session, actor, project_id)
+    try:
+        teams.invite(db_session, actor, weave_client, project=project, query=member)
+    except ValidationFailed as exc:
+        db_session.rollback()
+        context = _build_detail_context(
+            db_session, weave_client, project, actor, errors=exc.errors, error_form="team", posted={"member": member}
+        )
+        return templates.TemplateResponse(request, "projects/detail.html", context, status_code=422)
+    except WeaveUnavailableError:
+        db_session.rollback()
+        flash(request, "Weave isn't answering, so Krater can't look that person up. Try again shortly.", "error")
+        return _redirect_to_project(project_id)
+    except InvalidState as exc:
+        return _invalid_state_redirect(db_session, request, project_id, exc)
+    return _success_redirect(
+        db_session, request, project_id, "Invited. They join the team once they accept on their Krater home page."
+    )
+
+
+@router.post("/projects/{project_id}/team/{member_id}/accept", dependencies=[Depends(verify_csrf_token)])
+def accept_team_invitation(
+    request: Request,
+    project_id: uuid.UUID,
+    member_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+):
+    try:
+        teams.accept(db_session, actor, member_id=member_id)
+    except InvalidState as exc:
+        return _invalid_state_redirect(db_session, request, project_id, exc)
+    return _success_redirect(
+        db_session,
+        request,
+        project_id,
+        "You're on the team.",
+        after_commit=lambda: slack_invite_team.defer(project_id=str(project_id)),
+    )
+
+
+@router.post("/projects/{project_id}/team/{member_id}/decline", dependencies=[Depends(verify_csrf_token)])
+def decline_team_invitation(
+    request: Request,
+    project_id: uuid.UUID,
+    member_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+):
+    try:
+        teams.decline(db_session, actor, member_id=member_id)
+    except InvalidState as exc:
+        return _invalid_state_redirect(db_session, request, project_id, exc)
+    db_session.commit()
+    flash(request, "Invitation declined.", "success")
+    return RedirectResponse("/", status_code=303)
+
+
+@router.post("/projects/{project_id}/team/{member_id}/remove", dependencies=[Depends(verify_csrf_token)])
+def remove_team_member(
+    request: Request,
+    project_id: uuid.UUID,
+    member_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+):
+    project = _get_visible_project(db_session, actor, project_id)
+    leaving = any(m.id == member_id and m.user_id == actor.user.id for m in project.members)
+    try:
+        teams.remove(db_session, actor, project=project, member_id=member_id)
+    except InvalidState as exc:
+        return _invalid_state_redirect(db_session, request, project_id, exc)
+    if leaving:
+        db_session.commit()
+        flash(request, "You left the team.", "success")
+        return RedirectResponse("/", status_code=303)
+    return _success_redirect(db_session, request, project_id, "Removed from the team.")
 
 
 # --------------------------------------------------------------------------------------------------

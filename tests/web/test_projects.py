@@ -185,38 +185,6 @@ def test_reviewer_cannot_edit_someone_elses_draft(client: TestClient, login_as, 
     assert response.status_code == 403
 
 
-def test_edit_rejects_an_unknown_credited_builder_email(client: TestClient, login_as, approved_project) -> None:
-    member = login_as(MEMBER_SUB)
-    reviewer = login_as(REVIEWER_SUB)
-    project = approved_project(member, reviewer)
-    login_as(MEMBER_SUB)
-
-    completion_start = client.post(
-        f"/projects/{project.id}/complete",
-        data={"csrf_token": get_csrf_token(client.get(f"/projects/{project.id}").text)},
-        follow_redirects=False,
-    )
-    assert completion_start.status_code == 303
-
-    edit_form = client.get(f"/projects/{project.id}/edit")
-    csrf = get_csrf_token(edit_form.text)
-    response = client.post(
-        f"/projects/{project.id}/edit",
-        data={
-            "csrf_token": csrf,
-            "title": project.title,
-            "write_up": "Final write-up.",
-            "budget_requested": "100",
-            "demo_url": "",
-            "tags": "",
-            "credited_builders": "nobody-like-this@example.com",
-        },
-    )
-
-    assert response.status_code == 422
-    assert "Not a Ganymede member" in response.text
-
-
 # --------------------------------------------------------------------------------------------------
 # submit / amend / complete / withdraw
 # --------------------------------------------------------------------------------------------------

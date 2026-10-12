@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass
 
 from krater.models import ComputeJob, Project
+from krater.services import teams
 from krater.services.actor import Actor
 from krater.services.errors import NotAllowed, NotFound
 from krater.storage import ObjectStore
@@ -44,10 +45,7 @@ class LogTail:
 
 
 def can_read(actor: Actor, project: Project) -> bool:
-    current = project.current_revision
-    is_team = actor.user.id == project.submitter_id or (
-        current is not None and actor.user.id in current.credited_builder_ids
-    )
+    is_team = teams.on_team(project, actor.user.id)
     return is_team or actor.is_admin
 
 

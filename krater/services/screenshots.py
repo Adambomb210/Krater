@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from krater.models import Project, ProjectRevision, RevisionKind
+from krater.services import teams
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
 from krater.storage.client import ObjectStore
@@ -83,13 +84,13 @@ class ScreenshotUpload:
 
 
 def _require_completion_draft(actor: Actor, project: Project) -> ProjectRevision:
-    """The project's current, unsubmitted `completion` revision, or raise. Submitter only.
+    """The project's current, unsubmitted `completion` revision, or raise.
 
-    Shared by all three operations: screenshots only ever belong to the *draft in progress*, never a
+    Team only. Shared by all three operations: screenshots only ever belong to the *draft in progress*, never a
     submitted/decided revision (which is immutable review history) or another kind of revision.
     """
-    if actor.user.id != project.submitter_id:
-        raise NotAllowed("Only the submitter may manage this project's screenshots.")
+    if not teams.on_team(project, actor.user.id):
+        raise NotAllowed("Only the project's team may manage its screenshots.")
 
     draft = project.current_revision
     if draft is None or draft.submitted_at is not None or draft.kind is not RevisionKind.COMPLETION:

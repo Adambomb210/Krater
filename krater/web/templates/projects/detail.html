@@ -116,7 +116,60 @@
 </div>
 
 <aside class="stack" aria-label="Actions">
-{% if is_submitter and (can_edit_draft or can_submit or can_submit_completion or can_start_amendment or can_start_completion or can_withdraw) %}
+{% if my_invitation %}
+<section class="card">
+  <h2>You're invited</h2>
+  <p>Join this project's team to work on it with them. Until you join, you can only read it.</p>
+  <div class="action-row">
+    <form method="post" action="/projects/{{ project.id }}/team/{{ my_invitation.id }}/accept" class="form--inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="button button--primary">Join the team</button>
+    </form>
+    <form method="post" action="/projects/{{ project.id }}/team/{{ my_invitation.id }}/decline" class="form--inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="button">Decline</button>
+    </form>
+  </div>
+</section>
+{% endif %}
+
+<section class="card" id="team">
+  <h2>Team</h2>
+  <ul class="team-list">
+    {% for person in team %}
+      <li class="team-list__item">
+        <span class="team-list__name">
+          {{ person.name }}
+          <span class="cell-sub"><code>{{ person.sub }}</code>
+            {%- if person.lead %} &middot; Lead{% elif not person.accepted %} &middot; Invited{% endif %}</span>
+        </span>
+        {% if person.can_remove %}
+          <form method="post" action="/projects/{{ project.id }}/team/{{ person.id }}/remove" class="form--inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="button button--small">
+              {%- if person.is_me %}Leave{% elif person.accepted %}Remove{% else %}Cancel invitation{% endif -%}
+            </button>
+          </form>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+  {% if can_invite %}
+    <form method="post" action="/projects/{{ project.id }}/team" class="form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="field">
+        <label for="team-member">Add a teammate</label>
+        <input type="text" id="team-member" name="member" value="{{ posted.member if error_form == 'team' else '' }}"
+               placeholder="Patchwork ID or email" autocomplete="off"{% if errors.member %} aria-invalid="true"{% endif %}>
+        <p class="field-hint">They need a Patchwork account with Ganymede access. They join once they accept.</p>
+        {% if errors.member %}<p class="field-error">{{ errors.member }}</p>{% endif %}
+      </div>
+      <button type="submit" class="button">Invite</button>
+    </form>
+  {% endif %}
+</section>
+
+{% if is_team and (can_edit_draft or can_submit or can_submit_completion or can_start_amendment or can_start_completion or can_withdraw) %}
 <section class="card">
   <h2>Your actions</h2>
   <div class="action-row">

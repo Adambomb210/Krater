@@ -32,6 +32,7 @@ from krater.models import (
     BudgetEntry,
     BudgetEntryKind,
     Project,
+    ProjectMember,
     ProjectRevision,
     ProjectStatus,
     Review,
@@ -40,7 +41,7 @@ from krater.models import (
     RevisionKind,
     RevisionOutcome,
 )
-from krater.services import approval_policy, audit, budget, quilt_events
+from krater.services import approval_policy, audit, budget, quilt_events, teams
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
 
@@ -169,18 +170,17 @@ def update_draft(
     budget_requested_cents: int | None = None,
     demo_url: str | None = None,
     screenshot_keys: list[str] | None = None,
-    credited_builder_ids: list[uuid.UUID] | None = None,
     tags: list[str] | None = None,
 ) -> Project:
-    """Edit the project's current draft revision in place. Submitter only.
+    """Edit the project's current draft revision in place. The project's team only.
 
     `title`/`repo_url` live on `Project`; every other field lives on the draft revision. Only fields
     passed (non-`None`) are changed. Raises `InvalidState` if there's no draft to edit right now (the
     current revision has already been submitted -- call `start_amendment`/`start_completion` first, or
     wait for a review decision to open the next draft).
     """
-    if actor.user.id != project.submitter_id:
-        raise NotAllowed("Only the submitter may edit this project.")
+    if not teams.on_team(project, actor.user.id):
+        raise NotAllowed("Only the project's team may edit it.")
 
     draft = project.current_revision
     if draft is None or draft.submitted_at is not None:
@@ -198,8 +198,6 @@ def update_draft(
         draft.demo_url = _clean_url("demo_url", demo_url)
     if screenshot_keys is not None:
         draft.screenshot_keys = list(screenshot_keys)
-    if credited_builder_ids is not None:
-        draft.credited_builder_ids = list(credited_builder_ids)
     if tags is not None:
         draft.tags = list(tags)
 
@@ -217,8 +215,8 @@ def set_budget_estimate(session: Session, actor: Actor, *, project: Project, bud
     submitter used the budget estimator -- see `krater.services.pricing.estimate_cost`, whose result
     (already recomputed server-side) is what's passed in here as `budget_estimate.as_dict()`.
     """
-    if actor.user.id != project.submitter_id:
-        raise NotAllowed("Only the submitter may edit this project.")
+    if not teams.on_team(project, actor.user.id):
+        raise NotAllowed("Only the project's team may edit it.")
 
     draft = project.current_revision
     if draft is None or draft.submitted_at is not None:
@@ -246,8 +244,8 @@ def submit(session: Session, actor: Actor, *, project: Project) -> Project:
 
     Use `submit_completion` for a completion revision -- calling this on one raises `InvalidState`.
     """
-    if actor.user.id != project.submitter_id:
-        raise NotAllowed("Only the submitter may submit this project.")
+    if not teams.on_team(project, actor.user.id):
+        raise NotAllowed("Only the project's team may submit it.")
 
     _lock_project(session, project)
     draft = project.current_revision
@@ -325,8 +323,8 @@ def start_amendment(session: Session, actor: Actor, *, project: Project) -> Proj
     ready for the submitter to edit via `update_draft`. Raises `InvalidState` if the project isn't
     `approved`, or if it already has an unsubmitted draft in progress.
     """
-    if actor.user.id != project.submitter_id:
-        raise NotAllowed("Only the submitter may amend this project.")
+    if not teams.on_team(project, actor.user.id):
+        raise NotAllowed("Only the project's team may amend it.")
 
     _lock_project(session, project)
     if project.status is not ProjectStatus.APPROVED:
@@ -369,12 +367,12 @@ def start_completion(session: Session, actor: Actor, *, project: Project) -> Pro
     """Open a new draft `completion` revision on an `approved` project. Submitter only.
 
     `write_up`/`budget_requested_cents` start out copied from the approved revision; the
-    completion-only fields (`demo_url`, `screenshot_keys`, `credited_builder_ids`, `tags`) start empty
+    completion-only fields (`demo_url`, `screenshot_keys`, `tags`) start empty
     for the submitter to fill in via `update_draft` before calling `submit_completion`. Raises
     `InvalidState` if the project isn't `approved`, or already has an unsubmitted draft in progress.
     """
-    if actor.user.id != project.submitter_id:
-        raise NotAllowed("Only the submitter may submit this project for completion.")
+    if not teams.on_team(project, actor.user.id):
+        raise NotAllowed("Only the project's team may submit it for completion.")
 
     _lock_project(session, project)
     if project.status is not ProjectStatus.APPROVED:
@@ -409,8 +407,8 @@ def submit_completion(session: Session, actor: Actor, *, project: Project) -> Pr
     project to `pending_completion_review`. Valid from `approved` (first completion attempt) or
     `completion_changes_requested` (after a completion reject reopened a draft).
     """
-    if actor.user.id != project.submitter_id:
-        raise NotAllowed("Only the submitter may submit this project's completion.")
+    if not teams.on_team(project, actor.user.id):
+        raise NotAllowed("Only the project's team may submit its completion.")
 
     _lock_project(session, project)
     draft = project.current_revision
@@ -494,7 +492,7 @@ def record_review(
     """Record a reviewer's decision on `revision`, then apply its effect if the decision resolves it.
 
     Reviewers only, and only on the project's current, submitted, still-`pending` revision. Rejects
-    self-review: `actor` may not be the project's submitter or a credited builder on the revision. One
+    self-review: `actor` may not lead the project, be on its team or be invited to it (`teams.has_conflict`). One
     review per reviewer per revision. `reason` is required when `decision` is `reject`.
 
     Snapshots `actor.groups` onto `Review.reviewer_groups`. A `reject` rejects the revision immediately
@@ -506,10 +504,8 @@ def record_review(
 
     if not actor.is_reviewer:
         raise NotAllowed("Only reviewers may record a review decision.")
-    if actor.user.id == project.submitter_id:
-        raise NotAllowed("You cannot review your own submission.")
-    if actor.user.id in revision.credited_builder_ids:
-        raise NotAllowed("You cannot review a project that credits you as a builder.")
+    if teams.has_conflict(project, actor.user.id):
+        raise NotAllowed("You cannot review your own project: you lead it, or are on or invited to its team.")
 
     _lock_project(session, project)
     session.refresh(revision)
@@ -632,7 +628,6 @@ def _open_next_draft(session: Session, rejected: ProjectRevision) -> ProjectRevi
         budget_requested_cents=rejected.budget_requested_cents,
         demo_url=rejected.demo_url,
         screenshot_keys=list(rejected.screenshot_keys),
-        credited_builder_ids=list(rejected.credited_builder_ids),
         tags=list(rejected.tags),
         submitted_at=None,
         outcome=RevisionOutcome.PENDING,
@@ -650,17 +645,14 @@ def _open_next_draft(session: Session, rejected: ProjectRevision) -> ProjectRevi
 
 
 _OWN_PROJECT_MESSAGE = (
-    "Admins can't decide, add budget to, or raise the hourly cap of a project they submitted or are credited on. "
-    "Ask another admin."
+    "Admins can't decide, add budget to, or raise the hourly cap of a project they lead or are on the team of "
+    "(or invited to). Ask another admin."
 )
 
 
 def _is_own_project(actor: Actor, project: Project) -> bool:
-    """Whether `actor` submitted `project` or is a credited builder on its current revision."""
-    current = project.current_revision
-    return actor.user.id == project.submitter_id or (
-        current is not None and actor.user.id in current.credited_builder_ids
-    )
+    """Whether `actor` leads `project`, is on its team, or is invited to it (`teams.has_conflict`)."""
+    return teams.has_conflict(project, actor.user.id)
 
 
 def admin_decide(
@@ -673,8 +665,8 @@ def admin_decide(
 ) -> ProjectRevision:
     """Admin override: decide `revision` directly, bypassing `ApprovalPolicy`.
 
-    Admin only, and never on the admin's own project (`NotAllowed` if they submitted it or are a credited
-    builder on `revision`): otherwise an admin could approve and fund their own proposal with no other
+    Admin only, and never on the admin's own project (`NotAllowed` if they lead it, are on its team or are
+    invited to it): otherwise an admin could approve and fund their own proposal with no other
     sign-off. `reason` is required regardless of `decision`. Applies the same approve/reject effect
     as a policy-satisfying reviewer decision would (see `record_review`), and writes an `AuditEvent`.
     Still requires `revision` to be the project's current, submitted, still-`pending` revision.
@@ -682,7 +674,7 @@ def admin_decide(
     if not actor.is_admin:
         raise NotAllowed("Only an admin may override a review decision.")
     project = revision.project
-    if actor.user.id == project.submitter_id or actor.user.id in revision.credited_builder_ids:
+    if teams.has_conflict(project, actor.user.id):
         raise NotAllowed(_OWN_PROJECT_MESSAGE)
     if not (reason and reason.strip()):
         raise ValidationFailed({"reason": "A reason is required."})
@@ -863,7 +855,7 @@ def withdraw(session: Session, actor: Actor, *, project: Project, reason: str | 
     """
     is_self = actor.user.id == project.submitter_id
     if not is_self and not actor.is_admin:
-        raise NotAllowed("Only the submitter or an admin may withdraw this project.")
+        raise NotAllowed("Only the project's lead or an admin may withdraw this project.")
 
     _lock_project(session, project)
     if project.status in _TERMINAL_STATUSES:
@@ -919,16 +911,22 @@ def get_project(session: Session, *, project_id: uuid.UUID) -> Project:
 
 
 def list_projects_for_user(session: Session, *, user_id: uuid.UUID) -> list[Project]:
-    """All projects submitted by `user_id`, newest first."""
-    stmt = sa.select(Project).where(Project.submitter_id == user_id).order_by(Project.created_at.desc())
+    """Every project `user_id` leads or has joined the team of, newest first. Pending invitations are listed
+    separately (`teams.pending_invitations`)."""
+    joined = sa.exists().where(
+        ProjectMember.project_id == Project.id,
+        ProjectMember.user_id == user_id,
+        ProjectMember.accepted_at.is_not(None),
+    )
+    stmt = sa.select(Project).where(sa.or_(Project.submitter_id == user_id, joined)).order_by(Project.created_at.desc())
     return list(session.scalars(stmt).all())
 
 
 def review_queue(session: Session, actor: Actor) -> list[ProjectRevision]:
     """The submitted, still-`pending` current revisions `actor` may review right now.
 
-    Reviewers only. Excludes projects `actor` submitted, revisions crediting `actor` as a builder, and
-    revisions `actor` has already reviewed (they couldn't record another decision on it anyway).
+    Reviewers only. Excludes projects `actor` leads, is on the team of or is invited to, and revisions `actor`
+    has already reviewed (they couldn't record another decision on it anyway).
     """
     if not actor.is_reviewer:
         raise NotAllowed("Only reviewers have a review queue.")
@@ -944,8 +942,7 @@ def review_queue(session: Session, actor: Actor) -> list[ProjectRevision]:
         .where(
             ProjectRevision.submitted_at.is_not(None),
             ProjectRevision.outcome == RevisionOutcome.PENDING,
-            Project.submitter_id != actor.user.id,
-            ~(actor.user.id == sa.any_(ProjectRevision.credited_builder_ids)),
+            ~teams.conflict_clause(actor.user.id),
             ~already_reviewed,
             sa.or_(
                 sa.and_(ProjectRevision.kind == RevisionKind.PROPOSAL, Project.status == ProjectStatus.PENDING_REVIEW),

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from krater.db import get_session
 from krater.models import Project, ProjectRevision, ProjectStatus, User
-from krater.services import budget, people
+from krater.services import budget, people, teams
 from krater.services import projects as project_service
 from krater.services.errors import NotFound
 from krater.storage import ObjectStore, get_object_store
@@ -66,10 +66,9 @@ def gallery_detail(
     # A completed project's `current_revision` is its approved completion revision: approving a
     # completion moves the project straight to `completed` without opening another draft.
     revision = project.current_revision
-    builders: list[str] = []
-    if revision is not None and revision.credited_builder_ids:
-        users = db_session.scalars(sa.select(User).where(User.id.in_(revision.credited_builder_ids)))
-        builders = list(people.names(weave_client, users).values())
+    team_ids = teams.team_user_ids(project)
+    names = people.names(weave_client, db_session.scalars(sa.select(User).where(User.id.in_(team_ids))))
+    team = [names[user_id] for user_id in team_ids if user_id in names]
 
     spend_cents = budget.latest_spend_cents(db_session, project)
     screenshot_urls = _screenshot_urls(get_object_store(), revision)
@@ -79,7 +78,7 @@ def gallery_detail(
         {
             "project": project,
             "revision": revision,
-            "builders": builders,
+            "team": team,
             "spend_cents": spend_cents,
             "screenshot_urls": screenshot_urls,
         },

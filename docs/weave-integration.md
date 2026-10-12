@@ -43,7 +43,7 @@ clicks and for navigation. It stores no names, emails or other personal details:
   directory client's short in-memory cache. A page that can't reach Weave shows the Patchwork ID instead of failing.
 - **Who did what** is recorded by Patchwork ID: audit events carry `actor_sub`, the worker's admin-override notice
   gets the admin's `sub` and reads their name when it posts, and a job's history says "a team member" or "an admin".
-- **Finding a member** (a teammate, a credited builder) takes a Patchwork ID, looked up directly, or an email,
+- **Finding a member** (inviting a teammate) takes a Patchwork ID, looked up directly, or an email,
   matched against `?role=member` because the directory has no search by email. Krater then stores the Patchwork ID.
 - **Slack** uses Weave's `slack_id` only. Krater never looks Slack accounts up by email.
 - **The signed-in name** shown in the header comes from the id_token and lives in the signed session cookie only.

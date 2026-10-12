@@ -23,6 +23,7 @@ from krater.models.enums import (
 from krater.models.gpu_price import GpuPrice
 from krater.models.gpu_price_sample import GpuPriceSample
 from krater.models.project import Project
+from krater.models.project_member import ProjectMember
 from krater.models.project_revision import ProjectRevision
 from krater.models.project_secret import ProjectSecret
 from krater.models.quilt_outbox import QuiltOutbox
@@ -51,6 +52,7 @@ __all__ = [
     "GpuPriceSample",
     "Project",
     "ProjectComputeSettings",
+    "ProjectMember",
     "ProjectRevision",
     "ProjectSecret",
     "ProjectStatus",
