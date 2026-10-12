@@ -54,11 +54,12 @@ runs with compute off (`KRATER_COMPUTE_MODE=off`) until the paid checks in [comp
 Three roles:
 
 - **Submitter:** any Ganymede member who is also a **full Slack member** (see below). Can draft, submit, edit and
-  resubmit after rejection, amend an approved project, and submit their project for completion review.
-- **Reviewer:** can approve or reject proposals and completion requests. Can't review a project they submitted or are a
-  credited builder on.
+  resubmit after rejection, amend an approved project, and submit their project for completion review. The submitter
+  leads the project's **team** (see "Project teams").
+- **Reviewer:** can approve or reject proposals and completion requests. Can't review a project they lead, are on the
+  team of, or are invited to.
 - **Admin:** a *Ganymede* admin. Can override the normal flow at any point: approve or reject at either stage, and adjust
-  or reclaim budget, and set a project's hourly cap. Not on a project they submitted or are a credited builder on,
+  or reclaim budget, and set a project's hourly cap. Not on a project they lead, are on the team of or are invited to,
   though: there they can't decide it, add budget or raise its cap (cutting budget or the cap, reclaiming and withdrawing
   are still fine). This is **not** Weave's existing `admin` flag, which means Weave operations admin.
 
@@ -128,7 +129,7 @@ Postgres. All money is stored as **integer cents** (`*_cents`). Names are sugges
 
 **ProjectRevision** (an immutable snapshot of what was reviewed)
 - `id`, `project_id`, `number`, `kind` (`proposal` | `amendment` | `completion`), `write_up`,
-  `budget_requested_cents`, completion fields (`demo_url`, `screenshot_keys[]`, `credited_builder_ids[]`, `tags[]`),
+  `budget_requested_cents`, completion fields (`demo_url`, `screenshot_keys[]`, `tags[]`),
   `submitted_at`, `outcome` (`pending` | `approved` | `rejected` | `superseded`)
 - Drafts are edited in place. Submitting freezes them into a revision, and resubmitting creates the next one.
 
@@ -166,7 +167,7 @@ Postgres. All money is stored as **integer cents** (`*_cents`). Names are sugges
    fallback. For every decision, Krater:
    - finds the clicker's Krater user by stored Slack id (from Weave's `slack_id`), then checks their roles with Weave's
      directory by `sub` right now (not from anything cached);
-   - rejects self-review (submitter or credited builder);
+   - rejects self-review (anyone on the team, or invited to it);
    - records the Review against the current revision;
    - asks `ApprovalPolicyService` whether the policy is now satisfied.
 4. **Approve.** When the policy is satisfied, the revision is approved, a `BudgetEntry(initial_approval)` is written, the
@@ -192,7 +193,8 @@ Slack is where review happens, not just where notifications go. Krater gets **it
 uses the one interactivity URL a Slack app can have, for code-of-conduct acceptance.
 
 **Per-project private channel:** created on first submission and reused for amendments and the completion review.
-Members are the submitter, credited builders (once added), and all reviewers. When someone gets the `reviewer` role in
+Members are the team (the lead and everyone who has accepted an invitation; a new teammate is invited when they
+join), and all reviewers. When someone gets the `reviewer` role in
 Weave, a periodic job invites them to open project channels. The channel is
 archived when the project ends up `completed` or `withdrawn`.
 
@@ -214,9 +216,22 @@ mirrored into Krater in v1; the project page links to the channel instead.
 
 **Not needed:** a separate completion announcement. The gallery is enough (revisit later).
 
+## Project teams
+
+A project has one **lead** (its submitter) and any number of **team members**. Anyone on the team, or an admin, can
+invite a Ganymede member by Patchwork ID or email, at any time until the project is completed or withdrawn. Krater
+finds them in Weave's directory and stores only their Patchwork ID. The invitation grants nothing until they accept
+it from their Krater home page or the project page; then they can do everything the lead can except withdraw the
+project or remove others: edit and submit drafts, start amendments and the completion, see compute output and files,
+manage project secrets, and run jobs and boxes. A member can leave; the lead or an admin can remove anyone.
+
+Being invited already counts as a conflict of interest: an invitee can't review the project, and an approval from a
+reviewer who later joins (or is invited to) the team stops counting toward the approval policy. Invitations, joins,
+declines and removals are written to the audit log. The gallery credits the team.
+
 ## Completion flow & public gallery
 
-The submitter fills in the completion fields (final write-up, screenshots, demo link, repo link, credited builders,
+The submitter fills in the completion fields (final write-up, screenshots, demo link, repo link,
 tags) and submits them as a `completion` revision. The project moves to `pending_completion_review`. Review happens in
 the same channel, under the `completion` stage policy.
 
@@ -224,7 +239,7 @@ the same channel, under the `completion` stage policy.
   unspent budget is reclaimed to the ledger, and its machines are destroyed.
 - **Rejected:** the project moves to `completion_changes_requested`. The submitter revises and resubmits.
 
-**Public gallery** (no auth). Each entry shows the write-up, screenshots, demo link, repo link, credited builders,
+**Public gallery** (no auth). Each entry shows the write-up, screenshots, demo link, repo link, the team,
 compute spent (latest reconciled estimate, labelled as an estimate), and tags for browsing.
 
 **Screenshot storage:** S3-compatible object storage, as a placeholder until a provider is chosen (see Open questions).
@@ -254,7 +269,7 @@ At any point an admin can:
 - change Krater Compute's policy numbers, globally or for one project (`/admin/compute`);
 - withdraw a project.
 
-The exception is the admin's own project (they submitted it, or are a credited builder on its current revision): they
+The exception is the admin's own project (they lead it, are on its team or are invited to it): they
 can't decide it, add to its budget or raise its hourly cap, so an admin can never fund their own work without someone
 else signing off. Another
 admin, or the normal review, has to do it. Cutting or reclaiming its budget and withdrawing it are still allowed.

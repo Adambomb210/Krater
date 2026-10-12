@@ -19,6 +19,7 @@ from krater.models import (
 from krater.services import budget, projects
 from krater.services.actor import GROUP_ADMIN, GROUP_MEMBER, Actor
 from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
+from tests.services.conftest import add_to_team
 
 
 def _submitted_project(db_session: Session, member: Actor, *, budget_requested_cents: int = 10_000):
@@ -74,10 +75,12 @@ def test_an_admin_cannot_decide_their_own_project(db_session: Session, member: A
     assert project.current_revision.outcome is RevisionOutcome.PENDING
 
 
-def test_an_admin_cannot_decide_a_project_that_credits_them(db_session: Session, member: Actor, admin: Actor) -> None:
+@pytest.mark.parametrize("accepted", [True, False], ids=["on-the-team", "invited"])
+def test_an_admin_cannot_decide_a_project_whose_team_they_are_on(
+    db_session: Session, member: Actor, admin: Actor, accepted: bool
+) -> None:
     project = _submitted_project(db_session, member)
-    project.current_revision.credited_builder_ids = [admin.user.id]
-    db_session.flush()
+    add_to_team(db_session, project, admin, accepted=accepted)
 
     with pytest.raises(NotAllowed):
         projects.admin_decide(

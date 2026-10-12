@@ -12,6 +12,7 @@ from krater.services.actor import GROUP_MEMBER, GROUP_REVIEWER, Actor
 from krater.slack.errors import SlackRequestFailedError
 from krater.slack.fake import FakeSlackClient
 from krater.weave import StubWeaveClient
+from tests.services.conftest import add_to_team
 
 
 def test_ensure_channel_creates_and_invites_the_team(
@@ -299,17 +300,19 @@ def test_ensure_channel_invites_slack_guests_too_and_leaves_refusals_to_slack(
     assert _team_invites(db_session, weave, project, slack_client) == {"U_MEMBER", "U_GUEST"}
 
 
-def test_ensure_channel_invites_credited_builders(
+def test_ensure_channel_invites_the_team_but_not_pending_invitees(
     db_session: Session, member: Actor, make_actor, weave: StubWeaveClient
 ) -> None:
-    builder = make_actor(slack_user_id="U_BUILDER")
-    unlinked_builder = make_actor(email="nobody-in-slack@example.com")
+    teammate = make_actor(slack_user_id="U_TEAMMATE")
+    unlinked_teammate = make_actor()
+    invitee = make_actor(slack_user_id="U_INVITEE")
     project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
-    assert project.current_revision is not None
-    project.current_revision.credited_builder_ids = [builder.user.id, unlinked_builder.user.id]
+    add_to_team(db_session, project, teammate)
+    add_to_team(db_session, project, unlinked_teammate)
+    add_to_team(db_session, project, invitee, accepted=False)
     member.user.slack_user_id = "U_MEMBER"
 
-    assert _team_invites(db_session, weave, project) == {"U_MEMBER", "U_BUILDER"}
+    assert _team_invites(db_session, weave, project) == {"U_MEMBER", "U_TEAMMATE"}
 
 
 def test_ensure_channel_leaves_out_people_without_a_slack_id_from_weave(

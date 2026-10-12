@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from krater.config import Settings
 from krater.models import Project, ProjectSecret
-from krater.services import audit
+from krater.services import audit, teams
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
 
@@ -72,10 +72,7 @@ def _require_cipher(settings: Settings) -> MultiFernet:
 
 
 def _can_manage(actor: Actor, project: Project) -> bool:
-    current = project.current_revision
-    is_team = actor.user.id == project.submitter_id or (
-        current is not None and actor.user.id in current.credited_builder_ids
-    )
+    is_team = teams.on_team(project, actor.user.id)
     return actor.is_member and (is_team or actor.is_admin)
 
 

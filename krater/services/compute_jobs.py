@@ -21,6 +21,7 @@ from krater.models import (
     Project,
 )
 from krater.models.compute_job import FINISHED_JOB_STATES
+from krater.services import teams
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
 from krater.services.launch_rules import LAUNCHABLE_STATUSES
@@ -56,10 +57,7 @@ class JobSpec:
 
 
 def _can_launch_for(actor: Actor, project: Project) -> bool:
-    current = project.current_revision
-    return actor.user.id == project.submitter_id or (
-        current is not None and actor.user.id in current.credited_builder_ids
-    )
+    return teams.on_team(project, actor.user.id)
 
 
 def _validate(spec: JobSpec, *, cap_microusd: int) -> None:

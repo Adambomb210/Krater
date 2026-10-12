@@ -11,6 +11,7 @@ from krater.models import ProjectStatus, ReviewDecision, ReviewSource, RevisionK
 from krater.services import projects
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
+from tests.services.conftest import add_to_team
 
 
 def test_create_project_requires_membership(db_session: Session, make_actor) -> None:
@@ -137,7 +138,7 @@ def test_review_queue_requires_reviewer(db_session: Session, member: Actor) -> N
         projects.review_queue(db_session, member)
 
 
-def test_review_queue_excludes_own_projects_credited_builders_and_already_reviewed(
+def test_review_queue_excludes_own_projects_team_projects_and_already_reviewed(
     db_session: Session, member: Actor, reviewer: Actor, make_actor
 ) -> None:
     other_member = make_actor(groups=frozenset({"ganymede:member"}))
@@ -152,12 +153,11 @@ def test_review_queue_excludes_own_projects_credited_builders_and_already_review
     own = projects.create_project(db_session, reviewer, title="own", write_up="y", budget_requested_cents=100)
     projects.submit(db_session, reviewer, project=own)
 
-    # A submission crediting the reviewer as a builder: excluded.
+    # A submission whose team the reviewer is invited to: excluded.
     credited = projects.create_project(
         db_session, other_member, title="credited", write_up="y", budget_requested_cents=100
     )
-    credited.current_revision.credited_builder_ids = [reviewer.user.id]
-    db_session.flush()
+    add_to_team(db_session, credited, reviewer, accepted=False)
     credited = projects.submit(db_session, other_member, project=credited)
 
     queue_before = {r.id for r in projects.review_queue(db_session, reviewer)}
