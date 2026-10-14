@@ -176,6 +176,10 @@ class OfferQuery:
     machine_id: int | None = None
     verified: bool = True
     limit: int = SEARCH_RESULT_CAP
+    #: Only offers that could cost this much or less an hour, in micro-dollars: `min_bid` at or under it for a bid
+    #: (the GPU alone, so a necessary condition), `dph_total` (GPU plus this query's disk) on demand. A waiting job's
+    #: search then returns no rows at all, and rows are what Vast's daily search quota counts.
+    max_price_microusd: int | None = None
 
     def to_body(self) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -206,6 +210,9 @@ class OfferQuery:
             body["direct_port_count"] = {"gte": self.min_direct_ports}
         if self.machine_id is not None:
             body["machine_id"] = {"eq": self.machine_id}
+        if self.max_price_microusd is not None:
+            price = float(microusd_to_usd(self.max_price_microusd))
+            body["min_bid" if self.rental_type == "bid" else "dph_total"] = {"lte": price}
         return body
 
 
