@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
+from krater import providers
 from krater.compute import spend
 from krater.config import Settings
 from krater.models import (
@@ -82,7 +83,7 @@ def run(session: Session, client: ComputeProvider, settings: Settings, *, now: d
             charge.amount
         )
         labels[charge.instance_id] = charge.label
-    rows.extend(_adopt_unconfirmed(session, labels, ours, now=now))
+    rows.extend(_adopt_unconfirmed(session, labels, ours, provider=_title(settings), now=now))
 
     known = set(
         session.scalars(
@@ -175,8 +176,13 @@ def run(session: Session, client: ComputeProvider, settings: Settings, *, now: d
     return result
 
 
+def _title(settings: Settings) -> str:
+    info = providers.active(settings)
+    return info.title if info else settings.compute_mode
+
+
 def _adopt_unconfirmed(
-    session: Session, labels: dict[int, str | None], ours: sa.ColumnElement[bool], *, now: datetime
+    session: Session, labels: dict[str, str | None], ours: sa.ColumnElement[bool], *, provider: str, now: datetime
 ) -> list[ComputeInstance]:
     """Give charges for a machine Vast rented although it answered the create without confirming (staging,
     2026-10-11) to that create's row, found by its unique label, so they count against its job. The row stays
@@ -203,7 +209,8 @@ def _adopt_unconfirmed(
                 instance_id=row.id,
                 kind="charges_found",
                 message=(
-                    f"Vast charged for instance {row.provider_instance_id} from a create it didn't confirm; "
+                    f"{provider} charged for instance {row.provider_instance_id} from a create it didn't "
+                    "confirm; "
                     "counted here."
                 ),
                 payload={"provider_instance_id": row.provider_instance_id},

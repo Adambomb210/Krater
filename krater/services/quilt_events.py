@@ -61,7 +61,7 @@ SPEND_RECORDED = "spend.recorded"
 SPEND_CORRECTED = "spend.corrected"
 
 #: Why a total went down. Only reconciliation with Vast's final charges lowers one (`krater.compute.reconcile`).
-SPEND_CORRECTION_REASON = "Reconciled with Vast's charges for machines that have finished."
+SPEND_CORRECTION_REASON = "Reconciled with the compute provider's charges for machines that have finished."
 
 #: The namespace of every Krater event id. Never change it: Quilt matches retries and the backfill by id.
 EVENT_ID_NAMESPACE = uuid.UUID("6f1d2c1e-4b7a-5f0e-9c3d-2a8b7e6f5d40")
