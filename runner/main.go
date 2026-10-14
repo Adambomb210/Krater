@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -278,15 +279,31 @@ func Run(ctx context.Context, cfg Config, apiHTTP, storageHTTP *http.Client, gpu
 	}
 	logf("the command exited with code %d", code)
 
+	// A transient storage error here would lose the job's outputs while it shows as succeeded, so retry for a while.
+	// Past the window the machine still reports the exit (it mustn't bill forever), but says loudly what is missing;
+	// the log goes last so that line reaches the job's log too. The /exit wire format has no field for it.
+	end := time.Now().Add(finalPushWindow)
+	var lost []string
 	for _, s := range []*Syncer{checkpoints, outputs} {
-		if n, err := s.Push(ctx); err != nil {
-			logf("final upload of %s failed: %v", s.Area, err)
+		n := 0
+		err := retry(ctx, time.Until(end), func() error {
+			pushed, err := s.Push(ctx)
+			n += pushed
+			return err
+		})
+		if err != nil {
+			logf("final upload of %s FAILED after retrying: %v", s.Area, err)
+			lost = append(lost, s.Area)
 		} else if n > 0 {
 			logf("uploaded %d %s files", n, s.Area)
 		}
 	}
+	if len(lost) > 0 {
+		logf("WARNING: the %s were NOT fully saved; the job will show as finished but those files are missing from Krater",
+			strings.Join(lost, " and "))
+	}
 	if logs != nil {
-		if _, err := logs.Push(ctx); err != nil {
+		if err := retry(ctx, time.Until(end), func() error { _, err := logs.Push(ctx); return err }); err != nil {
 			logf("final upload of the output log failed: %v", err)
 		}
 	}
@@ -295,6 +312,9 @@ func Run(ctx context.Context, cfg Config, apiHTTP, storageHTTP *http.Client, gpu
 	}
 	return code, nil
 }
+
+// finalPushWindow bounds the retries of the final upload after the command exits.
+var finalPushWindow = 5 * time.Minute
 
 func heartbeatLoop(ctx context.Context, api *API, every time.Duration, gpu func() (float64, bool), stop func()) {
 	sampler := newGPUSampler(gpu)
