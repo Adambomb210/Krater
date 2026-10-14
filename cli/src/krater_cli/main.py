@@ -8,14 +8,14 @@
     krater show <job>
     krater logs <job>                            (what the command printed; -f follows it)
     krater wait <job>                            (until it's done; exits with its exit code)
-    krater download <job> --to results/          (its outputs, checkpoints and logs)
+    krater download <job> results/               (its outputs, checkpoints and logs)
     krater ssh <job> -- -L 8888:localhost:8888
     krater open <job|project>                    (the web page)
     krater secrets set <project> HF_TOKEN        (reads the value from stdin, or asks without echoing it)
     krater prices [--gpu 4090] [--all]
 
-A <project> is its id, the first characters of it (4 or more), or part of its title. A <job> is its id or the first
-4+ characters of it, as the tables show. Prices are full hourly cost in dollars (GPU plus disk), and `--target 0.07`
+A <project> is its id, the first characters of it (4 or more), or part of its title. A <job> is its id, the first
+4+ characters of it as the tables show, or its name. Prices are full hourly cost in dollars (GPU plus disk), and `--target 0.07`
 or `--target '$0.07'` both work. `--json` prints Krater's answer as JSON (with the full ids).
 """
 
@@ -135,7 +135,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     submit.add_argument("--max-runtime", type=int, default=8 * 60, help="minutes")
 
-    job_help = "its id or the first characters of it"
+    job_help = "its id, the first characters of it, or its name"
     show = commands.add_parser("show", help="a job's state, machine and recent events")
     show.add_argument("job", help=job_help)
     logs = commands.add_parser("logs", help="what a job's command printed (the end of it)")
@@ -150,7 +150,8 @@ def _parser() -> argparse.ArgumentParser:
     wait.add_argument("--interval", type=_positive, default=5, help="seconds between checks (default 5)")
     download = commands.add_parser("download", help="download a job's outputs, checkpoints and logs")
     download.add_argument("job", help=job_help)
-    download.add_argument("--to", default=".", help="the folder to put them in (default: here)")
+    download.add_argument("folder", nargs="?", help="the folder to put them in (default: here)")
+    download.add_argument("--to", help=argparse.SUPPRESS)  # the folder, as earlier versions took it
     download.add_argument("--only", choices=("outputs", "checkpoints", "logs"), help="just one kind")
     for action, text in (
         ("cancel", "cancel a job or box (its machine is destroyed)"),
@@ -165,7 +166,9 @@ def _parser() -> argparse.ArgumentParser:
     ssh.add_argument("job", help=job_help)
     ssh.add_argument("ssh_args", nargs=argparse.REMAINDER)
     open_ = commands.add_parser("open", help="open a job's or a project's page in your browser")
-    open_.add_argument("target", help="a job or a project: its id, the first characters of it, or part of a title")
+    open_.add_argument(
+        "target", help="a job or a project: its id, the first characters of it, a job's name, or part of a title"
+    )
 
     secrets = commands.add_parser("secrets", help="a project's secrets (values can't be read back)")
     secret_commands = secrets.add_subparsers(dest="secrets_command", required=True)
@@ -435,8 +438,12 @@ def run(
             machine = job.get("machine")
             if machine:
                 say(f"  machine: {machine['gpu']} at {_money(machine['usd_per_hour'])}/h, {machine['state']}")
-                if machine.get("ssh_host"):
-                    say(f"  ssh: krater ssh {job['id']}  (ssh -p {machine['ssh_port']} root@{machine['ssh_host']})")
+                # Only while it runs: a stopped box keeps its old address, which no longer answers.
+                if machine.get("ssh_host") and job["kind"] == "box" and job["state"] == "running":
+                    say(
+                        f"  ssh: krater ssh {resolve.short(job['id'])}  "
+                        f"(ssh -p {machine['ssh_port']} root@{machine['ssh_host']})"
+                    )
             for event in job.get("events", [])[:10]:
                 say(f"  {event['at'][:19].replace('T', ' ')}  {event['message']}")
 
@@ -492,7 +499,7 @@ def run(
         if not files:
             say("Nothing to download yet.")
             return 0
-        root = os.path.abspath(args.to)
+        root = os.path.abspath(args.folder or args.to or ".")
         fetched = already = total = 0
         for file in files:
             target = os.path.abspath(os.path.join(root, file["area"], *file["name"].split("/")))
@@ -516,12 +523,18 @@ def run(
         say(f"Saved {saved}, {already} already here: {_size(total)} in all, under {root}.")
     elif args.command in ("cancel", "stop", "resume", "move"):
         job = krater.post(f"/jobs/{resolve.resolve_job(krater, args.job)}/{args.command}")
-        out(
-            job,
-            lambda: say(
-                f"{job['name']}: {job['state']}" + (f" - {job['state_reason']}" if job["state_reason"] else "")
-            ),
-        )
+
+        def acted() -> None:
+            if args.command == "stop" and job["state"] == "running":
+                # A box stops once its workspace is saved: say that, not "running".
+                say(
+                    f"{job['name']}: stopping. Its /workspace is saved first, then the machine stops "
+                    f"(`krater show {resolve.short(job['id'])}` says when)."
+                )
+            else:
+                say(f"{job['name']}: {job['state']}" + (f" - {job['state_reason']}" if job["state_reason"] else ""))
+
+        out(job, acted)
     elif args.command == "ssh":
         job = krater.get(f"/jobs/{resolve.resolve_job(krater, args.job)}")
         machine = job.get("machine") or {}

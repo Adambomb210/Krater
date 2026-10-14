@@ -143,6 +143,9 @@ class Fake:
             job = {"id": JOB, "kind": body["kind"], "state": "queued", "state_reason": "Queued.", "body": body}
             self.jobs.append(job)
             return httpx.Response(201, json=job)
+        acted = re.fullmatch(r"/jobs/([0-9a-f-]{36})/(cancel|stop|resume|move)", path)
+        if acted and request.method == "POST":
+            return httpx.Response(200, json=self.details[acted.group(1)])
         if re.fullmatch(r"/jobs/[0-9a-f-]{36}", path):
             detail = self.details.get(path.rsplit("/", 1)[1])
             if detail is None:
@@ -394,6 +397,32 @@ def test_an_ambiguous_job_prefix_lists_the_candidates(http, fake) -> None:
     message = str(error.value)
     assert "'2222' matches more than one job" in message
     assert "22222222  nb (Vision Lab, running)" in message and "22223333  train-b (Vision Lab, queued)" in message
+
+
+def test_a_job_is_found_by_its_name(http, fake) -> None:
+    _login(http, [])
+    fake.details[JOB_B] = {**fake.details[JOB], "id": JOB_B, "name": "train-b", "machine": None}
+    _show_ready(fake, JOB_B)
+    said: list[str] = []
+
+    assert run(["show", "Train-B"], http=http, say=said.append) == 0
+
+    assert f"/jobs/{JOB_B}" in _paths(fake)
+
+
+def test_a_name_means_the_active_job_of_that_name(http, fake) -> None:
+    """A job run again keeps its name: the finished runs don't make the name ambiguous."""
+    _login(http, [])
+    fake.project_jobs[PROJECT_OLD] = [job_row("dddd4444-4444-4444-4444-444444444444", "train-b", state="succeeded")]
+    fake.details[JOB_B] = {**fake.details[JOB], "id": JOB_B, "name": "train-b", "machine": None}
+    _show_ready(fake, JOB_B)
+
+    assert run(["show", "train-b"], http=http, say=lambda _: None) == 0
+    assert f"/jobs/{JOB_B}" in _paths(fake)
+
+    fake.project_jobs[PROJECT][1]["state"] = "cancelled"  # now both have ended: say which
+    with pytest.raises(ResolveError, match="'train-b' matches more than one job"):
+        run(["show", "train-b"], http=http)
 
 
 def test_an_unknown_job_prefix_says_so(http, fake) -> None:
@@ -1057,3 +1086,34 @@ def test_open_an_ambiguous_or_unknown_target_opens_nothing(http, fake) -> None:
     with pytest.raises(ResolveError, match="No job or project matching 'zzz'."):
         run(["open", "zzz"], http=http, open_url=opened.append)
     assert opened == []
+
+
+def test_download_still_takes_to_for_the_folder(http, fake, tmp_path) -> None:
+    _login(http, [])
+
+    assert run(["download", JOB, "--to", str(tmp_path / "r")], http=http, say=lambda _: None) == 0
+
+    assert (tmp_path / "r" / "outputs" / "eval" / "score.txt").exists()
+
+
+def test_stop_says_the_box_is_stopping(http, fake) -> None:
+    _login(http, [])
+    said: list[str] = []
+
+    assert run(["stop", "nb"], http=http, say=said.append) == 0
+
+    assert said == [
+        "nb: stopping. Its /workspace is saved first, then the machine stops (`krater show 22222222` says when)."
+    ]
+
+
+@pytest.mark.parametrize(("state", "shown"), [("running", True), ("stopped", False), ("starting", False)])
+def test_show_gives_the_ssh_command_only_while_the_box_runs(http, fake, state, shown) -> None:
+    _login(http, [])
+    _show_ready(fake, JOB)
+    fake.details[JOB]["state"] = state
+    said: list[str] = []
+
+    run(["show", JOB], http=http, say=said.append)
+
+    assert any(line.startswith("  ssh: krater ssh 22222222  (ssh -p 10483 root@1.2.3.4)") for line in said) is shown
