@@ -124,6 +124,10 @@ class ProviderInfo:
     #: What members and admins see ("Vast.ai").
     title: str
     capabilities: Capabilities
+    #: How the runner stops its own machine when Krater is gone (`StartInfo.self_stop`, docs/compute/runner.md):
+    #: `vast_api` (Vast's API with the container's own key) or `shutdown` (a cloud VM whose shutdown behaviour is
+    #: stop). `None` with `capabilities.self_stop` off.
+    self_stop_method: str | None
     #: The worker's client for these settings, or `None` when Krater has no usable account with the provider. Called
     #: on every pass, so a rotated credential takes effect without a restart; cache inside if building is costly.
     client: Callable[[Settings], ComputeProvider | None]
@@ -184,6 +188,7 @@ register(
             charges=True,
             search_quota=True,
         ),
+        self_stop_method="vast_api",
         client=_vast_client,
     )
 )
