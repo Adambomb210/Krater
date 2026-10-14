@@ -27,14 +27,15 @@ krater wait <job>                      # block until it's finished; handy in scr
 krater cancel <job>
 krater submit <project> --name notebook --image ubuntu:24.04 --box --gpu "RTX 3060" --limit 0.08
 krater ssh <job> -- -L 8888:localhost:8888
-krater download <job> results/         # outputs, checkpoints and logs, under results/<kind>/
+krater download <job> results/         # outputs, checkpoints and logs, under results/<kind>/ (--skip-existing)
 krater open <job|project>              # the web page, in your browser
 krater secrets set <project> HF_TOKEN
 ```
 
 `krater login` prints a Weave link (and opens it). Sign in there, and Weave shows a code: paste it into the terminal.
 That works over SSH too. The CLI keeps its sign-in in `credentials.json` under `%APPDATA%\krater` on Windows or
-`~/.config/krater` elsewhere, readable by you only, and refreshes it as needed; `krater logout` deletes it.
+`~/.config/krater` elsewhere, readable by you only, and refreshes it as needed. `krater logout` asks Weave to revoke
+the tokens (best effort: it says so if Weave couldn't be reached) and deletes the file either way.
 `krater secrets set` reads the value from standard input or asks for it without echoing, so it never lands in your
 shell history (with input redirected, such as `< file` or `< NUL`, it reads that instead of waiting at a prompt).
 Every command takes `--json`, which prints Krater's answer unchanged (full ids, every row).
@@ -75,6 +76,16 @@ model with offers if you named none; on demand with `--on-demand`, otherwise int
 and exits with 2 without queueing anything. `krater prices` is the whole list, cheapest first, with only the models that have offers now unless
 you pass `--all`, and `--gpu 4090` narrows it to names containing that.
 
+### Downloading
+
+`krater download <job> results/` fetches every file again each time: the file list has no modified time or checksum, and
+a checkpoint that is uploaded again keeps its size, so a same-size file on disk can't be told from the current one.
+`--skip-existing` leaves alone any local file whose size matches, which is what you want to carry on after an
+interruption (or for `logs`, which only grow) but not for checkpoints you may have overwritten. Download links last
+15 minutes; when one runs out partway the CLI asks Krater for fresh ones and carries on. A file name with an empty,
+`.` or `..` part is skipped with a message, and a file that can't be written is reported and skipped (the exit code
+is 1 at the end).
+
 ### Following and waiting
 
 `krater logs -f` prints the end of the log and then whatever is added, checking every `--interval` seconds (5). A
@@ -83,6 +94,14 @@ retry prints `--- attempt 2 ---` and starts over; more than 1 MB of new output b
 same polling without the log and exits with the job's outcome: 0 if it succeeded, the command's own exit code if it
 failed with one, 1 otherwise (cancelled, or no code). `--timeout <minutes>` gives up with exit code 124 and
 leaves the job running. Ctrl-C ends either one quietly with 130.
+
+A 5xx or 429 from Krater, a timeout or a dropped connection doesn't end either one: it waits (the interval, doubling to at
+most 60 s) and tries again, so a blip can't look like a failed job. Any other
+error (a 4xx, an expired sign-in) still ends it with exit code 1. With `--timeout`, an outage that lasts past it
+ends the wait with 124.
+
+Output is printed with terminal control characters and escape sequences removed (a job's output can come from
+any teammate who can launch on the project); `krater logs --raw` prints it as it is.
 
 ### SSH
 
