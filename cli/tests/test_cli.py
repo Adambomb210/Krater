@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-from krater_cli import follow, main, store
+from krater_cli import auth, follow, main, store
 from krater_cli.api import KraterError
 from krater_cli.main import run
 from krater_cli.resolve import ResolveError
@@ -88,6 +88,14 @@ class Fake:
         self.log_calls = 0
         self.before_log_call: dict[int, object] = {}
         self.files_listed: list[dict] | None = None
+        self.files_after_expiry: list[dict] | None = None  # what the second listing says (fresh URLs)
+        self.files_calls = 0
+        self.expired_status = 403
+        self.token_status: list[int] = []  # statuses the token endpoint answers a refresh with, before succeeding
+        self.refresh_tokens = {"refresh-1"}
+        self.revoked: list[dict] = []
+        self.revoke_status = 200
+        self.api_failures: list[object] = []  # raised or answered, one per API request, before it works
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -116,12 +124,22 @@ class Fake:
                 return httpx.Response(
                     200, json={"access_token": "access-1", "refresh_token": "refresh-1", "expires_in": 7200}
                 )
-            assert form["refresh_token"] == ["refresh-1"]
+            if self.token_status:
+                return httpx.Response(self.token_status.pop(0), json={"error": "nope"})
+            assert form["refresh_token"][0] in self.refresh_tokens
             self.refreshes += 1
             self.valid_access = {"access-2"}
             return httpx.Response(
                 200, json={"access_token": "access-2", "refresh_token": "refresh-2", "expires_in": 7200}
             )
+        if url == f"{WEAVE}/oauth/revoke":
+            self.revoked.append({k: v[0] for k, v in parse_qs(request.content.decode()).items()})
+            return httpx.Response(self.revoke_status)
+        if url.startswith(f"{KRATER}/api/v1/") and self.api_failures:
+            failure = self.api_failures.pop(0)
+            if isinstance(failure, Exception):
+                raise failure
+            return httpx.Response(failure, json={})
         if url.startswith(f"{KRATER}/api/v1/"):
             token = request.headers.get("authorization", "").removeprefix("Bearer ")
             if token not in self.valid_access:
@@ -130,7 +148,11 @@ class Fake:
         if url.startswith("https://store.test/"):
             # A presigned URL: the CLI must not send its Krater sign-in along.
             assert "authorization" not in request.headers
-            return httpx.Response(200, content={"score": b"0.93\n", "log": b"hi\n"}[url.rsplit("/", 1)[1]])
+            if "sig=old" in url:
+                return httpx.Response(self.expired_status, text="Request has expired")
+            return httpx.Response(
+                200, content={"score": b"0.93\n", "log": b"hi\n", "ckpt": b"new!"}[urlparse(url).path.rsplit("/", 1)[1]]
+            )
         return httpx.Response(404)
 
     def api(self, request: httpx.Request, path: str) -> httpx.Response:
@@ -162,10 +184,12 @@ class Fake:
                 200, json={"attempt": 2, "text": "epoch 9\ndone\n", "size_bytes": 99, "truncated": True}
             )
         if path == f"/jobs/{JOB}/files":
+            self.files_calls += 1
+            listed = self.files_after_expiry if self.files_calls > 1 and self.files_after_expiry else self.files_listed
             return httpx.Response(
                 200,
                 json={
-                    "files": self.files_listed
+                    "files": listed
                     or [
                         {
                             "area": "outputs",
@@ -1011,7 +1035,25 @@ def test_report_says_which_host_could_not_be_reached(capsys) -> None:
 # --- download ---------------------------------------------------------------------------------------------------------
 
 
-def test_download_skips_files_that_are_already_here_and_adds_up_sizes(http, fake, tmp_path) -> None:
+def test_download_fetches_everything_again_unless_told_to_skip_same_size_files(http, fake, tmp_path) -> None:
+    # The file list has no modified time or etag, and a re-uploaded checkpoint keeps its size.
+    _login(http, [])
+    results = tmp_path / "results"
+    run(["download", JOB, "--to", str(results)], http=http, say=lambda _: None)
+    (results / "logs" / "attempt-1.log").write_bytes(b"old")  # same size as the real one
+    (results / "outputs" / "eval" / "score.txt").write_bytes(b"x")
+    fake.requests.clear()
+    said: list[str] = []
+
+    run(["download", JOB, "--to", str(results)], http=http, say=said.append)
+
+    assert (results / "logs" / "attempt-1.log").read_bytes() == b"hi\n"
+    assert (results / "outputs" / "eval" / "score.txt").read_bytes() == b"0.93\n"
+    assert sorted(r.url.path for r in fake.requests if r.url.host == "store.test") == ["/log", "/score"]
+    assert said[-1] == f"Saved 2 files: 8 B in all, under {results}."
+
+
+def test_download_skip_existing_keeps_files_of_the_same_size_and_adds_up_sizes(http, fake, tmp_path) -> None:
     _login(http, [])
     results = tmp_path / "results"
     run(["download", JOB, "--to", str(results)], http=http, say=lambda _: None)
@@ -1020,13 +1062,83 @@ def test_download_skips_files_that_are_already_here_and_adds_up_sizes(http, fake
     fake.requests.clear()
     said: list[str] = []
 
-    run(["download", JOB, "--to", str(results)], http=http, say=said.append)
+    run(["download", JOB, "--to", str(results), "--skip-existing"], http=http, say=said.append)
 
     assert "logs/attempt-1.log  already here" in said
     assert "outputs/eval/score.txt  (5 B)" in said
     assert (results / "outputs" / "eval" / "score.txt").read_bytes() == b"0.93\n"
     assert [r.url.path for r in fake.requests if r.url.host == "store.test"] == ["/score"]
     assert said[-1] == f"Saved 1 file, 1 already here: 8 B in all, under {results}."
+
+
+def _two_files(*, old: bool) -> list[dict]:
+    sig = "?sig=old" if old else "?sig=new"
+    return [
+        {"area": "outputs", "name": "a.txt", "size_bytes": 5, "url": "https://store.test/score" + sig},
+        {"area": "checkpoints", "name": "step1.pt", "size_bytes": 4, "url": "https://store.test/ckpt" + sig},
+    ]
+
+
+@pytest.mark.parametrize("status", [403, 400])
+def test_download_asks_for_fresh_urls_when_a_presigned_one_has_expired(http, fake, tmp_path, status) -> None:
+    _login(http, [])
+    fake.expired_status = status
+    fake.files_listed = _two_files(old=True)
+    fake.files_after_expiry = _two_files(old=False)
+    said: list[str] = []
+
+    code = run(["download", JOB, str(tmp_path / "r")], http=http, say=said.append)
+
+    assert code == 0
+    assert (tmp_path / "r" / "outputs" / "a.txt").read_bytes() == b"0.93\n"
+    assert (tmp_path / "r" / "checkpoints" / "step1.pt").read_bytes() == b"new!"
+    assert fake.files_calls == 2  # once more, not once per file: the second file got its fresh URL from that list
+    assert not list((tmp_path / "r").rglob("*.partial"))
+    assert said[-1].startswith("Saved 2 files: 9 B")
+
+
+def test_download_gives_up_on_a_file_whose_fresh_url_is_refused_too(http, fake, tmp_path) -> None:
+    _login(http, [])
+    fake.files_listed = _two_files(old=True)
+    fake.files_after_expiry = _two_files(old=True)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        run(["download", JOB, str(tmp_path / "r")], http=http, say=lambda _: None)
+
+    assert fake.files_calls == 2
+
+
+@pytest.mark.parametrize("name", [".", "a/./b", "a//b", "a/../b", ""])
+def test_download_skips_names_with_dot_or_empty_segments(http, fake, tmp_path, name) -> None:
+    _login(http, [])
+    fake.files_listed = [
+        {"area": "outputs", "name": name, "size_bytes": 5, "url": "https://store.test/score"},
+        {"area": "outputs", "name": "ok.txt", "size_bytes": 5, "url": "https://store.test/score"},
+    ]
+    said: list[str] = []
+
+    assert run(["download", JOB, str(tmp_path / "r")], http=http, say=said.append) == 0
+
+    assert f"Skipped {name}: not a plain relative path." in said
+    assert sorted(p.name for p in (tmp_path / "r" / "outputs").iterdir()) == ["ok.txt"]
+
+
+def test_download_reports_a_file_it_cannot_write_and_carries_on(http, fake, tmp_path) -> None:
+    _login(http, [])
+    results = tmp_path / "r"
+    (results / "outputs").mkdir(parents=True)
+    (results / "outputs" / "a.txt").mkdir()  # a directory where the file should go
+    fake.files_listed = [
+        {"area": "outputs", "name": "a.txt", "size_bytes": 5, "url": "https://store.test/score"},
+        {"area": "outputs", "name": "b.txt", "size_bytes": 5, "url": "https://store.test/score"},
+    ]
+    said: list[str] = []
+
+    assert run(["download", JOB, str(results)], http=http, say=said.append) == 1
+
+    assert any(line.startswith("outputs/a.txt  failed:") for line in said)
+    assert (results / "outputs" / "b.txt").read_bytes() == b"0.93\n"
+    assert said[-1] == f"Saved 1 file, 1 failed: 10 B in all, under {results}."
 
 
 @pytest.mark.parametrize(
@@ -1117,3 +1229,223 @@ def test_show_gives_the_ssh_command_only_while_the_box_runs(http, fake, state, s
     run(["show", JOB], http=http, say=said.append)
 
     assert any(line.startswith("  ssh: krater ssh 22222222  (ssh -p 10483 root@1.2.3.4)") for line in said) is shown
+
+
+# --- review fixes: transient errors, prices, refresh, terminal output, logout ---------------------------------------------
+
+
+def _wait(http, *extra) -> tuple[int, list[str], list[float]]:
+    said: list[str] = []
+    sleeps: list[float] = []
+    code = run(["wait", JOB, *extra], http=http, say=said.append, sleep=sleeps.append)
+    return code, said, sleeps
+
+
+def test_wait_rides_out_a_5xx_a_429_and_a_dropped_connection(http, fake, capsys) -> None:
+    _login(http, [])
+    fake.details[JOB].update(state="succeeded", exit_code=0)
+    fake.api_failures = [503, httpx.ConnectError("refused"), 429, httpx.ReadTimeout("slow")]
+
+    code, said, sleeps = _wait(http)
+
+    assert code == 0 and said == ["nb: succeeded"]
+    assert sleeps == [5, 10, 20, 40]  # a growing pause, starting at the interval
+    assert capsys.readouterr().err.count("trying again") == 1
+
+
+def test_wait_backs_off_no_further_than_a_minute(http, fake) -> None:
+    _login(http, [])
+    fake.details[JOB].update(state="succeeded", exit_code=0)
+    fake.api_failures = [500] * 8
+
+    _, _, sleeps = _wait(http)
+
+    assert max(sleeps) == 60 and sleeps[-1] == 60
+
+
+def test_wait_still_stops_at_a_4xx_other_than_429(http, fake) -> None:
+    _login(http, [])
+    fake.api_failures = [403]
+
+    with pytest.raises(KraterError) as caught:
+        _wait(http)
+
+    assert caught.value.status == 403
+
+
+def test_wait_times_out_with_124_while_krater_is_down(http, fake) -> None:
+    _login(http, [])
+    fake.api_failures = [503] * 100
+    now = [0.0]
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    said: list[str] = []
+    code = run(["wait", JOB, "--timeout", "1"], http=http, say=said.append, sleep=sleep, clock=lambda: now[0])
+
+    assert code == 124 and said[0].startswith("Gave up after 1 minute;")
+
+
+def test_logs_follow_rides_out_a_5xx_too(http, fake) -> None:
+    _login(http, [])
+    fake.log_files = {1: b"a\n"}
+    fake.details[JOB].update(state="succeeded")
+    fake.api_failures = [502, httpx.ConnectError("refused")]
+
+    code, said = _follow(http, fake, [lambda: None, lambda: None])
+
+    assert code == 0 and said == ["a", "nb: succeeded", "sleeps=[5, 10]"]
+
+
+@pytest.mark.parametrize("price", ["nan", "NaN", "inf", "$snan"])
+def test_submit_rejects_a_price_that_is_not_finite(http, fake, capsys, price) -> None:
+    with pytest.raises(SystemExit) as exit_:
+        run([*SUBMIT, "--limit", price], http=http)
+
+    assert exit_.value.code == 2 and "isn't a price" in capsys.readouterr().err
+
+
+def test_a_refresh_token_another_krater_rotated_is_picked_up_from_disk(http, fake) -> None:
+    _login(http, [])
+    krater = main.Krater(http)  # a long-lived process: it loaded refresh-1
+    store.save({**store.load(), "refresh_token": "refresh-9"})  # another invocation rotated it meanwhile
+    fake.valid_access = {"access-2"}
+    fake.token_status = [400]  # Weave refuses the spent refresh-1
+    fake.refresh_tokens = {"refresh-9"}
+
+    assert krater.get("/me")["name"] == "Ada"
+
+    assert fake.refreshes == 1 and store.load()["refresh_token"] == "refresh-2"
+
+
+def test_a_refused_refresh_with_nothing_new_on_disk_says_to_sign_in_again(http, fake) -> None:
+    _login(http, [])
+    fake.valid_access = {"access-2"}
+    fake.token_status = [400]  # a second try (wrongly) would succeed
+
+    with pytest.raises(auth.AuthError, match="sign-in has expired"):
+        run(["whoami"], http=http, say=lambda _: None)
+
+
+@pytest.mark.parametrize("status", [500, 503, 429])
+def test_a_weave_outage_during_refresh_is_not_reported_as_an_expired_sign_in(http, fake, status) -> None:
+    _login(http, [])
+    fake.valid_access = {"access-2"}
+    fake.token_status = [status]
+
+    with pytest.raises(auth.AuthError, match="Weave is unavailable") as caught:
+        run(["whoami"], http=http, say=lambda _: None)
+
+    assert "expired" not in str(caught.value) and store.load()["refresh_token"] == "refresh-1"
+
+
+def test_saves_use_their_own_temp_file_and_leave_nothing_behind(config_dir, monkeypatch) -> None:
+    sources: list[str] = []
+    real_replace = os.replace
+
+    def replace(src, dst):
+        sources.append(os.path.basename(src))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(store.os, "replace", replace)
+
+    store.save({"n": 1})
+    store.save({"n": 2})
+
+    assert len(set(sources)) == 2 and "credentials.tmp" not in sources  # no shared temp name to interleave in
+    assert store.load() == {"n": 2}
+    assert [p.name for p in config_dir.iterdir()] == ["credentials.json"]
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(store.credentials_path()).st_mode) == 0o600
+
+
+def test_a_failed_save_removes_its_temp_file(config_dir, monkeypatch) -> None:
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store.os, "replace", boom)
+
+    with pytest.raises(OSError, match="disk full"):
+        store.save({"a": 1})
+
+    assert list(config_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("raw", "shown"),
+    [
+        ("plain\ttab\nline", "plain\ttab\nline"),
+        ("a\x1b[2Jb\x1b[31mred\x1b[0m", "abred"),
+        ("t\x1b]0;owned\x07itle", "title"),
+        ("t\x1b]0;owned\x1b\\itle", "title"),
+        ("bell\x07 nul\x00 del\x7f c1\x9b[2J", "bell nul del c1[2J"),
+        ("progress 10%\rprogress 20%", "progress 10%\rprogress 20%"),
+        ("lone \x1b", "lone "),
+    ],
+)
+def test_clean_strips_terminal_control_sequences(raw, shown) -> None:
+    assert follow.clean(raw) == shown
+
+
+EVIL = b"ok\x1b[2J\x1b]0;pwned\x07 done\n"
+
+
+def test_logs_strips_control_characters_unless_raw(http, fake) -> None:
+    _login(http, [])
+    fake.log_files = {1: EVIL}
+    said: list[str] = []
+
+    run(["logs", JOB], http=http, say=said.append)
+    run(["logs", JOB, "--raw"], http=http, say=said.append)
+
+    assert said == ["ok done", EVIL.decode().rstrip("\n")]
+
+
+def test_logs_follow_strips_control_characters_unless_raw(http, fake) -> None:
+    _login(http, [])
+    fake.log_files = {1: EVIL}
+    fake.details[JOB].update(state="succeeded")
+
+    _, cleaned = _follow(http, fake, [])
+    _, raw = _follow(http, fake, [], "--raw")
+
+    assert cleaned[0] == "ok done" and raw[0] == EVIL.decode().rstrip("\n")
+
+
+def test_a_job_name_is_cleaned_in_the_state_line() -> None:
+    assert follow.state_line({"name": "n\x1b[2Jb", "state": "failed", "state_reason": "x\x07y"}) == "nb: failed - xy"
+
+
+def test_logout_revokes_both_tokens_at_weave_and_deletes_the_file(http, fake) -> None:
+    _login(http, [])
+    said: list[str] = []
+
+    assert run(["logout"], http=http, say=said.append) == 0
+
+    assert said == ["Signed out."]
+    assert store.load() is None
+    assert {(r["token"], r["token_type_hint"]) for r in fake.revoked} == {
+        ("refresh-1", "refresh_token"),
+        ("access-1", "access_token"),
+    }
+    assert all(r["client_id"] == "cli-app" for r in fake.revoked)
+
+
+def test_logout_deletes_the_file_and_says_so_when_weave_does_not_revoke(http, fake) -> None:
+    _login(http, [])
+    fake.revoke_status = 500
+    said: list[str] = []
+
+    assert run(["logout"], http=http, say=said.append) == 0
+
+    assert store.load() is None
+    assert said[0] == "Signed out." and "revoke" in said[1]
+
+
+def test_logout_when_not_signed_in_asks_weave_nothing(http, fake) -> None:
+    said: list[str] = []
+
+    run(["logout"], http=http, say=said.append)
+
+    assert said == ["Not signed in."] and fake.requests == []

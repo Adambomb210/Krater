@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
 
@@ -41,11 +42,19 @@ def save(data: dict) -> None:
     if os.name != "nt":
         os.chmod(directory, 0o700)
     path = credentials_path()
-    tmp = path.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as file:
-        json.dump(data, file)
-    os.replace(tmp, path)
+    # A unique name in the same directory (so the replace is atomic): two saves at once can't interleave in one file.
+    # `mkstemp` creates it with mode 0600.
+    fd, name = tempfile.mkstemp(dir=directory, prefix="credentials.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump(data, file)
+        os.replace(name, path)
+    except BaseException:
+        try:
+            os.unlink(name)
+        except OSError:
+            pass
+        raise
 
 
 def clear() -> bool:

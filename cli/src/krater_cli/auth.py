@@ -166,21 +166,71 @@ def _token_fields(token: dict) -> dict:
     }
 
 
+def _refresh_failure(status: int) -> AuthError:
+    if status == 429 or status >= 500:
+        return AuthError("Weave is unavailable right now. Try again in a moment.")
+    if status in (400, 401):
+        return AuthError("Your sign-in has expired. Run `krater login`.")
+    return AuthError(f"Weave refused to refresh your sign-in ({status}). Run `krater login` if this keeps happening.")
+
+
 def refresh(creds: dict, *, http: httpx.Client) -> dict:
-    """New tokens from the refresh token, stored. Raises `AuthError` if Weave won't (sign in again)."""
+    """New tokens from the refresh token, stored. Raises `AuthError` if Weave won't (sign in again).
+
+    Weave rotates the refresh token on every use. If another `krater` process refreshed since this one loaded its
+    sign-in, our refresh token is spent but the stored one is good: when a refusal comes and the file holds a different
+    refresh token, try that one (once) instead of telling the member to sign in again.
+    """
     if not creds.get("refresh_token"):
         raise AuthError("Your sign-in has expired. Run `krater login`.")
-    response = http.post(
-        creds["token_endpoint"],
-        data={"grant_type": "refresh_token", "refresh_token": creds["refresh_token"], "client_id": creds["client_id"]},
-    )
-    if response.status_code != 200:
-        raise AuthError("Your sign-in has expired. Run `krater login`.")
+    retried = False
+    while True:
+        response = http.post(
+            creds["token_endpoint"],
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": creds["refresh_token"],
+                "client_id": creds["client_id"],
+            },
+        )
+        if response.status_code == 200:
+            break
+        stored = store.load() or {}
+        newer = stored.get("refresh_token")
+        if not retried and newer and newer != creds["refresh_token"] and response.status_code in (400, 401):
+            retried = True
+            creds = {**creds, **stored}
+            continue
+        raise _refresh_failure(response.status_code)
     updated = {**creds, **_token_fields(_json(response, "Refreshing your sign-in"))}
     if not updated.get("refresh_token"):
         updated["refresh_token"] = creds["refresh_token"]
     store.save(updated)
     return updated
+
+
+def revoke(creds: dict, *, http: httpx.Client) -> bool:
+    """Ask Weave to invalidate the stored tokens (Doorkeeper's `/oauth/revoke`, next to the token endpoint).
+
+    Best effort: returns whether Weave accepted both. Doorkeeper answers 200 for a token it doesn't know.
+    """
+    endpoint = str(creds.get("token_endpoint") or "")
+    if not endpoint or not creds.get("client_id"):
+        return False
+    url = endpoint.rsplit("/", 1)[0] + "/revoke"
+    ok = True
+    for hint, key in (("refresh_token", "refresh_token"), ("access_token", "access_token")):
+        if not creds.get(key):
+            continue
+        try:
+            response = http.post(
+                url, data={"token": creds[key], "token_type_hint": hint, "client_id": creds["client_id"]}
+            )
+        except httpx.HTTPError:
+            ok = False
+            continue
+        ok = ok and response.status_code == 200
+    return ok
 
 
 def current(*, http: httpx.Client) -> dict:
