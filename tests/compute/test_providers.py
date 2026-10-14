@@ -34,7 +34,11 @@ def without(monkeypatch):
         monkeypatch.setitem(
             providers._REGISTRY,
             "vast",
-            dataclasses.replace(vast, capabilities=dataclasses.replace(vast.capabilities, **changed)),
+            dataclasses.replace(
+                vast,
+                capabilities=dataclasses.replace(vast.capabilities, **changed),
+                self_stop_method=None if "self_stop" in flags else vast.self_stop_method,
+            ),
         )
 
     return take_away
@@ -150,3 +154,12 @@ def test_the_runner_gets_the_policys_switch_where_the_provider_can(db_session, m
         settings=Settings(compute_mode="vast"),
     )
     assert info.self_stop_after_seconds == 180 * 60
+
+
+def test_a_self_stopping_provider_must_name_how() -> None:
+    """Without a method a runner would fall back to Vast's API, which is the wrong call for any other provider."""
+    info = providers.registered()["vast"]
+    with pytest.raises(ValueError, match="self_stop_method"):
+        dataclasses.replace(info, name="other", self_stop_method=None)
+    with pytest.raises(ValueError, match="self_stop_method"):
+        dataclasses.replace(info, name="other", capabilities=dataclasses.replace(info.capabilities, self_stop=False))
