@@ -26,9 +26,9 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from krater.models import GpuPriceSample
+from krater.providers import ComputeProvider, ProviderError, ProviderRateLimitedError
 from krater.services import compute_settings
-from krater.vast import Offer, OfferQuery, RentalType, VastClient, usd_to_microusd
-from krater.vast.errors import VastError, VastRateLimitedError
+from krater.vast import Offer, OfferQuery, RentalType, usd_to_microusd
 from krater.vast.types import SEARCH_RESULT_CAP
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ class RecordResult:
 
 def record(
     session: Session,
-    client: VastClient,
+    client: ComputeProvider,
     *,
     gpu_names: list[str],
     disk_gb: int,
@@ -112,11 +112,11 @@ def record(
         )
         try:
             offers = client.search_offers(query)
-        except VastRateLimitedError:
+        except ProviderRateLimitedError:
             logger.warning("krater.price_history: Vast rate-limited the run after %d samples; stopping", written)
             session.flush()
             return RecordResult(written, failed + 1, stopped_early=True)
-        except VastError:
+        except ProviderError:
             logger.exception("krater.price_history: searching %s (%s) failed; skipping", gpu_name, rental_type)
             failed += 1
             continue

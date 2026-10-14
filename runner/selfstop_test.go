@@ -139,6 +139,20 @@ func TestWithoutStartInfoTheContainersOwnIdIsUsed(t *testing.T) {
 	}
 }
 
+func TestKraterCanTurnTheSwitchOff(t *testing.T) {
+	vast := newFakeVast(t)
+	now := time.Now()
+	s := testSelfStop(vast, &now, map[string]string{"CONTAINER_API_KEY": "k"})
+	s.Configure(&StartInfo{SelfStopAfterSeconds: -1})
+	now = now.Add(48 * time.Hour)
+
+	s.Check(context.Background())
+
+	if len(vast.calls()) != 0 || s.Fired() {
+		t.Errorf("calls %v, fired %v", vast.calls(), s.Fired())
+	}
+}
+
 func TestWithoutAContainerKeyNothingIsCalled(t *testing.T) {
 	vast := newFakeVast(t)
 	now := time.Now()

@@ -61,9 +61,10 @@ class Settings(BaseSettings):
     weave_group_reviewer: str = "krater-reviewers"
     weave_group_admin: str = "krater-admins"
 
-    # Which compute layer launches members' machines. `vast` runs Krater Compute: the worker rents Vast machines
-    # itself (`krater.compute`, docs/compute/). `off` launches nothing: Krater still runs proposals, review, budgets,
-    # Slack, the gallery and Quilt events. Off by default, so a developer with a live Vast key can't rent by accident.
+    # Which provider Krater Compute rents members' machines from (`krater.providers`; a new provider adds its name
+    # here). `vast`: the worker rents Vast machines itself (`krater.compute`, docs/compute/). `off` launches nothing:
+    # Krater still runs proposals, review, budgets, Slack, the gallery and Quilt events. Off by default, so a developer
+    # with a live provider key can't rent by accident.
     compute_mode: Literal["off", "vast"] = "off"
     # Every instance Krater rents is labelled `<prefix><job>-<attempt>`. The scheduler destroys any instance on the
     # account with this prefix that it has no record of, so give each Krater (staging, production) sharing a Vast
@@ -182,6 +183,11 @@ class Settings(BaseSettings):
     # The most outbox rows one sender run sends. The periodic task runs every minute.
     quilt_batch_size: int = 200
 
+    @property
+    def compute_on(self) -> bool:
+        """Whether Krater Compute runs, with any provider."""
+        return self.compute_mode != "off"
+
     @model_validator(mode="after")
     def _validate_production_safety(self) -> Settings:
         if self.env == "production":
@@ -192,7 +198,7 @@ class Settings(BaseSettings):
                 raise ValueError("KRATER_PRICING_MODE cannot be 'fake' when KRATER_ENV=production")
             if self.compute_mode == "vast" and self.vast_mode != "live":
                 raise ValueError("KRATER_VAST_MODE must be 'live' when KRATER_COMPUTE_MODE=vast in production")
-            if self.compute_mode == "vast" and self.compute_label_prefix == DEFAULT_COMPUTE_LABEL_PREFIX:
+            if self.compute_on and self.compute_label_prefix == DEFAULT_COMPUTE_LABEL_PREFIX:
                 # The scheduler destroys unknown instances with its prefix: two Kraters on one Vast account with the
                 # same prefix would destroy each other's machines.
                 raise ValueError("Set KRATER_COMPUTE_LABEL_PREFIX to this deployment's own prefix in production")

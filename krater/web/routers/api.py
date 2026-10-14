@@ -45,7 +45,7 @@ CLI_SCOPES = "openid profile"
 
 def _enabled() -> None:
     settings = get_settings()
-    if settings.compute_mode != "vast" or not settings.weave_cli_client_id:
+    if not settings.compute_on or not settings.weave_cli_client_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
 

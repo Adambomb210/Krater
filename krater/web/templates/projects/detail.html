@@ -12,6 +12,11 @@
       <p class="page-subtitle project-link"><a href="{{ project.repo_url }}">{{ project.repo_url }}</a></p>
     {% endif %}
   </div>
+  {% if compute_on %}
+    <div class="page-actions">
+      <a class="button button--primary" href="/projects/{{ project.id }}/compute">Compute</a>
+    </div>
+  {% endif %}
 </div>
 
 <dl class="stats">
@@ -45,18 +50,7 @@
     <p class="policy-note">{{ summary.policy_explanation }}</p>
   {% endif %}
 
-  {% if budget_flag == "teardown" %}
-    <p class="budget-banner">
-      Budget reached: this project's machines have been torn down. New launches are blocked until the
-      ceiling is raised.
-    </p>
-  {% elif budget_flag == "warning" %}
-    <p class="budget-banner">
-      Warning: this project is approaching its compute budget ceiling.
-    </p>
-  {% endif %}
-
-  {% if compute_vast %}
+  {% if compute_on %}
     <p class="compute-hint">
       <a href="/projects/{{ project.id }}/compute">Compute</a>: run jobs and SSH boxes on this project's budget.
       Each machine is capped at {{ hourly_cap_cents | dollars }}/hour.

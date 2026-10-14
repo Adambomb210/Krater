@@ -470,7 +470,7 @@ def _build_detail_context(
 
     compute_mode = get_settings().compute_mode
     budget_flag = None
-    if compute_mode == "vast":
+    if compute_mode != "off":
         budget_flag = current_budget_flag(
             session,
             project,
@@ -527,7 +527,7 @@ def _build_detail_context(
         "can_invite": team_open and (is_team or actor.is_admin),
         "is_admin": actor.is_admin,
         "show_compute_off_notice": compute_mode == "off" and project.status in LAUNCHABLE_STATUSES,
-        "compute_vast": compute_mode == "vast",
+        "compute_on": compute_mode != "off",
         "has_draft": has_draft,
         "can_edit_draft": is_team and has_draft,
         "can_submit": is_team and has_draft and current.kind is not RevisionKind.COMPLETION,

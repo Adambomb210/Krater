@@ -75,7 +75,7 @@ def pricing_index(
             "sort_labels": _SORT_LABELS,
             "refreshed_at": pricing.last_refreshed_at(db_session),
             # Krater's own Vast price history only fills while compute runs (the worker needs a Vast key).
-            "show_history": settings.compute_mode == "vast"
+            "show_history": settings.compute_on
             or db_session.scalar(sa.select(sa.exists().where(GpuPriceSample.id.is_not(None)))),
             "cap_cents": settings.compute_max_hourly_cost_cents,
         },

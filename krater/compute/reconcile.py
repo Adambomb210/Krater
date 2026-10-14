@@ -34,8 +34,9 @@ from krater.models import (
     Project,
     SpendReconciliation,
 )
+from krater.providers import ComputeProvider
 from krater.services import audit, compute_settings
-from krater.vast import VastClient, usd_to_microusd
+from krater.vast import usd_to_microusd
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +55,15 @@ class ReconcileResult:
     unknown_sources: list[str] = field(default_factory=list)
 
 
-def run(session: Session, client: VastClient, settings: Settings, *, now: datetime) -> ReconcileResult:
+def run(session: Session, client: ComputeProvider, settings: Settings, *, now: datetime) -> ReconcileResult:
     """One reconciliation. Commits; run it under the scheduler's lock, since both write instance estimates."""
     result = ReconcileResult()
+    # The provider's charges cover only its own machines.
+    ours = ComputeInstance.provider == settings.compute_mode
     rows = list(
         session.scalars(
             sa.select(ComputeInstance).where(
+                ours,
                 ComputeInstance.vast_instance_id.is_not(None),
                 sa.or_(ComputeInstance.destroyed_at.is_(None), ComputeInstance.destroyed_at >= now - SETTLED_AFTER),
             )
@@ -78,11 +82,11 @@ def run(session: Session, client: VastClient, settings: Settings, *, now: dateti
             charge.amount
         )
         labels[charge.instance_id] = charge.label
-    rows.extend(_adopt_unconfirmed(session, labels, now=now))
+    rows.extend(_adopt_unconfirmed(session, labels, ours, now=now))
 
     known = set(
         session.scalars(
-            sa.select(ComputeInstance.vast_instance_id).where(ComputeInstance.vast_instance_id.is_not(None))
+            sa.select(ComputeInstance.vast_instance_id).where(ours, ComputeInstance.vast_instance_id.is_not(None))
         )
     )
     for instance_id, label in labels.items():
@@ -162,7 +166,9 @@ def run(session: Session, client: VastClient, settings: Settings, *, now: dateti
     return result
 
 
-def _adopt_unconfirmed(session: Session, labels: dict[int, str | None], *, now: datetime) -> list[ComputeInstance]:
+def _adopt_unconfirmed(
+    session: Session, labels: dict[int, str | None], ours: sa.ColumnElement[bool], *, now: datetime
+) -> list[ComputeInstance]:
     """Give charges for a machine Vast rented although it answered the create without confirming (staging,
     2026-10-11) to that create's row, found by its unique label, so they count against its job. The row stays
     `create_failed`, so the scheduler's sweep still destroys the machine if it's somehow still there."""
@@ -172,6 +178,7 @@ def _adopt_unconfirmed(session: Session, labels: dict[int, str | None], *, now: 
     rows = list(
         session.scalars(
             sa.select(ComputeInstance).where(
+                ours,
                 ComputeInstance.vast_instance_id.is_(None),
                 ComputeInstance.state == ComputeInstanceState.CREATE_FAILED,
                 ComputeInstance.label.in_(list(by_label)),

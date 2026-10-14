@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 import procrastinate
 
+from krater import providers
 from krater.compute import launch as compute_launch
 from krater.compute import reconcile as compute_reconciler
 from krater.compute import scheduler as compute_scheduler
@@ -147,12 +148,10 @@ COMPUTE_SCHEDULER_LOCK = "compute_scheduler"
 @app.periodic(cron="* * * * *")
 @app.task(name="compute_schedule", lock=COMPUTE_SCHEDULER_LOCK, queueing_lock=COMPUTE_SCHEDULER_LOCK)
 def compute_schedule(timestamp: int) -> None:
-    """One Krater Compute scheduler pass (`krater.compute.scheduler`). Only with `KRATER_COMPUTE_MODE=vast` and a
-    usable Vast client; otherwise nothing is rented or destroyed."""
+    """One Krater Compute scheduler pass (`krater.compute.scheduler`). Only with a provider in
+    `KRATER_COMPUTE_MODE` and a usable client for it; otherwise nothing is rented or destroyed."""
     settings = get_settings()
-    if settings.compute_mode != "vast":
-        return
-    client = get_vast_client()
+    client = providers.get_provider(settings)
     if client is None:
         return
     session = get_sessionmaker()()
@@ -187,9 +186,10 @@ def compute_reconcile(timestamp: int) -> None:
     the scheduler's lock, since both write instance estimates."""
     del timestamp
     settings = get_settings()
-    if settings.compute_mode != "vast":
-        return
-    client = get_vast_client()
+    provider = providers.active(settings)
+    if provider is None or not provider.capabilities.charges:
+        return  # without the provider's charges, Krater's estimate is the spend
+    client = provider.client(settings)
     if client is None:
         return
     session = get_sessionmaker()()
@@ -212,7 +212,7 @@ def compute_reconcile(timestamp: int) -> None:
 @app.task(name="compute_storage_cleanup")
 def compute_storage_cleanup(timestamp: int) -> None:
     """Hourly: abort unfinished multipart uploads of jobs that have ended (`krater.compute.storage_cleanup`)."""
-    if get_settings().compute_mode != "vast":
+    if providers.active(get_settings()) is None:
         return
     session = get_sessionmaker()()
     try:
