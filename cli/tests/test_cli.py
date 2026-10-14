@@ -4,19 +4,43 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
+import sys
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
 
-from krater_cli import store
+from krater_cli import follow, main, store
+from krater_cli.api import KraterError
 from krater_cli.main import run
+from krater_cli.resolve import ResolveError
 
 KRATER = "https://krater.test"
 WEAVE = "https://weave.test"
 PROJECT = "11111111-1111-1111-1111-111111111111"
 JOB = "22222222-2222-2222-2222-222222222222"
+JOB_B = "22223333-3333-3333-3333-333333333333"  # shares the prefix "2222" with JOB
+JOB_C = "9f9f9f9f-9999-9999-9999-999999999999"
+PROJECT_B = "aaaa1111-1111-1111-1111-111111111111"
+PROJECT_OLD = "bbbb2222-2222-2222-2222-222222222222"
+STRANGER_JOB = "cccc3333-3333-3333-3333-333333333333"  # in a project the member isn't on
+
+
+def job_row(job_id: str, name: str, *, state: str = "running", project: str = PROJECT) -> dict:
+    return {
+        "id": job_id,
+        "project_id": project,
+        "name": name,
+        "kind": "job",
+        "state": state,
+        "state_reason": None,
+        "target_usd_per_hour": "0.0700",
+        "max_usd_per_hour": "0.1000",
+        "spend_cents": 250,
+        "exit_code": None,
+    }
 
 
 class Fake:
@@ -27,6 +51,43 @@ class Fake:
         self.refreshes = 0
         self.jobs: list[dict] = []
         self.secrets: dict[str, str] = {}
+        self.jobs_422 = False
+        self.projects = [
+            {"id": PROJECT, "title": "Vision Lab", "status": "approved", "can_launch": True},
+            {"id": PROJECT_B, "title": "Audio Lab", "status": "pending_review", "can_launch": False},
+            {"id": PROJECT_OLD, "title": "Vision Old Notes", "status": "completed", "can_launch": False},
+        ]
+        self.project_jobs = {
+            PROJECT: [job_row(JOB, "nb"), job_row(JOB_B, "train-b", state="queued")],
+            PROJECT_B: [job_row(JOB_C, "sing", project=PROJECT_B)],
+            PROJECT_OLD: [],
+        }
+        self.details: dict[str, dict] = {
+            JOB: {
+                "id": JOB,
+                "project_id": PROJECT,
+                "name": "nb",
+                "kind": "box",
+                "state": "running",
+                "state_reason": None,
+                "exit_code": None,
+                "machine": {"ssh_host": "1.2.3.4", "ssh_port": 10483},
+            },
+            STRANGER_JOB: {
+                "id": STRANGER_JOB,
+                "project_id": PROJECT_OLD,
+                "name": "theirs",
+                "kind": "job",
+                "state": "running",
+                "state_reason": None,
+                "exit_code": None,
+            },
+        }
+        self.prices: list[dict] = []
+        self.log_files: dict[int, bytes] = {}
+        self.log_calls = 0
+        self.before_log_call: dict[int, object] = {}
+        self.files_listed: list[dict] | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -82,18 +143,17 @@ class Fake:
             job = {"id": JOB, "kind": body["kind"], "state": "queued", "state_reason": "Queued.", "body": body}
             self.jobs.append(job)
             return httpx.Response(201, json=job)
-        if path == f"/jobs/{JOB}":
-            return httpx.Response(
-                200,
-                json={
-                    "id": JOB,
-                    "name": "nb",
-                    "kind": "box",
-                    "state": "running",
-                    "state_reason": None,
-                    "machine": {"ssh_host": "1.2.3.4", "ssh_port": 10483},
-                },
-            )
+        if re.fullmatch(r"/jobs/[0-9a-f-]{36}", path):
+            detail = self.details.get(path.rsplit("/", 1)[1])
+            if detail is None:
+                return httpx.Response(404, json={"detail": f"No job {path.rsplit('/', 1)[1]}."})
+            return httpx.Response(200, json=detail)
+        if path.startswith(f"/jobs/{JOB}/logs") and self.log_files:
+            return self.log_tail(path)
+        if path == "/projects":
+            return httpx.Response(200, json={"projects": self.projects})
+        if path == "/prices":
+            return httpx.Response(200, json={"prices": self.prices})
         if path.startswith(f"/jobs/{JOB}/logs"):
             return httpx.Response(
                 200, json={"attempt": 2, "text": "epoch 9\ndone\n", "size_bytes": 99, "truncated": True}
@@ -102,7 +162,8 @@ class Fake:
             return httpx.Response(
                 200,
                 json={
-                    "files": [
+                    "files": self.files_listed
+                    or [
                         {
                             "area": "outputs",
                             "name": "eval/score.txt",
@@ -118,9 +179,31 @@ class Fake:
             name = path.rsplit("/", 1)[1]
             self.secrets[name] = json.loads(request.content)["value"]
             return httpx.Response(200, json={"name": name, "updated_at": "2026-10-11T12:00:00+00:00"})
-        if path == f"/projects/{PROJECT}/jobs" and request.method == "GET":
-            return httpx.Response(422, json={"error": "Check the job's fields.", "fields": {"target": "too high"}})
+        jobs_of = re.fullmatch(r"/projects/([0-9a-f-]{36})/jobs", path)
+        if jobs_of and request.method == "GET":
+            if self.jobs_422:
+                return httpx.Response(422, json={"error": "Check the job's fields.", "fields": {"target": "too high"}})
+            return httpx.Response(200, json={"jobs": self.project_jobs.get(jobs_of[1], [])})
         return httpx.Response(404, json={"error": "No such thing."})
+
+    def log_tail(self, path: str) -> httpx.Response:
+        """The server's `log_tail`: the end of the log, minus the partial first line unless the window is all of it."""
+        self.log_calls += 1
+        hook = self.before_log_call.pop(self.log_calls, None)
+        if hook:
+            hook()
+        query = parse_qs(urlparse(path).query)
+        count = int(query["bytes"][0])
+        attempt = int(query["attempt"][0]) if "attempt" in query else max(self.log_files)
+        raw = self.log_files[attempt]
+        window = raw[-count:]
+        truncated = len(raw) > len(window)
+        text = window.decode(errors="replace")
+        if truncated and "\n" in text:
+            text = text.split("\n", 1)[1]
+        return httpx.Response(
+            200, json={"attempt": attempt, "text": text, "size_bytes": len(raw), "truncated": truncated}
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -221,9 +304,8 @@ def test_a_secret_value_never_goes_on_the_command_line(http, fake) -> None:
 
 
 def test_krater_errors_carry_the_field_problems(http, fake) -> None:
-    from krater_cli.api import KraterError
-
     _login(http, [])
+    fake.jobs_422 = True
     with pytest.raises(KraterError) as error:
         run(["jobs", PROJECT], http=http)
 
@@ -258,3 +340,644 @@ def test_download_saves_each_file_under_its_kind_and_skips_odd_paths(http, fake,
     assert (tmp_path / "results" / "logs" / "attempt-1.log").read_bytes() == b"hi\n"
     assert not (tmp_path / "escape.txt").exists() and not (tmp_path / "results" / "escape.txt").exists()
     assert any(line.startswith("Skipped ../../escape.txt") for line in said)
+
+
+# --- short ids and names ---------------------------------------------------------------------------------------------
+
+
+def _paths(fake: Fake) -> list[str]:
+    return [r.url.path.removeprefix("/api/v1") for r in fake.requests if r.url.path.startswith("/api/v1")]
+
+
+def _show_ready(fake: Fake, job_id: str) -> None:
+    fake.details[job_id].update(image="img", target_usd_per_hour=None, max_usd_per_hour=None, spend_cents=0)
+    if fake.details[job_id].get("machine"):
+        fake.details[job_id]["machine"].update(gpu="RTX 3060", usd_per_hour="0.0800", state="running")
+
+
+def test_a_job_is_found_by_a_prefix_of_its_id(http, fake) -> None:
+    _login(http, [])
+    _show_ready(fake, JOB)
+    said: list[str] = []
+
+    assert run(["show", "22222"], http=http, say=said.append) == 0
+
+    assert said[0] == "nb (box): running"
+    assert f"/jobs/{JOB}" in _paths(fake)
+
+
+def test_an_ambiguous_job_prefix_lists_the_candidates(http, fake) -> None:
+    _login(http, [])
+
+    with pytest.raises(ResolveError) as error:
+        run(["show", "2222"], http=http)
+
+    message = str(error.value)
+    assert "'2222' matches more than one job" in message
+    assert "22222222  nb (Vision Lab, running)" in message and "22223333  train-b (Vision Lab, queued)" in message
+
+
+def test_an_unknown_job_prefix_says_so(http, fake) -> None:
+    _login(http, [])
+
+    with pytest.raises(ResolveError, match="No job matching 'deadbeef'."):
+        run(["show", "deadbeef"], http=http)
+    with pytest.raises(ResolveError, match="No job matching 'nope'."):
+        run(["show", "nope"], http=http)
+    with pytest.raises(ResolveError, match="at least 4"):
+        run(["show", "22"], http=http)
+
+
+def test_a_full_job_id_goes_straight_to_the_api_without_listing(http, fake) -> None:
+    """An admin acts on jobs of projects they aren't on, which listing /projects would never show."""
+    _login(http, [])
+    _show_ready(fake, STRANGER_JOB)
+    fake.requests.clear()
+
+    assert run(["show", STRANGER_JOB], http=http, say=lambda _: None) == 0
+
+    assert _paths(fake) == [f"/jobs/{STRANGER_JOB}"]
+
+
+def test_a_project_is_found_by_id_prefix_or_by_part_of_its_title(http, fake) -> None:
+    _login(http, [])
+
+    for text in ("11111111", "1111", "vision lab", "VISION L", "ision la"):
+        fake.requests.clear()
+        run(["jobs", text], http=http, say=lambda _: None)
+        assert f"/projects/{PROJECT}/jobs" in _paths(fake), text
+
+
+def test_an_ambiguous_project_title_lists_the_candidates_and_an_exact_title_wins(http, fake) -> None:
+    _login(http, [])
+
+    with pytest.raises(ResolveError) as error:
+        run(["jobs", "vision"], http=http)
+    assert "aaaa" not in str(error.value)
+    assert "11111111  Vision Lab" in str(error.value) and "bbbb2222  Vision Old Notes" in str(error.value)
+
+    with pytest.raises(ResolveError, match="No project matching 'physics'."):
+        run(["jobs", "physics"], http=http)
+
+    fake.projects[2]["title"] = "Vision"  # "vision" is now one project's whole title
+    fake.requests.clear()
+    run(["jobs", "vision"], http=http, say=lambda _: None)
+    assert f"/projects/{PROJECT_OLD}/jobs" in _paths(fake)
+
+
+def test_a_full_project_id_is_not_looked_up(http, fake) -> None:
+    _login(http, [])
+    fake.requests.clear()
+
+    run(["jobs", PROJECT.upper()], http=http, say=lambda _: None)
+
+    assert _paths(fake) == [f"/projects/{PROJECT}/jobs"]
+
+
+def test_the_tables_show_short_ids_and_json_keeps_the_full_ones(http, fake) -> None:
+    _login(http, [])
+    said: list[str] = []
+
+    run(["jobs", "vision lab"], http=http, say=said.append)
+    assert said[1].startswith("22222222  job") and JOB not in said[1]
+    said.clear()
+    run(["--json", "jobs", "vision lab"], http=http, say=said.append)
+    assert JOB in said[0]
+
+
+# --- projects --------------------------------------------------------------------------------------------------------
+
+
+def test_projects_hides_finished_ones_unless_asked(http, fake) -> None:
+    _login(http, [])
+    said: list[str] = []
+
+    run(["projects"], http=http, say=said.append)
+
+    assert [line.split()[0] for line in said[:3]] == ["ID", "11111111", "aaaa1111"]
+    assert said[-1] == "(1 finished project hidden; --all shows them)" and "Vision Old Notes" not in "".join(said)
+    said.clear()
+    run(["projects", "--all"], http=http, say=said.append)
+    assert any("Vision Old Notes" in line for line in said) and not any("hidden" in line for line in said)
+
+
+def test_projects_says_when_only_finished_ones_are_left(http, fake) -> None:
+    _login(http, [])
+    fake.projects = [fake.projects[2], {**fake.projects[2], "id": PROJECT, "status": "withdrawn"}]
+    said: list[str] = []
+
+    run(["projects"], http=http, say=said.append)
+
+    assert said == ["(2 finished projects hidden; --all shows them)"]
+
+
+# --- ssh -------------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("state", ["starting", "queued", "stopped", "paused", "failed"])
+def test_ssh_only_connects_to_a_running_box(http, fake, state) -> None:
+    _login(http, [])
+    fake.details[JOB]["state"] = state  # the machine's address stays in the answer, as it did in the live test
+    commands: list[list[str]] = []
+    said: list[str] = []
+
+    assert run(["ssh", JOB], http=http, say=said.append, exec_ssh=commands.append) == 1
+
+    assert commands == []
+    yet = " yet" if state in ("starting", "queued") else ""
+    assert said == [f"nb isn't running{yet} ({state}). Try `krater show {JOB}`."]
+
+
+def test_ssh_refuses_a_job_that_is_not_a_box(http, fake) -> None:
+    _login(http, [])
+    fake.details[JOB]["kind"] = "job"
+    said: list[str] = []
+
+    assert run(["ssh", JOB], http=http, say=said.append, exec_ssh=lambda c: None) == 1
+    assert "not a box" in said[0]
+
+
+def test_ssh_on_windows_runs_ssh_and_returns_its_exit_code(http, fake, monkeypatch) -> None:
+    _login(http, [])
+    calls: list[list[str]] = []
+    monkeypatch.setattr(main, "_is_windows", lambda: True)
+    monkeypatch.setattr(main.shutil, "which", lambda name: "ssh.exe")
+    monkeypatch.setattr(main.subprocess, "call", lambda command: calls.append(command) or 255)
+    monkeypatch.setattr(main.os, "execvp", lambda *a: pytest.fail("execvp detaches from a Windows console"))
+
+    assert run(["ssh", JOB], http=http, say=lambda _: None) == 255
+
+    assert calls == [["ssh", "-p", "10483", "root@1.2.3.4"]]
+
+
+def test_ssh_elsewhere_replaces_the_process(http, fake, monkeypatch) -> None:
+    _login(http, [])
+    calls: list[tuple] = []
+    monkeypatch.setattr(main, "_is_windows", lambda: False)
+    monkeypatch.setattr(main.shutil, "which", lambda name: "/usr/bin/ssh")
+    monkeypatch.setattr(main.os, "execvp", lambda *a: calls.append(a))
+
+    run(["ssh", JOB], http=http, say=lambda _: None)
+
+    assert calls == [("ssh", ["ssh", "-p", "10483", "root@1.2.3.4"])]
+
+
+# --- reading a secret ------------------------------------------------------------------------------------------------
+
+
+class _Stdin:
+    def __init__(self, *, tty: bool, text: str = "", fileno: int = 0) -> None:
+        self._tty, self._text, self._fileno = tty, text, fileno
+
+    def isatty(self) -> bool:
+        return self._tty
+
+    def fileno(self) -> int:
+        return self._fileno
+
+    def read(self) -> str:
+        return self._text
+
+
+def test_a_pipe_or_redirect_is_not_a_terminal(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "stdin", _Stdin(tty=False))
+    assert main._stdin_is_terminal() is False
+
+
+def test_on_windows_a_tty_that_is_not_a_console_is_not_a_terminal(monkeypatch) -> None:
+    """NUL answers isatty() with True on Windows, so `secrets set ... < NUL` waited at a prompt forever."""
+    monkeypatch.setattr(sys, "stdin", _Stdin(tty=True, fileno=7))
+    monkeypatch.setattr(main, "_is_windows", lambda: True)
+    asked: list[int] = []
+    monkeypatch.setattr(main, "_windows_console", lambda fileno: asked.append(fileno) or False)
+
+    assert main._stdin_is_terminal() is False
+    assert asked == [7]
+
+    monkeypatch.setattr(main, "_windows_console", lambda fileno: True)
+    assert main._stdin_is_terminal() is True
+
+    def broken(fileno):
+        raise OSError("bad handle")
+
+    monkeypatch.setattr(main, "_windows_console", broken)
+    assert main._stdin_is_terminal() is False
+
+
+def test_elsewhere_isatty_is_enough(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "stdin", _Stdin(tty=True))
+    monkeypatch.setattr(main, "_is_windows", lambda: False)
+    assert main._stdin_is_terminal() is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the Windows console API")
+def test_the_real_nul_device_is_not_a_windows_console() -> None:
+    with open(os.devnull) as nul:
+        assert nul.isatty()  # the trap: Python says yes
+        assert main._windows_console(nul.fileno()) is False
+
+
+def test_read_secret_reads_stdin_when_nobody_is_typing(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "stdin", _Stdin(tty=False, text="s3cret\n"))
+    monkeypatch.setattr(main.getpass, "getpass", lambda prompt: pytest.fail("must not prompt"))
+
+    assert main._read_secret("HF_TOKEN") == "s3cret"
+
+
+# --- logs --follow and wait ------------------------------------------------------------------------------------------
+
+
+def _follow(http, fake, steps, *extra) -> tuple[int, list[str]]:
+    """Run `logs -f`; each sleep runs the next step, which changes the fake's log or job."""
+    said: list[str] = []
+    pending = list(steps)
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        pending.pop(0)()
+
+    code = run(["logs", JOB, "-f", *extra], http=http, say=said.append, sleep=sleep)
+    assert not pending, "the job finished before the last step"
+    said.append(f"sleeps={sleeps}")
+    return code, said
+
+
+def _append(fake: Fake, attempt: int, data: bytes):
+    return lambda: fake.log_files.__setitem__(attempt, fake.log_files.get(attempt, b"") + data)
+
+
+def test_logs_follow_prints_only_what_is_new_until_the_job_finishes(http, fake) -> None:
+    _login(http, [])
+    fake.log_files = {1: b"a\nb\n"}
+
+    def finish() -> None:
+        _append(fake, 1, b"e\n")()
+        fake.details[JOB].update(state="succeeded")
+
+    code, said = _follow(http, fake, [_append(fake, 1, b"c\nd\n"), finish])
+
+    assert code == 0
+    assert said == ["a\nb", "c\nd", "e", "nb: succeeded", "sleeps=[5, 5]"]
+
+
+def test_logs_follow_uses_the_interval_and_does_not_refetch_an_unchanged_log(http, fake) -> None:
+    _login(http, [])
+    fake.log_files = {1: b"a\n"}
+    fake.details[JOB].update(state="failed")
+
+    _, said = _follow(http, fake, [], "--interval", "2")
+    assert said == ["a", "nb: failed", "sleeps=[]"]
+
+    fake.details[JOB].update(state="running")
+    fake.log_calls = 0
+    _, said = _follow(http, fake, [lambda: fake.details[JOB].update(state="failed")], "--interval", "2")
+    assert said[-1] == "sleeps=[2.0]"
+    assert fake.log_calls == 2  # the first tail and one 1-byte probe; no growth, so no third request
+
+
+def test_logs_follow_starts_over_when_the_attempt_changes(http, fake) -> None:
+    _login(http, [])
+    fake.log_files = {1: b"one\ntwo\n"}
+
+    def finish() -> None:
+        _append(fake, 2, b"y\n")()
+        fake.details[JOB].update(state="succeeded")
+
+    # attempt 2's log is shorter than attempt 1's: only the attempt number says it started over
+    _, said = _follow(http, fake, [_append(fake, 2, b"x\n"), finish])
+
+    assert said[:5] == ["one\ntwo", "--- attempt 2 ---", "x", "y", "nb: succeeded"]
+
+
+def test_logs_follow_does_not_lose_bytes_that_arrive_between_its_two_requests(http, fake, monkeypatch) -> None:
+    monkeypatch.setattr(follow, "FIRST_OVERLAP", 8)
+    _login(http, [])
+    fake.log_files = {1: b"aaaa\nbbbb\n"}
+
+    def grow() -> None:
+        _append(fake, 1, b"cccc\n")()
+        # call 1 was the first tail and call 2 the probe; call 3 (the new bytes) finds more than the probe saw
+        fake.before_log_call[3] = _append(fake, 1, b"dddd\n")
+
+    _, said = _follow(http, fake, [grow, lambda: fake.details[JOB].update(state="succeeded")])
+
+    assert said[:3] == ["aaaa\nbbbb", "cccc\ndddd", "nb: succeeded"]
+
+
+def test_logs_follow_says_when_it_skips_more_than_a_megabyte(http, fake) -> None:
+    _login(http, [])
+    fake.log_files = {1: b"start\n"}
+
+    def burst() -> None:
+        _append(fake, 1, (b"x" * 99 + b"\n") * 15000)()  # 1.5 MB at once
+        fake.details[JOB].update(state="succeeded")
+
+    _, said = _follow(http, fake, [burst])
+
+    skipped = int(re.fullmatch(r"\[\.\.\. skipped (\d+) bytes \.\.\.\]", said[1])[1])
+    assert said[0] == "start" and 400_000 < skipped < 500_000
+    assert len(said[2]) < 1024 * 1024 and said[2].endswith("x" * 99)
+
+
+def test_logs_follow_ctrl_c_exits_quietly_with_130(http, fake) -> None:
+    _login(http, [])
+    fake.log_files = {1: b"a\n"}
+    said: list[str] = []
+
+    def interrupted(seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    assert run(["logs", JOB, "-f"], http=http, say=said.append, sleep=interrupted) == 130
+    assert said == ["a"]
+
+
+def test_logs_follow_is_for_the_latest_attempt_as_text(http, fake) -> None:
+    _login(http, [])
+    said: list[str] = []
+
+    assert run(["logs", JOB, "-f", "--attempt", "1"], http=http, say=said.append) == 2
+    assert run(["--json", "logs", JOB, "-f"], http=http, say=said.append) == 2
+
+
+@pytest.mark.parametrize(
+    ("state", "exit_code", "expected"),
+    [("succeeded", 0, 0), ("failed", 3, 3), ("failed", None, 1), ("failed", 0, 1), ("cancelled", None, 1)],
+)
+def test_wait_exits_with_the_jobs_outcome(http, fake, state, exit_code, expected) -> None:
+    _login(http, [])
+    said: list[str] = []
+    steps = iter([lambda: fake.details[JOB].update(state=state, exit_code=exit_code, state_reason="because")])
+
+    code = run(["wait", JOB], http=http, say=said.append, sleep=lambda s: next(steps)())
+
+    assert code == expected
+    assert said == ["nb: running", f"nb: {state} - because"]
+
+
+def test_wait_gives_up_after_the_timeout_with_124(http, fake) -> None:
+    _login(http, [])
+    now = [1000.0]
+    said: list[str] = []
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    argv = ["wait", JOB, "--timeout", "1", "--interval", "20"]
+    code = run(argv, http=http, say=said.append, sleep=sleep, clock=lambda: now[0])
+
+    assert code == 124
+    assert said == ["nb: running", "Gave up after 1 minutes; nb is still running."]
+
+
+def test_wait_with_json_prints_only_the_finished_job(http, fake) -> None:
+    _login(http, [])
+    fake.details[JOB].update(state="succeeded", exit_code=0)
+    said: list[str] = []
+
+    assert run(["--json", "wait", JOB], http=http, say=said.append) == 0
+
+    assert json.loads(said[0])["state"] == "succeeded" and len(said) == 1
+
+
+# --- prices ----------------------------------------------------------------------------------------------------------
+
+
+def _prices(fake: Fake) -> None:
+    def row(gpu, rental, cheapest, median, offers):
+        return {
+            "gpu": gpu,
+            "rental": rental,
+            "min_usd_per_hour": cheapest,
+            "median_usd_per_hour": median,
+            "offers": offers,
+        }
+
+    fake.prices = [
+        row("RTX 4090", "bid", "0.2000", "0.3000", 40),
+        row("RTX 4090", "ondemand", "0.4000", "0.5000", 25),
+        row("RTX 3060", "bid", "0.0700", "0.0900", 12),
+        row("H100", "bid", None, None, 0),
+        row("RTX 3060", "ondemand", "0.1000", "0.1200", 3),
+    ]
+
+
+def test_prices_lists_gpus_with_offers_cheapest_first_in_the_web_uis_words(http, fake) -> None:
+    _login(http, [])
+    _prices(fake)
+    said: list[str] = []
+
+    run(["prices"], http=http, say=said.append)
+
+    assert [line.split()[0:3] for line in said[1:]] == [
+        ["RTX", "3060", "interruptible"],
+        ["RTX", "3060", "on"],
+        ["RTX", "4090", "interruptible"],
+        ["RTX", "4090", "on"],
+    ]
+    assert "on demand" in said[2] and "H100" not in "".join(said) and "ondemand" not in "".join(said)
+
+
+def test_prices_all_and_gpu_filters(http, fake) -> None:
+    _login(http, [])
+    _prices(fake)
+    said: list[str] = []
+
+    run(["prices", "--all"], http=http, say=said.append)
+    assert len(said) == 6 and said[-1].startswith("H100") and said[-1].split()[-3:] == ["-", "-", "0"]
+    said.clear()
+    run(["prices", "--gpu", "4090"], http=http, say=said.append)
+    assert len(said) == 3 and all("4090" in line for line in said[1:])
+    said.clear()
+    run(["prices", "--gpu", "h100"], http=http, say=said.append)
+    assert said == ["Nobody is offering those right now (--all lists them anyway)."]
+    said.clear()
+    run(["prices", "--gpu", "a100"], http=http, say=said.append)
+    assert said == ["No GPU model matches 'a100'."]
+
+
+# --- submit ----------------------------------------------------------------------------------------------------------
+
+SUBMIT = ["submit", PROJECT, "--name", "t", "--image", "img", "--gpu", "RTX 3060"]
+GIVE_PRICES = (
+    "Give --target (start at or under) and --max (never above), in USD per hour, e.g. --target 0.07 --max 0.10"
+)
+
+
+def test_submit_without_prices_shows_the_market_and_explains(http, fake) -> None:
+    _login(http, [])
+    _prices(fake)
+    said: list[str] = []
+
+    assert run(SUBMIT, http=http, say=said.append) == 2
+
+    assert fake.jobs == []
+    assert said[0] == "Right now, per hour, interruptible:"
+    assert said[2].split() == ["RTX", "3060", "$0.0700", "$0.0900", "12"] and len(said) == 4
+    assert said[-1] == GIVE_PRICES
+    said.clear()
+    assert run([*SUBMIT, "--target", "0.07", "--on-demand"], http=http, say=said.append) == 2
+    assert said[0] == "Right now, per hour, on demand:" and "$0.1000" in said[2]
+
+
+def test_submit_without_prices_or_gpu_lists_every_gpu_with_offers(http, fake) -> None:
+    _login(http, [])
+    _prices(fake)
+    said: list[str] = []
+
+    run(["submit", PROJECT, "--name", "t", "--image", "img"], http=http, say=said.append)
+
+    assert [line.split()[1] for line in said[2:-1]] == ["3060", "4090"] and "H100" not in "".join(said)
+    said.clear()
+    run([*SUBMIT[:-2], "--gpu", "A100"], http=http, say=said.append)
+    assert said[0] == "No price data for 'a100'."
+
+
+def test_submit_accepts_a_dollar_sign_on_prices(http, fake) -> None:
+    _login(http, [])
+
+    assert run([*SUBMIT, "--target", "$0.07", "--max", " $0.10"], http=http, say=lambda _: None) == 0
+
+    body = fake.jobs[0]["body"]
+    assert body["target_usd_per_hour"] == "0.07" and body["max_usd_per_hour"] == "0.10"
+
+
+def test_submit_rejects_a_price_that_is_not_a_number(http, fake, capsys) -> None:
+    with pytest.raises(SystemExit) as exit_:
+        run([*SUBMIT, "--target", "cheap", "--max", "1"], http=http)
+
+    assert exit_.value.code == 2 and "isn't a price" in capsys.readouterr().err
+
+
+def test_submit_finds_the_project_by_title(http, fake) -> None:
+    _login(http, [])
+
+    assert run(["submit", "vision lab", *SUBMIT[2:], "--target", "1", "--max", "2"], http=http, say=lambda _: None) == 0
+    assert fake.jobs
+
+
+# --- errors ----------------------------------------------------------------------------------------------------------
+
+
+def test_krater_errors_get_a_message_from_whichever_field_the_api_used() -> None:
+    from krater_cli.api import _problem
+
+    assert _problem(403, "/jobs/x/cancel", {"error": "Not yours."}) == ("Not yours.", {})
+    assert _problem(404, "/jobs/abc", {"detail": "No job abc."}) == ("No job abc.", {})
+    # FastAPI's own validation of a malformed id
+    body = {"detail": [{"type": "uuid_parsing", "loc": ["path", "job_id"], "msg": "Input should be a valid UUID"}]}
+    assert _problem(422, "/jobs/7b0ffa48", body) == (
+        "Krater didn't accept that.",
+        {"job_id": "Input should be a valid UUID"},
+    )
+    assert _problem(404, "/jobs/7b0ffa48", {}) == ("No job 7b0ffa48.", {})
+    assert _problem(404, "/projects/p1/jobs", None) == ("No project p1.", {})
+    assert _problem(502, "/me", {}) == ("Krater answered 502.", {})
+    assert _problem(422, "/projects/p/jobs", {"error": "Check.", "fields": {"a": "b"}}) == ("Check.", {"a": "b"})
+
+
+def test_a_404_without_an_error_key_still_says_what_is_missing(http, fake) -> None:
+    _login(http, [])
+    missing = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+
+    with pytest.raises(KraterError, match=f"No job {missing}."):
+        run(["show", missing], http=http)
+
+
+def test_report_prints_the_message_and_one_line_per_field(capsys) -> None:
+    assert main.report(KraterError("Check the job's fields.", status=422, fields={"target": "too high"})) == 1
+
+    assert capsys.readouterr().err == "krater: Check the job's fields.\n  target: too high\n"
+
+
+def test_report_says_which_host_could_not_be_reached(capsys) -> None:
+    request = httpx.Request("GET", "https://weave.example.org/oauth/token")
+
+    main.report(httpx.ConnectError("boom", request=request))
+    main.report(httpx.ReadTimeout("slow", request=request))
+    main.report(httpx.ConnectError("no request attached"))
+
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[0].startswith("krater: couldn't reach weave.example.org (ConnectError)")
+    assert lines[1] == "krater: weave.example.org didn't answer in time."
+    assert lines[2].startswith("krater: couldn't reach Krater or Weave (ConnectError)")
+
+
+# --- download ---------------------------------------------------------------------------------------------------------
+
+
+def test_download_skips_files_that_are_already_here_and_adds_up_sizes(http, fake, tmp_path) -> None:
+    _login(http, [])
+    results = tmp_path / "results"
+    run(["download", JOB, "--to", str(results)], http=http, say=lambda _: None)
+    (results / "logs" / "attempt-1.log").write_bytes(b"old")  # same size as the real one: counts as here
+    (results / "outputs" / "eval" / "score.txt").write_bytes(b"x")  # a different size: fetched again
+    fake.requests.clear()
+    said: list[str] = []
+
+    run(["download", JOB, "--to", str(results)], http=http, say=said.append)
+
+    assert "logs/attempt-1.log  already here" in said
+    assert "outputs/eval/score.txt  (5 B)" in said
+    assert (results / "outputs" / "eval" / "score.txt").read_bytes() == b"0.93\n"
+    assert [r.url.path for r in fake.requests if r.url.host == "store.test"] == ["/score"]
+    assert said[-1] == f"Saved 1 files, 1 already here: 8 B in all, under {results}."
+
+
+@pytest.mark.parametrize(
+    ("count", "text"),
+    [
+        (0, "0 B"),
+        (1023, "1023 B"),
+        (1024, "1.0 KB"),
+        (1536, "1.5 KB"),
+        (5 * 1024**2, "5.0 MB"),
+        (3 * 1024**3, "3.0 GB"),
+    ],
+)
+def test_sizes_are_human_readable(count, text) -> None:
+    assert main._size(count) == text
+
+
+# --- open ------------------------------------------------------------------------------------------------------------
+
+
+def test_open_a_job_by_id_prefix_opens_its_page(http, fake) -> None:
+    _login(http, [])
+    opened: list[str] = []
+    said: list[str] = []
+
+    assert run(["open", "9f9f9f"], http=http, say=said.append, open_url=opened.append) == 0
+
+    page = f"{KRATER}/projects/{PROJECT_B}/compute/{JOB_C}"
+    assert opened == [page] and said == [page]
+
+
+def test_open_a_project_by_title_opens_its_page(http, fake) -> None:
+    _login(http, [])
+    opened: list[str] = []
+
+    run(["open", "audio"], http=http, say=lambda _: None, open_url=opened.append)
+
+    assert opened == [f"{KRATER}/projects/{PROJECT_B}"]
+
+
+def test_open_with_a_full_id_tries_a_job_and_then_a_project(http, fake) -> None:
+    _login(http, [])
+    opened: list[str] = []
+
+    run(["open", STRANGER_JOB], http=http, say=lambda _: None, open_url=opened.append)
+    run(["open", PROJECT], http=http, say=lambda _: None, open_url=opened.append)
+
+    assert opened == [f"{KRATER}/projects/{PROJECT_OLD}/compute/{STRANGER_JOB}", f"{KRATER}/projects/{PROJECT}"]
+
+
+def test_open_an_ambiguous_or_unknown_target_opens_nothing(http, fake) -> None:
+    _login(http, [])
+    opened: list[str] = []
+
+    with pytest.raises(ResolveError, match="more than one job or project"):
+        run(["open", "2222"], http=http, open_url=opened.append)
+    with pytest.raises(ResolveError, match="No job or project matching 'zzz'."):
+        run(["open", "zzz"], http=http, open_url=opened.append)
+    assert opened == []
