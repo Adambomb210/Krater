@@ -148,7 +148,12 @@ def submit_job(
         max_runtime_minutes=spec.max_runtime_minutes,
         on_outbid=spec.on_outbid,
         state=ComputeJobState.QUEUED,
-        state_reason="Waiting for an offer at or under its target price.",
+        state_reason="Waiting for an offer at or under its "
+        + (
+            "limit."
+            if spec.on_outbid is ComputeOutbid.HOLD and spec.target_microusd == spec.max_microusd
+            else "target price."
+        ),
         queued_at=now,
     )
     session.add(job)
