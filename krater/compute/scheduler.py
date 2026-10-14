@@ -1136,12 +1136,14 @@ class Scheduler:
         # Durable before Vast is called: if the response is lost, the next pass finds the machine by this label.
         self.session.commit()
 
-        request = launch.create_request(
-            job,
-            label=label,
-            bid_price=choice.bid,
-            env=launch.job_env(job, attempt, runner_url=self.runner_url, token=token),
-            runner_sha256=self.runner_sha256,
+        request = self.provider.create_request(
+            launch.launch_for(
+                job,
+                label=label,
+                bid_price=choice.bid,
+                env=launch.job_env(job, attempt, runner_url=self.runner_url, token=token),
+                runner_sha256=self.runner_sha256,
+            )
         )
         try:
             vast_id = self.client.create_instance(choice.offer.id, request)
