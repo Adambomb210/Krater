@@ -16,24 +16,66 @@ Sign in, then work:
 
 ```bash
 krater login --url https://krater.patchworklabs.org
-krater projects
+krater projects                        # your projects (--all adds withdrawn and completed ones)
+krater prices --gpu 4090               # what an hour costs now (--all adds models nobody offers)
 krater submit <project> --name train --image ghcr.io/me/train:v3 --command "python train.py" --gpu "RTX 4090" --target 0.30 --max 0.45 --max-runtime 240
 krater jobs <project>
 krater show <job>
+krater logs <job>                      # what the command printed (the end of it)
+krater logs <job> -f                   # keep printing until the job is finished (--interval 5)
+krater wait <job>                      # block until it's finished; handy in scripts
 krater cancel <job>
 krater submit <project> --name notebook --image ubuntu:24.04 --box --gpu "RTX 3060" --target 0.07 --max 0.10
 krater ssh <job> -- -L 8888:localhost:8888
-krater logs <job>                      # what the command printed (the end of it)
 krater download <job> --to results/    # outputs, checkpoints and logs, under results/<kind>/
+krater open <job|project>              # the web page, in your browser
 krater secrets set <project> HF_TOKEN
-krater prices
 ```
 
 `krater login` prints a Weave link (and opens it). Sign in there, and Weave shows a code: paste it into the terminal.
 That works over SSH too. The CLI keeps its sign-in in `credentials.json` under `%APPDATA%\krater` on Windows or
 `~/.config/krater` elsewhere, readable by you only, and refreshes it as needed; `krater logout` deletes it.
 `krater secrets set` reads the value from standard input or asks for it without echoing, so it never lands in your
-shell history. Every command takes `--json`.
+shell history (with input redirected, such as `< file` or `< NUL`, it reads that instead of waiting at a prompt).
+Every command takes `--json`, which prints Krater's answer unchanged (full ids, every row).
+
+### Naming projects and jobs
+
+You don't type UUIDs. The `projects` and `jobs` tables show the first 8 characters of each id, and anywhere a
+command takes one:
+
+- a `<project>` is its full id, the first characters of it (4 or more), or any part of its title in any case
+  (`krater jobs vision`; an exact title wins over longer titles that contain it);
+- a `<job>` is its full id or the first 4 or more characters of it.
+
+If that fits more than one, the CLI lists the candidates (short id and name) and stops. A short id or a title is
+looked up in the projects you're on (`GET /projects`, then each project's `/jobs`), all in the CLI. A **full** id
+goes straight to the API without listing anything, so an admin can act on a job of a project they aren't on. For
+the full ids, use `--json`.
+
+### Prices
+
+`--target` is the price at or under which the job may start and `--max` the most it may ever cost, both in dollars
+per hour including the disk; a leading `$` is fine (`--target '$0.07'`). Leave either out and `krater submit` shows
+the cheapest and median price now for the GPU models you named (every model with offers if you named none; on
+demand with `--on-demand`, otherwise interruptible), explains the two options, and exits with 2 without queueing
+anything. `krater prices` is the whole list, cheapest first, with only the models that have offers now unless
+you pass `--all`, and `--gpu 4090` narrows it to names containing that.
+
+### Following and waiting
+
+`krater logs -f` prints the end of the log and then whatever is added, checking every `--interval` seconds (5). A
+retry prints `--- attempt 2 ---` and starts over; more than 1 MB of new output between checks prints
+`[... skipped N bytes ...]`. It stops when the job is finished, printing its final state. `krater wait` does the
+same polling without the log and exits with the job's outcome: 0 if it succeeded, the command's own exit code if it
+failed with one, 1 otherwise (cancelled, or no code). `--timeout <minutes>` gives up with exit code 124 and
+leaves the job running. Ctrl-C ends either one quietly with 130.
+
+### SSH
+
+`krater ssh` connects only to a box whose state is `running`; a box that's still starting (its machine can have an
+address already) or stopped gets a message pointing at `krater show`. On Windows it runs `ssh` as a child process
+and exits with its exit code (replacing the process would detach it from the console).
 
 ## How sign-in works
 

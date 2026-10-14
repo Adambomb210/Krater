@@ -1,17 +1,22 @@
 """`krater`: Krater Compute from a terminal.
 
     krater login --url https://krater.example.org
-    krater projects
+    krater projects                              (--all includes finished ones)
     krater submit <project> --name train --image ghcr.io/me/train:v3 --command "python train.py" \\
         --gpu "RTX 4090" --target 0.30 --max 0.45 --max-runtime 240
     krater jobs <project>
     krater show <job>
-    krater logs <job>                            (what the command printed)
+    krater logs <job>                            (what the command printed; -f follows it)
+    krater wait <job>                            (until it's done; exits with its exit code)
     krater download <job> --to results/          (its outputs, checkpoints and logs)
     krater ssh <job> -- -L 8888:localhost:8888
+    krater open <job|project>                    (the web page)
     krater secrets set <project> HF_TOKEN        (reads the value from stdin, or asks without echoing it)
+    krater prices [--gpu 4090] [--all]
 
-Prices are full hourly cost in dollars (GPU plus disk). `--json` prints Krater's answer as JSON.
+A <project> is its id, the first characters of it (4 or more), or part of its title. A <job> is its id or the first
+4+ characters of it, as the tables show. Prices are full hourly cost in dollars (GPU plus disk), and `--target 0.07`
+or `--target '$0.07'` both work. `--json` prints Krater's answer as JSON (with the full ids).
 """
 
 from __future__ import annotations
@@ -21,21 +26,53 @@ import getpass
 import json
 import os
 import shutil
+import subprocess
 import sys
+import time
+import webbrowser
 from collections.abc import Callable, Sequence
+from decimal import Decimal, InvalidOperation
 
 import httpx
 
-from krater_cli import __version__, auth, store
+from krater_cli import __version__, auth, follow, resolve, store
 from krater_cli.api import Krater, KraterError
+from krater_cli.resolve import ResolveError, short
 
 ESCALATIONS = ("keep_waiting", "raise_bid", "on_demand", "cancel")
+#: Projects that can't run anything any more; `krater projects` hides them unless asked.
+FINISHED_PROJECTS = frozenset({"withdrawn", "completed"})
+#: The web UI says "interruptible" and "on demand"; the API says `bid` and `ondemand`.
+RENTAL_WORDS = {"bid": "interruptible", "ondemand": "on demand"}
+#: How long `wait --timeout` gives up with: GNU timeout(1)'s code, so it can't be mistaken for the job's own failure.
+TIMED_OUT = 124
+INTERRUPTED = 130
+
+
+def _price(text: str) -> str:
+    """A $/h price as typed, `$0.07` included; Krater parses it, we only reject what is plainly not a price."""
+    cleaned = text.strip().lstrip("$").strip()
+    try:
+        Decimal(cleaned)
+    except InvalidOperation:
+        raise argparse.ArgumentTypeError(f"{text!r} isn't a price in dollars per hour, such as 0.12") from None
+    return cleaned
+
+
+def _positive(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} isn't a number") from None
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be above zero")
+    return value
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="krater", description="Krater Compute from a terminal.")
     parser.add_argument("--version", action="version", version=f"krater {__version__}")
-    parser.add_argument("--json", action="store_true", help="print Krater's answer as JSON")
+    parser.add_argument("--json", action="store_true", help="print Krater's answer as JSON (full ids)")
     commands = parser.add_subparsers(dest="command", required=True)
 
     login = commands.add_parser("login", help="sign in with Weave")
@@ -43,13 +80,14 @@ def _parser() -> argparse.ArgumentParser:
     login.add_argument("--no-browser", action="store_true", help="don't open a browser; paste the code instead")
     commands.add_parser("logout", help="forget the stored sign-in")
     commands.add_parser("whoami", help="who you're signed in as")
-    commands.add_parser("projects", help="your projects")
+    projects = commands.add_parser("projects", help="your projects")
+    projects.add_argument("--all", action="store_true", help="include withdrawn and completed projects")
 
     jobs = commands.add_parser("jobs", help="a project's jobs and boxes, newest first")
-    jobs.add_argument("project")
+    jobs.add_argument("project", help="its id, the first characters of it, or part of its title")
 
     submit = commands.add_parser("submit", help="queue a job or a box")
-    submit.add_argument("project")
+    submit.add_argument("project", help="its id, the first characters of it, or part of its title")
     submit.add_argument("--name", required=True)
     submit.add_argument("--image", required=True, help="your container image; it needs a POSIX sh")
     submit.add_argument("--command", dest="job_command", help="what the job runs (not for a box)")
@@ -58,21 +96,29 @@ def _parser() -> argparse.ArgumentParser:
     submit.add_argument("--min-vram", type=int, help="or: any GPU with at least this many GB")
     submit.add_argument("--gpus", type=int, default=1)
     submit.add_argument("--disk", type=int, default=32, help="GB")
-    submit.add_argument("--target", required=True, help="start at or under this, $/h")
-    submit.add_argument("--max", required=True, help="never pay more than this, $/h")
+    # Not `required=True`: without them Krater shows what an hour costs now, which is what a member needs to pick.
+    submit.add_argument("--target", type=_price, help="start at or under this, $/h")
+    submit.add_argument("--max", type=_price, help="never pay more than this, $/h")
     submit.add_argument("--on-demand", action="store_true", help="rent on demand instead of bidding")
     submit.add_argument("--max-wait", type=int, default=12 * 60, help="minutes to wait for the target price")
     submit.add_argument("--on-max-wait", choices=ESCALATIONS, default="keep_waiting")
     submit.add_argument("--max-runtime", type=int, default=8 * 60, help="minutes")
 
+    job_help = "its id or the first characters of it"
     show = commands.add_parser("show", help="a job's state, machine and recent events")
-    show.add_argument("job")
+    show.add_argument("job", help=job_help)
     logs = commands.add_parser("logs", help="what a job's command printed (the end of it)")
-    logs.add_argument("job")
+    logs.add_argument("job", help=job_help)
     logs.add_argument("--attempt", type=int, help="an earlier attempt's output (default: the latest)")
     logs.add_argument("--bytes", type=int, default=65536, help="how much of the end to show (at most 1 MB)")
+    logs.add_argument("-f", "--follow", action="store_true", help="keep printing new output until the job is finished")
+    logs.add_argument("--interval", type=_positive, default=5, help="seconds between checks with --follow (default 5)")
+    wait = commands.add_parser("wait", help="wait until a job is finished; exit code 0 if it succeeded")
+    wait.add_argument("job", help=job_help)
+    wait.add_argument("--timeout", type=_positive, help="give up after this many minutes (exit code 124)")
+    wait.add_argument("--interval", type=_positive, default=5, help="seconds between checks (default 5)")
     download = commands.add_parser("download", help="download a job's outputs, checkpoints and logs")
-    download.add_argument("job")
+    download.add_argument("job", help=job_help)
     download.add_argument("--to", default=".", help="the folder to put them in (default: here)")
     download.add_argument("--only", choices=("outputs", "checkpoints", "logs"), help="just one kind")
     for action, text in (
@@ -82,11 +128,13 @@ def _parser() -> argparse.ArgumentParser:
         ("move", "start a stopped box on another machine from its saved /workspace"),
     ):
         command = commands.add_parser(action, help=text)
-        command.add_argument("job")
+        command.add_argument("job", help=job_help)
 
     ssh = commands.add_parser("ssh", help="SSH into a running box (extra arguments after -- go to ssh)")
-    ssh.add_argument("job")
+    ssh.add_argument("job", help=job_help)
     ssh.add_argument("ssh_args", nargs=argparse.REMAINDER)
+    open_ = commands.add_parser("open", help="open a job's or a project's page in your browser")
+    open_.add_argument("target", help="a job or a project: its id, the first characters of it, or part of a title")
 
     secrets = commands.add_parser("secrets", help="a project's secrets (values can't be read back)")
     secret_commands = secrets.add_subparsers(dest="secrets_command", required=True)
@@ -99,7 +147,9 @@ def _parser() -> argparse.ArgumentParser:
     secrets_rm.add_argument("project")
     secrets_rm.add_argument("name")
 
-    commands.add_parser("prices", help="what an hour costs now, per GPU model")
+    prices = commands.add_parser("prices", help="what an hour costs now, per GPU model")
+    prices.add_argument("--all", action="store_true", help="include models nobody is offering right now")
+    prices.add_argument("--gpu", help="only models whose name contains this (any case)")
     return parser
 
 
@@ -115,10 +165,85 @@ def _money(value: str | None) -> str:
     return f"${value}" if value is not None else "-"
 
 
-def _read_secret(name: str) -> str:
+def _size(count: int) -> str:
+    """A byte count people can read: 512 B, 3.4 KB, 12.0 MB, 1.2 GB."""
+    value = float(count)
+    for unit in ("B", "KB", "MB"):
+        if value < 1024:
+            return f"{count} B" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _windows_console(fileno: int) -> bool:
+    """Whether a Windows file descriptor is a real console. `GetConsoleMode` only works on one."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetConsoleMode.restype = wintypes.BOOL
+    return bool(kernel32.GetConsoleMode(msvcrt.get_osfhandle(fileno), ctypes.byref(wintypes.DWORD())))
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _stdin_is_terminal() -> bool:
+    """Is someone typing at this? On Windows `isatty()` is also true for NUL (`< /dev/null`), so ask the console."""
     if not sys.stdin.isatty():
+        return False
+    if not _is_windows():
+        return True
+    try:
+        return _windows_console(sys.stdin.fileno())
+    except (OSError, ValueError, AttributeError, ImportError):
+        return False
+
+
+def _read_secret(name: str) -> str:
+    if not _stdin_is_terminal():
         return sys.stdin.read().rstrip("\n")
     return getpass.getpass(f"Value for {name} (not shown): ")
+
+
+def _connect(command: list[str]) -> int:
+    """Run ssh in place of the CLI. `execvp` doesn't hand a Windows console over to the new process, so run it."""
+    if _is_windows():
+        return subprocess.call(command)
+    os.execvp(command[0], command)
+    return 0  # not reached: execvp replaced this process
+
+
+def _explain_prices(krater: Krater, args: argparse.Namespace, say: Callable[[str], None]) -> None:
+    """`submit` without --target and --max: what an hour costs now, and what the two options mean."""
+    rental = "ondemand" if args.on_demand else "bid"
+    prices = [p for p in krater.get("/prices")["prices"] if p["rental"] == rental]
+    wanted = [g.lower() for g in args.gpu]
+    chosen = [p for p in prices if any(w in p["gpu"].lower() for w in wanted)] if wanted else []
+    for name in wanted:
+        if not any(name in p["gpu"].lower() for p in prices):
+            say(f"No price data for '{name}'.")
+    if not wanted:
+        chosen = [p for p in prices if p["offers"]]
+    chosen.sort(key=_cheapest_first)
+    if chosen:
+        say(f"Right now, per hour, {RENTAL_WORDS[rental]}:")
+        _table(
+            [["GPU", "CHEAPEST", "MEDIAN", "OFFERS"]]
+            + [
+                [p["gpu"], _money(p["min_usd_per_hour"]), _money(p["median_usd_per_hour"]), p["offers"]] for p in chosen
+            ],
+            say,
+        )
+    say("Give --target (start at or under) and --max (never above), in USD per hour, e.g. --target 0.07 --max 0.10")
+
+
+def _cheapest_first(price: dict) -> tuple[Decimal, str]:
+    cheapest = price["min_usd_per_hour"]
+    return (Decimal(cheapest) if cheapest is not None else Decimal("Infinity"), price["gpu"])
 
 
 def run(
@@ -128,7 +253,10 @@ def run(
     say: Callable[[str], None] = print,
     prompt: Callable[[str], str] = input,
     read_secret: Callable[[str], str] = _read_secret,
-    exec_ssh: Callable[[list[str]], None] | None = None,
+    exec_ssh: Callable[[list[str]], int | None] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    open_url: Callable[[str], object] = webbrowser.open,
 ) -> int:
     args = _parser().parse_args(list(argv))
 
@@ -158,16 +286,27 @@ def run(
         out(me, lambda: say(f"{me['name']} <{me['email']}> ({', '.join(roles)}) on {krater.creds['url']}"))
     elif args.command == "projects":
         data = krater.get("/projects")
+        shown = [p for p in data["projects"] if args.all or p["status"] not in FINISHED_PROJECTS]
+        hidden = len(data["projects"]) - len(shown)
         rows = [["ID", "STATUS", "TITLE"]] + [
-            [p["id"], p["status"] + ("" if p["can_launch"] else " (can't launch)"), p["title"] or "Untitled"]
-            for p in data["projects"]
+            [short(p["id"]), p["status"] + ("" if p["can_launch"] else " (can't launch)"), p["title"] or "Untitled"]
+            for p in shown
         ]
-        out(data, lambda: _table(rows, say) if data["projects"] else say("You're not on any project's team."))
+
+        def render_projects() -> None:
+            if shown:
+                _table(rows, say)
+            elif not data["projects"]:
+                say("You're not on any project's team.")
+            if hidden:
+                say(f"({hidden} finished project{'s' if hidden != 1 else ''} hidden; --all shows them)")
+
+        out(data, render_projects)
     elif args.command == "jobs":
-        data = krater.get(f"/projects/{args.project}/jobs")
+        data = krater.get(f"/projects/{resolve.resolve_project(krater, args.project)}/jobs")
         rows = [["ID", "KIND", "STATE", "TARGET/MAX", "SPENT", "NAME"]] + [
             [
-                j["id"],
+                short(j["id"]),
                 j["kind"],
                 j["state"],
                 f"{_money(j['target_usd_per_hour'])}/{_money(j['max_usd_per_hour'])}",
@@ -178,6 +317,9 @@ def run(
         ]
         out(data, lambda: _table(rows, say) if data["jobs"] else say("No jobs yet."))
     elif args.command == "submit":
+        if args.target is None or args.max is None:
+            _explain_prices(krater, args, say)
+            return 2
         body = {
             "name": args.name,
             "image": args.image,
@@ -194,10 +336,10 @@ def run(
             "on_max_wait": args.on_max_wait,
             "max_runtime_minutes": args.max_runtime,
         }
-        job = krater.post(f"/projects/{args.project}/jobs", body)
+        job = krater.post(f"/projects/{resolve.resolve_project(krater, args.project)}/jobs", body)
         out(job, lambda: say(f"Queued {job['kind']} {job['id']}: {job['state_reason'] or job['state']}"))
     elif args.command == "show":
-        job = krater.get(f"/jobs/{args.job}")
+        job = krater.get(f"/jobs/{resolve.resolve_job(krater, args.job)}")
 
         def render() -> None:
             say(
@@ -221,8 +363,18 @@ def run(
 
         out(job, render)
     elif args.command == "logs":
+        job_id = resolve.resolve_job(krater, args.job)
+        if args.follow:
+            if args.attempt is not None or args.json:
+                say("--follow shows the latest attempt as text; leave out --attempt and --json.")
+                return 2
+            try:
+                follow.follow_logs(krater, job_id, tail_bytes=args.bytes, interval=args.interval, say=say, sleep=sleep)
+            except KeyboardInterrupt:
+                return INTERRUPTED
+            return 0
         query = f"?bytes={args.bytes}" + (f"&attempt={args.attempt}" if args.attempt is not None else "")
-        data = krater.get(f"/jobs/{args.job}/logs{query}")
+        data = krater.get(f"/jobs/{job_id}/logs{query}")
 
         def render_logs() -> None:
             if not data["text"]:
@@ -233,17 +385,44 @@ def run(
             say(data["text"].rstrip("\n"))
 
         out(data, render_logs)
+    elif args.command == "wait":
+        job_id = resolve.resolve_job(krater, args.job)
+        try:
+            job, finished = follow.wait(
+                krater,
+                job_id,
+                interval=args.interval,
+                timeout_minutes=args.timeout,
+                say=say,
+                sleep=sleep,
+                clock=clock,
+                quiet=args.json,
+            )
+        except KeyboardInterrupt:
+            return INTERRUPTED
+        if not finished:
+            say(f"Gave up after {args.timeout:g} minutes; {job['name']} is still {job['state']}.")
+            return TIMED_OUT
+        out(job, lambda: None)
+        return follow.exit_code_for(job)
     elif args.command == "download":
-        data = krater.get(f"/jobs/{args.job}/files")
+        job_id = resolve.resolve_job(krater, args.job)
+        data = krater.get(f"/jobs/{job_id}/files")
         files = [f for f in data["files"] if args.only is None or f["area"] == args.only]
         if not files:
             say("Nothing to download yet.")
             return 0
         root = os.path.abspath(args.to)
+        fetched = already = total = 0
         for file in files:
             target = os.path.abspath(os.path.join(root, file["area"], *file["name"].split("/")))
             if not target.startswith(root + os.sep):
                 say(f"Skipped {file['name']}: not a plain relative path.")
+                continue
+            total += file["size_bytes"]
+            if os.path.isfile(target) and os.path.getsize(target) == file["size_bytes"]:
+                say(f"{file['area']}/{file['name']}  already here")
+                already += 1
                 continue
             os.makedirs(os.path.dirname(target), exist_ok=True)
             with http.stream("GET", file["url"]) as response:  # a presigned URL: no Krater sign-in goes with it
@@ -251,10 +430,11 @@ def run(
                 with open(target + ".partial", "wb") as handle:
                     handle.writelines(response.iter_bytes())
             os.replace(target + ".partial", target)
-            say(f"{file['area']}/{file['name']}  ({file['size_bytes']} bytes)")
-        say(f"Saved {len(files)} files under {root}.")
+            say(f"{file['area']}/{file['name']}  ({_size(file['size_bytes'])})")
+            fetched += 1
+        say(f"Saved {fetched} files, {already} already here: {_size(total)} in all, under {root}.")
     elif args.command in ("cancel", "stop", "resume", "move"):
-        job = krater.post(f"/jobs/{args.job}/{args.command}")
+        job = krater.post(f"/jobs/{resolve.resolve_job(krater, args.job)}/{args.command}")
         out(
             job,
             lambda: say(
@@ -262,22 +442,39 @@ def run(
             ),
         )
     elif args.command == "ssh":
-        job = krater.get(f"/jobs/{args.job}")
+        job = krater.get(f"/jobs/{resolve.resolve_job(krater, args.job)}")
         machine = job.get("machine") or {}
-        if job["kind"] != "box" or not machine.get("ssh_host"):
-            say(f"{job['name']} has no SSH address yet ({job['state']}).")
+        if job["kind"] != "box":
+            say(f"{job['name']} is a job, not a box; only boxes take SSH.")
+            return 1
+        if job["state"] != "running":
+            # A machine can have an address long before the box is up (starting) or after it is gone (stopped).
+            yet = " yet" if job["state"] in ("queued", "starting") else ""
+            say(f"{job['name']} isn't running{yet} ({job['state']}). Try `krater show {job['id']}`.")
+            return 1
+        if not machine.get("ssh_host"):
+            say(f"{job['name']} has no SSH address yet. Try `krater show {job['id']}`.")
             return 1
         extra = [a for a in args.ssh_args if a != "--"]
         command = ["ssh", "-p", str(machine["ssh_port"]), *extra, f"root@{machine['ssh_host']}"]
         if exec_ssh is not None:
-            exec_ssh(command)
-        else:
-            if shutil.which("ssh") is None:
-                say("No ssh command found. Run: " + " ".join(command))
-                return 1
-            os.execvp("ssh", command)
+            return exec_ssh(command) or 0
+        if shutil.which("ssh") is None:
+            say("No ssh command found. Run: " + " ".join(command))
+            return 1
+        return _connect(command)
+    elif args.command == "open":
+        kind, item = resolve.resolve_job_or_project(krater, args.target)
+        base = krater.creds["url"].rstrip("/")
+        page = (
+            f"{base}/projects/{item['project_id']}/compute/{item['id']}"
+            if kind == "job"
+            else f"{base}/projects/{item['id']}"
+        )
+        say(page)
+        open_url(page)
     elif args.command == "secrets":
-        base = f"/projects/{args.project}/secrets"
+        base = f"/projects/{resolve.resolve_project(krater, args.project)}/secrets"
         if args.secrets_command == "list":
             data = krater.get(base)
             rows = [["NAME", "UPDATED"]] + [
@@ -296,29 +493,70 @@ def run(
             out(data, lambda: say(f"Deleted {args.name}."))
     elif args.command == "prices":
         data = krater.get("/prices")
-        rows = [["GPU", "RENTAL", "CHEAPEST", "MEDIAN", "OFFERS"]] + [
-            [p["gpu"], p["rental"], _money(p["min_usd_per_hour"]), _money(p["median_usd_per_hour"]), p["offers"]]
-            for p in data["prices"]
-        ]
-        out(data, lambda: _table(rows, say) if data["prices"] else say("No prices yet."))
+        rows = [p for p in data["prices"] if not args.gpu or args.gpu.lower() in p["gpu"].lower()]
+        listed = sorted((p for p in rows if args.all or p["offers"]), key=_cheapest_first)
+
+        def render_prices() -> None:
+            if listed:
+                _table(
+                    [["GPU", "RENTAL", "CHEAPEST", "MEDIAN", "OFFERS"]]
+                    + [
+                        [
+                            p["gpu"],
+                            RENTAL_WORDS.get(p["rental"], p["rental"]),
+                            _money(p["min_usd_per_hour"]),
+                            _money(p["median_usd_per_hour"]),
+                            p["offers"],
+                        ]
+                        for p in listed
+                    ],
+                    say,
+                )
+            elif rows:
+                say("Nobody is offering those right now (--all lists them anyway).")
+            elif args.gpu:
+                say(f"No GPU model matches '{args.gpu}'.")
+            else:
+                say("No prices yet.")
+
+        out(data, render_prices)
     return 0
+
+
+def _unreachable(exc: httpx.HTTPError) -> str:
+    try:
+        host = exc.request.url.host
+    except RuntimeError:  # an error raised without a request attached
+        host = None
+    where = host or "Krater or Weave"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{where} answered {exc.response.status_code}."
+    if isinstance(exc, httpx.TimeoutException):
+        return f"{where} didn't answer in time."
+    return f"couldn't reach {where} ({exc.__class__.__name__}). Check the address and your connection."
+
+
+def report(exc: Exception) -> int:
+    """Say what went wrong on stderr, in a line a member can act on. Returns the exit code."""
+    if isinstance(exc, KraterError):
+        print(f"krater: {exc}", file=sys.stderr)
+        for field, problem in exc.fields.items():
+            print(f"  {field}: {problem}", file=sys.stderr)
+    elif isinstance(exc, httpx.HTTPError):
+        print(f"krater: {_unreachable(exc)}", file=sys.stderr)
+    else:  # AuthError, ResolveError
+        print(f"krater: {exc}", file=sys.stderr)
+    return 1
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     with httpx.Client(timeout=30.0) as http:
         try:
             code = run(sys.argv[1:] if argv is None else argv, http=http)
-        except auth.AuthError as exc:
-            print(f"krater: {exc}", file=sys.stderr)
-            code = 1
-        except KraterError as exc:
-            print(f"krater: {exc}", file=sys.stderr)
-            for field, problem in exc.fields.items():
-                print(f"  {field}: {problem}", file=sys.stderr)
-            code = 1
-        except httpx.HTTPError as exc:
-            print(f"krater: couldn't reach Krater or Weave ({exc.__class__.__name__}).", file=sys.stderr)
-            code = 1
+        except (auth.AuthError, ResolveError, KraterError, httpx.HTTPError) as exc:
+            code = report(exc)
+        except KeyboardInterrupt:
+            code = INTERRUPTED
     raise SystemExit(code)
 
 
