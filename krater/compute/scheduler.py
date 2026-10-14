@@ -51,6 +51,7 @@ from krater.models import (
 from krater.models.compute_job import ACTIVE_JOB_STATES, FINISHED_JOB_STATES
 from krater.providers import (
     ComputeProvider,
+    Phase,
     ProviderError,
     ProviderRequestFailedError,
     ProviderSearchQuotaError,
@@ -436,7 +437,7 @@ class Scheduler:
                 previously_seen.isoformat(),
             )
         row.last_seen_at = self.now
-        row.last_provider_status = seen.actual_status
+        row.last_provider_status = seen.status
         self._record_ssh(row, seen)
 
         if row.destroy_requested_at is not None:
@@ -467,7 +468,7 @@ class Scheduler:
             return
         if (
             row.state is ComputeInstanceState.PROVISIONING
-            and not seen.is_running
+            and seen.phase is not Phase.RUNNING
             and self.now - row.created_at >= PROVISION_TIMEOUT
         ):
             # Finished first: if Vast doesn't confirm the destroy, the next pass retries it for the finished job.
@@ -479,7 +480,7 @@ class Scheduler:
             )
             self._destroy(row, "never started")
             return
-        if seen.is_running:
+        if seen.phase is Phase.RUNNING:
             if row.state is ComputeInstanceState.PROVISIONING:
                 row.state = ComputeInstanceState.RUNNING
                 row.running_since = self.now
@@ -544,13 +545,13 @@ class Scheduler:
                 "The machine was paused (outbid).",
                 now=self.now,
                 instance=row,
-                vast_status=seen.actual_status,
+                vast_status=seen.status,
             )
             return
         if (
             row.state is ComputeInstanceState.PAUSED
             and row.start_requested_at is not None
-            and seen.intended_status == "stopped"
+            and seen.phase is Phase.STOPPED
         ):
             # The start after a self-stop hasn't taken yet. Keep asking; meanwhile the pause rules below move the job
             # if the machine's GPU stays taken.
@@ -609,11 +610,11 @@ class Scheduler:
 
     def _stopped_itself(self, row: ComputeInstance, seen: Instance, policy: ComputePolicy) -> bool:
         """Whether a machine that stopped without Krater stopping it was stopped by its own runner, which does that
-        after `runner_self_stop_minutes` with no answer from Krater. Vast shows an outbid machine the same way (intended
-        status `stopped`), so the tell is the silence: an outbid runner was reporting until moments ago."""
+        after `runner_self_stop_minutes` with no answer from Krater. Vast shows an outbid machine the same way (phase
+        `stopped`), so the tell is the silence: an outbid runner was reporting until moments ago."""
         last = row.last_heartbeat_at or row.runner_started_at
         return (
-            seen.intended_status == "stopped"
+            seen.phase is Phase.STOPPED
             and last is not None
             and self.now - last >= timedelta(minutes=policy.runner_self_stop_minutes)
         )
@@ -747,7 +748,7 @@ class Scheduler:
         previously_seen: datetime | None,
     ) -> None:
         if row.start_requested_at is not None:
-            if seen.is_running:
+            if seen.phase is Phase.RUNNING:
                 row.state = ComputeInstanceState.RUNNING
                 row.entered_running_at = self.now
                 row.run_seconds = 0  # a resumed box starts a new run
@@ -769,10 +770,10 @@ class Scheduler:
             else:
                 self.client.start_instance(row.provider_instance_id)
             return
-        if seen.is_running and "running" in (seen.intended_status, seen.cur_state):
+        if seen.phase is Phase.RUNNING and not seen.stopping:
             # Running and meant to be, without Krater starting it: a member can start their own instance with the
-            # container's key. (Right after Krater's own stop, Vast still reports `running` for a while, but its
-            # intended state is already `stopped`: that's lag, not a restart.)
+            # container's key. (Right after Krater's own stop, Vast still reports `running` for a while, but it
+            # reports `stopping` too: that's lag, not a restart.)
             # Bill it at the full rate for the time since Krater last looked, and stop it again.
             if previously_seen is not None:
                 extra = round(row.gpu_microusd * (self.now - previously_seen).total_seconds() / 3600)

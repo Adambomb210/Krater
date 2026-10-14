@@ -31,6 +31,7 @@ from krater.providers.errors import (
     ProviderSearchQuotaError,
     ProviderUnavailableError,
 )
+from krater.providers.phase import Phase
 
 if TYPE_CHECKING:
     from krater.config import Settings
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
 __all__ = [
     "Capabilities",
     "ComputeProvider",
+    "Phase",
     "ProviderError",
     "ProviderInfo",
     "ProviderRateLimitedError",

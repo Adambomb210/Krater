@@ -18,6 +18,8 @@ from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 
+from krater.providers.phase import Phase
+
 RentalType = Literal["bid", "ondemand"]
 
 #: Hours in the month Vast's per-GB-month storage prices assume (its own UI divides by 730).
@@ -347,6 +349,30 @@ class Instance:
     @property
     def is_running(self) -> bool:
         return self.actual_status == "running"
+
+    @property
+    def status(self) -> str | None:
+        """Vast's own word for the machine's state, for display and the instance row (`last_provider_status`)."""
+        return self.actual_status
+
+    @property
+    def phase(self) -> Phase:
+        """The neutral phase. `intended_status` `stopped` covers Krater's stop, an outbid machine and a runner's
+        self-stop alike (Vast doesn't tell them apart). Vast never reports an ended machine, only a missing one, so
+        nothing here is `GONE`."""
+        if self.actual_status == "running":
+            return Phase.RUNNING
+        if self.intended_status == "stopped":
+            return Phase.STOPPED
+        if self.actual_status in (None, "loading", "created"):
+            return Phase.PROVISIONING
+        return Phase.INTERRUPTED
+
+    @property
+    def stopping(self) -> bool:
+        """Running but no longer meant to: Vast keeps `actual_status` at `running` for a while after a stop, with
+        neither its intended nor its current state `running` any more."""
+        return "running" not in (self.intended_status, self.cur_state)
 
 
 @dataclass(frozen=True)
