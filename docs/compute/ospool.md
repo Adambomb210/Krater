@@ -78,8 +78,13 @@ Routes A and C look the same to Krater: a schedd of our own, reached with a toke
   `RemoteWallClockTime` and `GPUsProvisioned` for each job, which gives the actual GPU-hours
   ([job attributes](https://raw.githubusercontent.com/htcondor/htcondor/main/docs/classad-attributes/job-classad-attributes.rst)).
   The OSPool client can report these as its `charges`, which turns Krater's reconcile on for it. Two ways to use them:
-  - **A shadow price.** Charge GPU-hours at an admin-set rate in cents into the existing spend. Ceilings, alerts and
-    reports all keep working unchanged. **This is the recommendation.**
+  - **A shadow price.** Each GPU class has an admin-set hourly rate, and the OSPool's offers carry it. Krater's spend
+    accrues at an instance's hourly rate (`krater.compute.spend`), and the hourly cap and affordability checks read the
+    offer's rate. So with the rate in the offer, the ceilings, the 80%/100% alerts and the reports work during the run.
+    Reconcile then corrects the total to the actual GPU-hours. **This is the recommendation.**
+    - With $0 offers instead, every project could afford every job, the hourly cap would never bind, and the alerts
+      would stay silent until reconcile.
+    - OSPool jobs carry no target or max set by the member: the rate is Patchwork's.
   - **A separate GPU-hour allowance per project.** This is clearer to members, but it is a second ledger to build.
 
 ## How it maps onto Krater
@@ -97,8 +102,8 @@ The bindings are Linux wheels only (glibc 2.28+, x86-64 and aarch64), from [PyPI
 | Krater | OSPool |
 | --- | --- |
 | Capabilities | `interruptible=True`. `charges=True`, from the GPU-hours above. Everything else is `False`: no on-demand, bids, outbid pauses, stop/start, SSH (so no boxes), self-stop or search quota. Job validation already refuses the rest with a message naming the provider. |
-| `search_offers` | One $0 "offer" per GPU class: capability and memory from `GPUs_Capability` and `GPUs_GlobalMemoryMb` in slot ads (`Collector.query(AdType.Slot, 'GPUs > 0')`), cached for an hour. Whether a host other than the AP may read the OSPool collector is **unverified**. If it can't, fall back to a static class list. Past GPU jobs ran on V100 16 GB, 2080 Ti 10 GB, A10 22 GB, RTX 3090 and 4090 24 GB, and A100 40/80 GB. No H100 ([GPU jobs](https://osg-htc.org/osg-portal-documentation/htc_workloads/specific_resource/gpu-jobs/)). |
-| `create_instance` | `Schedd.submit(Submit({...}))`, details below. The cluster id becomes the instance id (`1234.0`, so instance ids must be strings). |
+| `search_offers` | One "offer" per GPU class, at the class's shadow rate (above): capability and memory from `GPUs_Capability` and `GPUs_GlobalMemoryMb` in slot ads (`Collector.query(AdType.Slot, 'GPUs > 0')`), cached for an hour. Whether a host other than the AP may read the OSPool collector is **unverified**. If it can't, fall back to a static class list. Past GPU jobs ran on V100 16 GB, 2080 Ti 10 GB, A10 22 GB, RTX 3090 and 4090 24 GB, and A100 40/80 GB. No H100 ([GPU jobs](https://osg-htc.org/osg-portal-documentation/htc_workloads/specific_resource/gpu-jobs/)). |
+| `create_instance` | `Schedd.submit(Submit({...}), spool=True)`, then `Schedd.spool(result)` to upload `krater-runner` and `job-token`. Details below. In `htcondor2`, `spool` defaults to `False`, and without it the input files would exist only on the worker. The cluster id becomes the instance id (`1234.0`, so instance ids must be strings). |
 | `show_instance` / `list_instances` | One query per scheduler pass, `constraint='Owner == "<us>" && KraterLabel =!= undefined'` with a projection, answering every show and list from it. A remote tracker should query a schedd at most once a minute ([scalable job tracking](https://htcondor.readthedocs.io/en/24.x/apis/python-bindings/tutorials/Scalable-Job-Tracking.html)). Jobs that left the queue come from `history(since=...)`. |
 | `destroy_instance` | `act(JobAction.Remove, "1234.0")`. Then confirm on later passes that the job left the queue. `act`'s return value is undocumented. |
 | Interruption | HTCondor re-runs an evicted job by itself, on another slot. Detect it from `NumJobStarts` rising, or from `LastVacateTime` and `VacateReasonCode` (1011 preempted, 1013 shut down, 1014 drained). The runner's next `/start` already counts as a resume (`runner_starts > 1`) and restores the last checkpoint from Krater's storage. |
@@ -159,8 +164,9 @@ max_retries             = 0
   - Krater already checkpoints to its own storage. So rather than using exit code 85, an OSPool job's max runtime per
     run is capped at 20 hours (`allowed_execute_duration`, hold code 47).
   - A job that needs longer requeues as a new attempt from its checkpoint, as on Vast.
-- **Spooling.** Submitting to a remote schedd spools by default, and a spooled job stays in the queue after it
-  completes. Nothing comes back through HTCondor here: outputs go to Krater's storage. So Krater removes completed
+- **Spooling.** A worker that isn't on the AP must spool. `submit(..., spool=True)` creates the job held (hold code
+  15) until `spool(result)` uploads its input files (hold code 16 while uploading). `condor_submit -name` does this on
+  its own, but `htcondor2` doesn't. A spooled job stays in the queue after it completes. Nothing comes back through HTCondor here: outputs go to Krater's storage. So Krater removes completed
   jobs itself, and its fake must model hold codes 15 and 16 as normal.
 
 ### Changes to Krater itself
@@ -180,8 +186,8 @@ which covers string instance ids, a neutral instance phase, launch split per pro
      next attempt.
    - An HTCondor re-run after an eviction is not a new Krater attempt: same instance, `runner_starts + 1`.
 3. **The runner exits when done**, as above. The runner already falls back to `/tmp/krater/...` when it can't create
-   `/krater`. HTCondor bind-mounts `/tmp` into the job's scratch directory, which is deleted when the job leaves the
-   machine.
+   `/krater`. HTCondor bind-mounts `/tmp` into the job's scratch directory by default (`MOUNT_UNDER_SCRATCH`), which is
+   deleted when the job leaves the machine. That OSPool's execution points keep this default is **unverified**.
 4. **Images**, below.
 5. **A provider per job** (providers.md): the job form gains "free, may wait" vs. "paid, starts now". The scheduler then
    runs one pass per active provider.
@@ -289,14 +295,23 @@ It is a second runner mode and a second file path in the worker. **Build it only
 
 ## Appendix: the egress test job
 
-Run this by hand from an OSPool account. It needs no Krater code. Mint a presigned PUT for a throwaway key on
-staging's storage, and point `TEST_URL` at a Krater health URL (staging through the Funnel).
+Run this by hand from an OSPool account. It needs no Krater code. While it runs, Krater staging is reachable from the
+internet, because it needs the Funnel back on. Turn the Funnel off afterwards.
+
+**Setup:**
+- `TEST_URL`: a Krater health URL through the Funnel.
+- `PUT_URL`: a presigned PUT for a throwaway key on staging's storage.
+  - Sign it for exactly **1,048,576 bytes**. Krater's URLs are bound to their size, and any other size gets a 403.
+  - Give it an expiry of a day or more, because twenty queued jobs can start hours apart.
 
 `egress.sub`:
 ```
+TEST_URL                = https://<staging funnel>/healthz
+PUT_URL                 = <presigned PUT, 1,048,576 bytes, 24 h expiry>
 executable              = egress.sh
-arguments               = $(TEST_URL) $(PUT_URL)
+arguments               = "'$(TEST_URL)' '$(PUT_URL)'"
 +ProjectName            = "<our project>"
+job_machine_attrs       = GLIDEIN_Site
 request_cpus            = 1
 request_memory          = 1GB
 request_disk            = 1GB
@@ -310,12 +325,21 @@ queue 20                 # spread across sites
 `egress.sh`:
 ```sh
 #!/bin/sh
-echo "site=$GLIDEIN_Site host=$(hostname)"
-curl -sS -m 20 -o /dev/null -w 'get %{http_code} %{time_total}s\n' "$1" || echo "get failed"
+echo "host=$(hostname)"
+curl -sS -m 20 -o /dev/null -w 'get %{http_code} %{time_total}s\n' "$1" || echo "get failed: curl exit $?"
 head -c 1048576 /dev/urandom > probe.bin
-curl -sS -m 60 -o /dev/null -w 'put %{http_code} %{time_total}s\n' -T probe.bin "$2" || echo "put failed"
+curl -sS -m 60 -o /dev/null -w 'put %{http_code} %{time_total}s\n' -T probe.bin "$2" || echo "put failed: curl exit $?"
 command -v nvidia-smi >/dev/null && nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
 ```
 
-What a pass looks like: every run's GET and PUT succeed, across many `GLIDEIN_Site`s. A few failures by site means
-egress is site-dependent, and Krater would need a requirement that excludes those sites.
+**Reading it:**
+- Any HTTP status, even a 403 or 404, means the job reached the host. Only a curl failure means egress is blocked:
+  - exit 6: name resolution;
+  - exit 7: connection;
+  - exit 28: timeout.
+- A 403 on the PUT points to the URL (size or expiry), not to the network.
+- Find each job's site with `condor_history -af ClusterId ProcId MachineAttrGLIDEIN_Site0`. `$GLIDEIN_Site` may not be
+  in the job's environment.
+- **Pass:** every job reaches both hosts, across many sites.
+- **Failures clustered by site:** egress depends on the site, and Krater would need a requirement that excludes those
+  sites.
