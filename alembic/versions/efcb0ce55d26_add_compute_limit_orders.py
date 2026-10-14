@@ -37,5 +37,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema."""
-    op.drop_constraint("ck_compute_jobs_compute_outbid", "compute_jobs", type_="check")
+    op.drop_constraint(op.f("ck_compute_jobs_compute_outbid"), "compute_jobs", type_="check")
     op.drop_column("compute_jobs", "on_outbid")
