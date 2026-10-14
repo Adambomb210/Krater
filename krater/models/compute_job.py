@@ -112,7 +112,8 @@ class ComputeInstance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "compute_instances"
     __table_args__ = (
         sa.UniqueConstraint("job_id", "attempt", name="job_attempt"),
-        sa.UniqueConstraint("provider", "vast_instance_id", name="provider_instance"),
+        # uq_compute_instances_provider: the provider's id for a machine is unique within that provider.
+        sa.UniqueConstraint("provider", "provider_instance_id"),
     )
 
     job_id: Mapped[uuid.UUID] = mapped_column(
@@ -123,21 +124,21 @@ class ComputeInstance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     label: Mapped[str] = mapped_column(sa.String(100), nullable=False, unique=True)
     # Which provider (`krater.providers`, the value of KRATER_COMPUTE_MODE) the machine is rented from.
     provider: Mapped[str] = mapped_column(sa.String(32), nullable=False, default="vast", server_default="vast")
-    # The provider's own id for the machine (named for the first provider; docs/compute/providers.md).
-    vast_instance_id: Mapped[int | None] = mapped_column(sa.BigInteger, nullable=True)
+    # The provider's own id for the machine, as a string: Vast's are integers, AWS's `i-0abc...`, HTCondor's `1234.0`.
+    provider_instance_id: Mapped[str | None] = mapped_column(sa.String(128), nullable=True)
     state: Mapped[ComputeInstanceState] = mapped_column(
         pg_enum(ComputeInstanceState, name="compute_instance_state"), nullable=False
     )
 
-    offer_id: Mapped[int] = mapped_column(sa.BigInteger, nullable=False)
-    machine_id: Mapped[int | None] = mapped_column(sa.BigInteger, nullable=True)
+    provider_offer_id: Mapped[str] = mapped_column(sa.String(128), nullable=False)
+    provider_machine_id: Mapped[str | None] = mapped_column(sa.String(128), nullable=True)
     gpu_name: Mapped[str] = mapped_column(sa.String(64), nullable=False)
     interruptible: Mapped[bool] = mapped_column(sa.Boolean, nullable=False)
     # The GPU price per hour Krater rented at (the bid for interruptible), the disk per hour, and their sum.
     gpu_microusd: Mapped[int] = mapped_column(sa.BigInteger, nullable=False)
     disk_microusd: Mapped[int] = mapped_column(sa.BigInteger, nullable=False)
 
-    last_vast_status: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
+    last_provider_status: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     # When Krater started watching it again after not seeing it for a while (Krater itself was down). The runner's
     # deadlines count from here at the earliest, so a Krater outage doesn't read as a silent runner.
@@ -198,7 +199,7 @@ class ComputeInstance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         return self.state not in (ComputeInstanceState.DESTROYED, ComputeInstanceState.CREATE_FAILED)
 
     def __repr__(self) -> str:
-        return f"<ComputeInstance {self.label} vast={self.vast_instance_id} {self.state.value}>"
+        return f"<ComputeInstance {self.label} {self.provider}={self.provider_instance_id} {self.state.value}>"
 
 
 class SpendReconciliation(UUIDPrimaryKeyMixin, Base):
@@ -214,7 +215,8 @@ class SpendReconciliation(UUIDPrimaryKeyMixin, Base):
     actual_microusd: Mapped[int] = mapped_column(sa.BigInteger, nullable=False)
     # Whether the difference passed the project's reconciliation alert threshold.
     alerted: Mapped[bool] = mapped_column(sa.Boolean, nullable=False)
-    # Per instance: {"vast_instance_id", "estimate_microusd", "actual_microusd"}.
+    # Per instance: {"provider_instance_id", "estimate_microusd", "actual_microusd"} (rows before 2026-10-15 say
+    # "provider_instance_id", an integer).
     details: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
     @property

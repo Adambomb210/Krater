@@ -118,15 +118,40 @@ def _matches(value: Any, condition: Any) -> bool:
 _SEARCH_CONTROL_KEYS = {"limit", "type", "order", "allocated_storage"}
 
 
+class _ById(dict):
+    """Keyed by Vast's integer ids, and also by the strings Krater keeps them as (`fake.instances[row.id]`)."""
+
+    def __getitem__(self, key: Any) -> Any:
+        return super().__getitem__(int(key))
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        super().__setitem__(int(key), value)
+
+    def __contains__(self, key: object) -> bool:
+        try:
+            return super().__contains__(int(key))  # type: ignore[call-overload]
+        except (TypeError, ValueError):
+            return False
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        try:
+            return super().get(int(key), default)
+        except (TypeError, ValueError):
+            return default
+
+    def pop(self, key: Any, *default: Any) -> Any:
+        return super().pop(int(key), *default)
+
+
 class FakeVast:
     """The fake API's state, plus the `httpx` handler that serves it."""
 
     def __init__(self, *, api_key: str = FAKE_API_KEY, offers: list[dict[str, Any]] | None = None) -> None:
         self.api_key = api_key
-        self.offers: dict[int, dict[str, Any]] = {o["id"]: dict(o) for o in (offers or default_offers())}
-        self.instances: dict[int, dict[str, Any]] = {}
+        self.offers: dict[int, dict[str, Any]] = _ById({o["id"]: dict(o) for o in (offers or default_offers())})
+        self.instances: dict[int, dict[str, Any]] = _ById()
         self.charges: list[dict[str, Any]] = []
-        self.logs: dict[int, str] = {}
+        self.logs: dict[int, str] = _ById()
         #: Every request seen: (method, path) on the API host, ("GET", url) on the log host.
         self.requests: list[tuple[str, str]] = []
         #: Whether any log download carried an Authorization header (it must never).
@@ -135,7 +160,7 @@ class FakeVast:
         #: When true, a stop leaves `actual_status` at `running` (as the live API does for a while).
         self.lag_stops = False
         #: Stopped instances whose machine's GPU someone else has rented: a start is accepted but they stay stopped.
-        self.gpu_taken: dict[int, bool] = {}
+        self.gpu_taken: dict[int, bool] = _ById()
         #: SSH keys on the account (Krater keeps none).
         self.account_ssh_keys: list[dict[str, Any]] = []
         # Ids from the clock, so a dev worker that restarts (and so builds a new fake) never reuses one: Krater keeps
@@ -162,24 +187,24 @@ class FakeVast:
 
     # -- Test helpers ----------------------------------------------------------------------------------
 
-    def add_offer(self, offer_id: int, machine_id: int, gpu_name: str, **kwargs: Any) -> dict[str, Any]:
-        offer = _offer(offer_id, machine_id, gpu_name, **kwargs)
+    def add_offer(self, offer_id: int | str, machine_id: int | str, gpu_name: str, **kwargs: Any) -> dict[str, Any]:
+        offer = _offer(int(offer_id), int(machine_id), gpu_name, **kwargs)
         self.offers[offer_id] = offer
         return offer
 
-    def set_status(self, instance_id: int, actual_status: str | None, **fields: Any) -> None:
+    def set_status(self, instance_id: int | str, actual_status: str | None, **fields: Any) -> None:
         """What Vast would report next: `running` after the pull, `stopped` when stopped or paused, ..."""
         self.instances[instance_id]["actual_status"] = actual_status
         self.instances[instance_id].update(fields)
 
-    def add_charge(self, instance_id: int, *, gpu: str, disk: str = "0", start: int = 0, end: int = 0) -> None:
+    def add_charge(self, instance_id: int | str, *, gpu: str, disk: str = "0", start: int = 0, end: int = 0) -> None:
         items = [
             {"type": "gpu", "amount": float(gpu), "description": "gpu"},
             {"type": "disk", "amount": float(disk), "description": "disk"},
         ]
         self.charges.append(
             {
-                "source": f"instance-{instance_id}",
+                "source": f"instance-{int(instance_id)}",
                 "type": "instance",
                 "start": start,
                 "end": end,

@@ -115,13 +115,13 @@ def test_a_pass_leaves_another_providers_machines_alone(db_session, member, proj
     row = _instance(db_session, job)
     row.provider = "elsewhere"
     db_session.commit()
-    fake.set_status(row.vast_instance_id, "running")
+    fake.set_status(row.provider_instance_id, "running")
 
     _pass(db_session, client, NOW + timedelta(minutes=5))
 
     db_session.refresh(job)
     assert job.state is ComputeJobState.STARTING  # not watched by Vast's pass
-    assert row.vast_instance_id in fake.instances  # nor swept: its label is live
+    assert row.provider_instance_id in fake.instances  # nor swept: its label is live
 
 
 def test_the_runner_keeps_its_switch_off_where_the_provider_cant_stop_it(

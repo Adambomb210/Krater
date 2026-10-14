@@ -64,7 +64,7 @@ def run(session: Session, client: ComputeProvider, settings: Settings, *, now: d
         session.scalars(
             sa.select(ComputeInstance).where(
                 ours,
-                ComputeInstance.vast_instance_id.is_not(None),
+                ComputeInstance.provider_instance_id.is_not(None),
                 sa.or_(ComputeInstance.destroyed_at.is_(None), ComputeInstance.destroyed_at >= now - SETTLED_AFTER),
             )
         )
@@ -86,7 +86,9 @@ def run(session: Session, client: ComputeProvider, settings: Settings, *, now: d
 
     known = set(
         session.scalars(
-            sa.select(ComputeInstance.vast_instance_id).where(ours, ComputeInstance.vast_instance_id.is_not(None))
+            sa.select(ComputeInstance.provider_instance_id).where(
+                ours, ComputeInstance.provider_instance_id.is_not(None)
+            )
         )
     )
     for instance_id, label in labels.items():
@@ -105,7 +107,7 @@ def run(session: Session, client: ComputeProvider, settings: Settings, *, now: d
 
     by_project: dict[uuid.UUID, list[tuple[ComputeInstance, int, int]]] = {}
     for row in rows:
-        actual = actual_by_instance.get(row.vast_instance_id)
+        actual = actual_by_instance.get(row.provider_instance_id)
         if actual is None:
             continue  # nothing charged yet (just created): keep the estimate
         estimate = row.accrued_microusd
@@ -142,7 +144,11 @@ def run(session: Session, client: ComputeProvider, settings: Settings, *, now: d
                 actual_microusd=actual_total,
                 alerted=alerted,
                 details=[
-                    {"vast_instance_id": row.vast_instance_id, "estimate_microusd": estimate, "actual_microusd": actual}
+                    {
+                        "provider_instance_id": row.provider_instance_id,
+                        "estimate_microusd": estimate,
+                        "actual_microusd": actual,
+                    }
                     for row, estimate, actual in items
                 ],
             )
@@ -182,14 +188,14 @@ def _adopt_unconfirmed(
         session.scalars(
             sa.select(ComputeInstance).where(
                 ours,
-                ComputeInstance.vast_instance_id.is_(None),
+                ComputeInstance.provider_instance_id.is_(None),
                 ComputeInstance.state == ComputeInstanceState.CREATE_FAILED,
                 ComputeInstance.label.in_(list(by_label)),
             )
         )
     )
     for row in rows:
-        row.vast_instance_id = by_label[row.label]
+        row.provider_instance_id = by_label[row.label]
         row.destroyed_at = row.destroyed_at or now
         session.add(
             ComputeEvent(
@@ -197,14 +203,17 @@ def _adopt_unconfirmed(
                 instance_id=row.id,
                 kind="charges_found",
                 message=(
-                    f"Vast charged for instance {row.vast_instance_id} from a create it didn't confirm; counted here."
+                    f"Vast charged for instance {row.provider_instance_id} from a create it didn't confirm; "
+                    "counted here."
                 ),
-                payload={"vast_instance_id": row.vast_instance_id},
+                payload={"provider_instance_id": row.provider_instance_id},
                 at=now,
             )
         )
         logger.warning(
-            "krater.compute: charges for %s found by label %s; counted against its job", row.vast_instance_id, row.label
+            "krater.compute: charges for %s found by label %s; counted against its job",
+            row.provider_instance_id,
+            row.label,
         )
     session.flush()
     return rows

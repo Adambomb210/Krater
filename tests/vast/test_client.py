@@ -36,7 +36,7 @@ def client(fake: FakeVast) -> VastClient:
     return fake.client()
 
 
-def _create(client: VastClient, offer_id: int = 1001, **kwargs) -> int:
+def _create(client: VastClient, offer_id: str = "1001", **kwargs) -> str:
     request = CreateInstance(image="ghcr.io/alice/train:v3", disk_gb=32, label="krater-test", **kwargs)
     return client.create_instance(offer_id, request)
 
@@ -88,13 +88,13 @@ def test_search_sends_the_job_disk_and_sorts_by_full_cost(client: VastClient, fa
     assert body["type"] == "bid"
     assert body["reliability"] == {"gte": 0.95}
     # dph_total at 32 GB: 1003 (cheap disk) beats 1002 (cheap GPU, expensive disk).
-    assert [o.id for o in offers] == [1001, 1003, 1002]
+    assert [o.id for o in offers] == ["1001", "1003", "1002"]
     assert [o.dph_total for o in offers] == sorted(o.dph_total for o in offers)
     assert all(o.gpu_name == "RTX 3060" for o in offers)
 
 
 def test_offer_prices_are_decimals_and_full_cost_counts_disk(client: VastClient) -> None:
-    offer = next(o for o in client.search_offers(OfferQuery(gpu_names=("RTX 3060",), disk_gb=32)) if o.id == 1002)
+    offer = next(o for o in client.search_offers(OfferQuery(gpu_names=("RTX 3060",), disk_gb=32)) if o.id == "1002")
 
     assert offer.min_bid == Decimal("0.045")
     assert offer.dph_base == Decimal("0.07")
@@ -126,7 +126,7 @@ def test_search_never_asks_for_more_than_vasts_cap(client: VastClient, fake: Fak
 def test_create_returns_only_the_id_and_drops_the_instance_key(client: VastClient, fake: FakeVast) -> None:
     instance_id = _create(client, bid_price=Decimal("0.055"), env={"HF_TOKEN": "hf_secret value"}, ports=(22,))
 
-    assert isinstance(instance_id, int)
+    assert isinstance(instance_id, str) and instance_id.isdigit()
     assert fake.instances[instance_id]["label"] == "krater-test"
     # Env values are shell-quoted Docker flags.
     assert fake.instances[instance_id]["env"] == "-e 'HF_TOKEN=hf_secret value' -p 22:22"
@@ -167,7 +167,7 @@ def test_show_list_and_unknown_ids(client: VastClient, fake: FakeVast) -> None:
 
     shown = client.show_instance(instance_id)
     assert shown is not None and shown.is_running and shown.gpu_util == pytest.approx(99.9)
-    assert shown.machine_id == 501
+    assert shown.machine_id == "501"
     assert client.show_instance(1) is None
     assert [i.id for i in client.list_instances()] == [instance_id]
     assert client.list_instances(label_prefix="other-") == []
@@ -341,3 +341,11 @@ def test_get_vast_client_picks_up_a_new_key_without_a_restart(tmp_path, monkeypa
     key_file.write_text("rotated-key", encoding="utf-8")
     second = vast_package.get_vast_client()
     assert second is not None and second is not first
+
+
+@pytest.mark.parametrize("bad", ["", "12a", "../1", "1/2", "-1", " 1", "１２", "1" * 20, "i-0abc"])
+def test_only_plain_digit_ids_reach_a_vast_path(client: VastClient, fake: FakeVast, bad: str) -> None:
+    """Krater keeps every provider's ids as strings; one that isn't Vast's must never shape a request path."""
+    with pytest.raises(ValueError, match="not a Vast id"):
+        client.show_instance(bad)
+    assert fake.requests == []

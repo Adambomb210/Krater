@@ -32,6 +32,15 @@ SEARCH_RESULT_CAP = 512
 MICROUSD_PER_USD = Decimal(1_000_000)
 
 
+def vast_id(value: str | int) -> int:
+    """A provider id Krater holds as a string, as the integer Vast's paths and filters take. Anything but plain
+    digits is refused, so an id from elsewhere can never change the path a request goes to."""
+    text = str(value)
+    if not (text.isascii() and text.isdigit()) or len(text) > 19:
+        raise ValueError(f"not a Vast id: {text!r}")
+    return int(text)
+
+
 def usd_to_microusd(dollars: Decimal) -> int:
     """Dollars (a `Decimal`) to integer micro-dollars, rounding half up."""
     return int((dollars * MICROUSD_PER_USD).to_integral_value(rounding=ROUND_HALF_UP))
@@ -67,6 +76,12 @@ def _int(value: Any) -> int | None:
         return None
 
 
+def _id(value: Any) -> str | None:
+    """One of Vast's integer ids as the string Krater keeps for every provider's ids."""
+    number = _int(value)
+    return None if number is None else str(number)
+
+
 def _timestamp(value: Any) -> datetime | None:
     seconds = _float(value)
     return None if seconds is None else datetime.fromtimestamp(seconds, tz=UTC)
@@ -80,8 +95,8 @@ class Offer:
     the GPU price alone. Never compare one with the other: use `gpu_price` and `full_hourly` instead.
     """
 
-    id: int
-    machine_id: int | None
+    id: str
+    machine_id: str | None
     gpu_name: str
     num_gpus: int
     gpu_ram_mb: int | None
@@ -103,8 +118,8 @@ class Offer:
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> Offer:
         return cls(
-            id=int(raw["id"]),
-            machine_id=_int(raw.get("machine_id")),
+            id=str(int(raw["id"])),
+            machine_id=_id(raw.get("machine_id")),
             gpu_name=str(raw.get("gpu_name") or ""),
             num_gpus=_int(raw.get("num_gpus")) or 0,
             gpu_ram_mb=_int(raw.get("gpu_ram")),
@@ -173,7 +188,7 @@ class OfferQuery:
     min_reliability: float = 0.95
     min_cuda: float | None = None
     min_direct_ports: int = 0
-    machine_id: int | None = None
+    machine_id: str | None = None
     verified: bool = True
     limit: int = SEARCH_RESULT_CAP
     #: Only offers that could cost this much or less an hour, in micro-dollars: `min_bid` at or under it for a bid
@@ -209,7 +224,7 @@ class OfferQuery:
         if self.min_direct_ports > 0:
             body["direct_port_count"] = {"gte": self.min_direct_ports}
         if self.machine_id is not None:
-            body["machine_id"] = {"eq": self.machine_id}
+            body["machine_id"] = {"eq": vast_id(self.machine_id)}
         if self.max_price_microusd is not None:
             price = float(microusd_to_usd(self.max_price_microusd))
             body["min_bid" if self.rental_type == "bid" else "dph_total"] = {"lte": price}
@@ -279,7 +294,7 @@ class Instance:
     real GPU burst by 50-105 s and flickers, so it's only a fallback signal for idleness.
     """
 
-    id: int
+    id: str
     label: str | None
     actual_status: str | None
     intended_status: str | None
@@ -292,7 +307,7 @@ class Instance:
     dph_base: Decimal | None
     min_bid: Decimal | None
     is_bid: bool
-    machine_id: int | None
+    machine_id: str | None
     gpu_name: str | None
     num_gpus: int | None
     disk_space: float | None
@@ -305,7 +320,7 @@ class Instance:
     @classmethod
     def from_json(cls, raw: dict[str, Any]) -> Instance:
         return cls(
-            id=int(raw["id"]),
+            id=str(int(raw["id"])),
             label=raw.get("label"),
             actual_status=raw.get("actual_status"),
             intended_status=raw.get("intended_status"),
@@ -318,7 +333,7 @@ class Instance:
             dph_base=dec(raw.get("dph_base")),
             min_bid=dec(raw.get("min_bid")),
             is_bid=bool(raw.get("is_bid")),
-            machine_id=_int(raw.get("machine_id")),
+            machine_id=_id(raw.get("machine_id")),
             gpu_name=raw.get("gpu_name"),
             num_gpus=_int(raw.get("num_gpus")),
             disk_space=_float(raw.get("disk_space")),
@@ -355,11 +370,12 @@ class Charge:
     label: str | None
 
     @property
-    def instance_id(self) -> int | None:
+    def instance_id(self) -> str | None:
         """The Vast instance id, for a `source` of `instance-<id>`."""
         prefix = "instance-"
-        if self.source.startswith(prefix) and self.source[len(prefix) :].isdigit():
-            return int(self.source[len(prefix) :])
+        number = self.source[len(prefix) :]
+        if self.source.startswith(prefix) and number.isascii() and number.isdigit():
+            return str(int(number))
         return None
 
     @classmethod

@@ -37,7 +37,7 @@ from krater.vast.errors import (
     VastSearchQuotaError,
     VastUnavailableError,
 )
-from krater.vast.types import Charge, CreateInstance, Instance, Offer, OfferQuery, SearchQuota
+from krater.vast.types import Charge, CreateInstance, Instance, Offer, OfferQuery, SearchQuota, vast_id
 
 logger = logging.getLogger(__name__)
 
@@ -118,18 +118,18 @@ class VastClient:
 
     # -- Instances -------------------------------------------------------------------------------------
 
-    def create_instance(self, offer_id: int, request: CreateInstance) -> int:
+    def create_instance(self, offer_id: str, request: CreateInstance) -> str:
         """Rent `offer_id` and start `request` on it. Returns the new instance id; record it before anything
         else can fail. The response's `instance_api_key` is dropped here and never stored or logged."""
-        data = self._request("PUT", f"/api/v0/asks/{int(offer_id)}/", json=request.to_body())
+        data = self._request("PUT", f"/api/v0/asks/{vast_id(offer_id)}/", json=request.to_body())
         instance_id = data.get("new_contract")
-        if not isinstance(instance_id, int):
+        if not isinstance(instance_id, int) or isinstance(instance_id, bool):
             raise VastRequestFailedError("Vast's create response had no new_contract id")
-        return instance_id
+        return str(instance_id)
 
-    def show_instance(self, instance_id: int) -> Instance | None:
+    def show_instance(self, instance_id: str) -> Instance | None:
         """The instance, or `None` when Vast says the account has no such instance (destroyed, or never ours)."""
-        data = self._request("GET", f"/api/v0/instances/{int(instance_id)}/", params={"owner": "me"})
+        data = self._request("GET", f"/api/v0/instances/{vast_id(instance_id)}/", params={"owner": "me"})
         raw = data.get("instances")
         return Instance.from_json(raw) if isinstance(raw, dict) else None
 
@@ -150,37 +150,39 @@ class VastClient:
             if not after:
                 return instances
 
-    def change_bid(self, instance_id: int, price: Decimal) -> None:
+    def change_bid(self, instance_id: str, price: Decimal) -> None:
         """Set an interruptible instance's bid, in dollars per hour."""
         self._request(
-            "PUT", f"/api/v0/instances/bid_price/{int(instance_id)}/", json={"client_id": "me", "price": float(price)}
+            "PUT",
+            f"/api/v0/instances/bid_price/{vast_id(instance_id)}/",
+            json={"client_id": "me", "price": float(price)},
         )
 
-    def stop_instance(self, instance_id: int) -> None:
+    def stop_instance(self, instance_id: str) -> None:
         """Stop the container. The GPU stops billing; the disk keeps billing. A member can start a stopped
         instance again with the container's own key, so budget and runtime stops must `destroy_instance`."""
-        self._request("PUT", f"/api/v0/instances/{int(instance_id)}/", json={"state": "stopped"})
+        self._request("PUT", f"/api/v0/instances/{vast_id(instance_id)}/", json={"state": "stopped"})
 
-    def start_instance(self, instance_id: int) -> None:
+    def start_instance(self, instance_id: str) -> None:
         """Start a stopped instance. Vast restarts it only if the machine's GPU is still free."""
-        self._request("PUT", f"/api/v0/instances/{int(instance_id)}/", json={"state": "running"})
+        self._request("PUT", f"/api/v0/instances/{vast_id(instance_id)}/", json={"state": "running"})
 
-    def destroy_instance(self, instance_id: int) -> bool:
+    def destroy_instance(self, instance_id: str) -> bool:
         """Destroy the instance and its disk. Returns `False` if Vast says it doesn't exist (already gone).
         Callers confirm with `show_instance` that it really is gone."""
         try:
-            self._request("DELETE", f"/api/v0/instances/{int(instance_id)}/")
+            self._request("DELETE", f"/api/v0/instances/{vast_id(instance_id)}/")
         except VastRequestFailedError as exc:
             if exc.status_code == 404 or exc.error == "no_such_instance":
                 return False
             raise
         return True
 
-    def request_logs(self, instance_id: int, *, tail: int = 200, attempts: int = 6, wait_seconds: float = 3.0) -> str:
+    def request_logs(self, instance_id: str, *, tail: int = 200, attempts: int = 6, wait_seconds: float = 3.0) -> str:
         """The container's last `tail` log lines. Vast writes them to a URL on another host a moment after the
         request; that URL is fetched without Krater's Authorization header. The text is the member's own
         output: show it to them, don't log it."""
-        data = self._request("PUT", f"/api/v0/instances/request_logs/{int(instance_id)}/", json={"tail": str(tail)})
+        data = self._request("PUT", f"/api/v0/instances/request_logs/{vast_id(instance_id)}/", json={"tail": str(tail)})
         url = data.get("result_url")
         if not isinstance(url, str) or not url.startswith("https://"):
             raise VastRequestFailedError("Vast's request_logs response had no https result_url")

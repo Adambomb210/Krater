@@ -78,7 +78,7 @@ def choose(
     limit_microusd: int,
     max_microusd: int,
     several_models: bool,
-    exclude: set[int] = frozenset(),  # type: ignore[assignment]
+    exclude: set[str] = frozenset(),  # type: ignore[assignment]
 ) -> Choice | None:
     """The offer to rent: every offer whose full hourly cost is at or under `limit_microusd` (and so under the max),
     then the cheapest, or, when the job allows several GPU models, the best performance per dollar."""

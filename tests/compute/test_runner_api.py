@@ -39,7 +39,7 @@ def machine(db_session, member, project, client, fake):  # noqa: F811
     job = _submit(db_session, member, project)
     _pass(db_session, client)
     row = _instance(db_session, job)
-    fake.set_status(row.vast_instance_id, "running")
+    fake.set_status(row.provider_instance_id, "running")
     _pass(db_session, client, NOW + timedelta(minutes=5))
     return job, row, _token(fake, row)
 
@@ -68,7 +68,7 @@ def test_start_tells_the_runner_when_to_stop_its_machine_without_krater(http, ma
     info = http.post("/runner/v1/start", headers=_auth(token)).json()
 
     assert info["self_stop_after_seconds"] == 180 * 60
-    assert info["vast_instance_id"] == row.vast_instance_id
+    assert info["vast_instance_id"] == int(row.provider_instance_id)  # the wire name the runner reads
     assert info["vast_api_url"] == "https://console.vast.ai"
 
 
