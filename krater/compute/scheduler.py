@@ -190,10 +190,12 @@ class Scheduler:
     def _enforce_budgets(self) -> None:
         """Warn at the warn percentage; at the ceiling, projected one minute ahead, stop every machine the project has.
         Runs every pass, so a project that stays over budget can't start new work either (no budget to hold)."""
+        # A withdrawn or completed project is left out: its unspent budget was reclaimed, so it would look over budget
+        # and its jobs would fail as "reached its budget". The watch and start steps cancel them for the right reason.
         stmt = (
             sa.select(Project)
             .join(ComputeJob, ComputeJob.project_id == Project.id)
-            .where(ComputeJob.state.in_(ACTIVE_JOB_STATES))
+            .where(ComputeJob.state.in_(ACTIVE_JOB_STATES), Project.status.in_(LAUNCHABLE_STATUSES))
             .distinct()
         )
         for project in list(self.session.scalars(stmt)):
@@ -243,6 +245,16 @@ class Scheduler:
         for row in self.session.scalars(stmt):
             found = by_label.get(row.label)
             job = row.job
+            if found is not None and self.session.scalar(
+                sa.select(ComputeInstance.id).where(ComputeInstance.vast_instance_id == found.id)
+            ):
+                # Vast ids are never reused, so this is a stale label match (or a fake Vast restarted with its counter).
+                # Recording it would break the unique id and with it every scheduler pass; the sweep handles the
+                # instance itself.
+                logger.error(
+                    "krater.compute: instance %s for %s is already recorded for another attempt", found.id, row.label
+                )
+                found = None
             if found is not None:
                 row.vast_instance_id = found.id
                 row.state = ComputeInstanceState.PROVISIONING
@@ -928,7 +940,7 @@ class Scheduler:
         self.session.add(row)
         job.attempts = attempt
         job.state = ComputeJobState.STARTING
-        job.state_reason = f"Renting a {choice.offer.gpu_name} at {_dollars(choice.full_microusd)}."
+        job.state_reason = f"Renting {job.num_gpus} × {choice.offer.gpu_name} at {_dollars(choice.full_microusd)}."
         job.hold_cents = hold_cents
         taken.add(choice.offer.id)
         _event(

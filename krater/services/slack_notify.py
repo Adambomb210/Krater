@@ -397,13 +397,23 @@ def sync_budget_notifications(session: Session, slack_client: SlackClient) -> No
         AuditEvent.project_id.is_not(None),
         AuditEvent.id.not_in(already_posted),
     )
-    for event in session.scalars(stmt):
+    for event in list(session.scalars(stmt)):
         project = session.get(Project, event.project_id)
         if project is None or project.slack_channel_id is None:
             # Nothing to post to yet -- try again next reconcile tick once a channel exists.
             continue
+        if project.slack_channel_archived:
+            # The project finished; nobody reads its channel. Mark it handled so it isn't retried forever.
+            session.add(SlackNotification(audit_event_id=event.id))
+            session.flush()
+            continue
         blocks, text = _budget_event_message(event)
-        slack_client.post_message(project.slack_channel_id, blocks=blocks, text=text)
+        try:
+            slack_client.post_message(project.slack_channel_id, blocks=blocks, text=text)
+        except SlackRequestFailedError:
+            # One channel Slack refuses (archived by hand, bot kicked) mustn't hold up every other notice.
+            logger.exception("krater.slack budget notice %s for project %s failed; continuing", event.id, project.id)
+            continue
         session.add(SlackNotification(audit_event_id=event.id))
         session.flush()
 

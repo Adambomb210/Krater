@@ -398,6 +398,47 @@ def test_sync_budget_notifications_posts_a_warning_once(db_session: Session, mem
     assert len(slack_client.messages) == 1
 
 
+class _BrokenChannelSlack(FakeSlackClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.broken_channel_id: str | None = None
+
+    def post_message(self, channel_id: str, *, blocks: list[dict], text: str) -> str:
+        if channel_id == self.broken_channel_id:
+            raise SlackRequestFailedError("chat.postMessage failed: not_in_channel")
+        return super().post_message(channel_id, blocks=blocks, text=text)
+
+
+def test_budget_notices_skip_archived_channels_and_survive_a_refusal(db_session: Session, member: Actor) -> None:
+    """Seen on staging: a completed project's notice went to its archived channel, Slack refused it (`is_archived`)
+    on every reconcile, and the loop stopped there, holding up every other project's notices."""
+    slack_client = _BrokenChannelSlack()
+    archived = new_project(db_session, member, title="Done", write_up="w", budget_requested_cents=5000)
+    archived.slack_channel_id = slack_client.create_channel("ganymede-done")
+    archived.slack_channel_archived = True
+    broken = new_project(db_session, member, title="Kicked", write_up="w", budget_requested_cents=5000)
+    broken.slack_channel_id = slack_client.create_channel("ganymede-kicked")
+    slack_client.broken_channel_id = broken.slack_channel_id
+    fine = new_project(db_session, member, title="Fine", write_up="w", budget_requested_cents=5000)
+    fine.slack_channel_id = slack_client.create_channel("ganymede-fine")
+    for project in (archived, broken, fine):
+        db_session.add(
+            AuditEvent(
+                actor_id=None,
+                action=slack_notify.AUDIT_BUDGET_WARNING,
+                project_id=project.id,
+                payload={"ceiling_cents": 5000, "spend_cents": 4000, "percent": 80.0},
+            )
+        )
+    db_session.flush()
+
+    slack_notify.sync_budget_notifications(db_session, slack_client)
+
+    assert [channel for channel, _ts in slack_client.messages] == [fine.slack_channel_id]
+    slack_notify.sync_budget_notifications(db_session, slack_client)  # the archived one is handled, not retried
+    assert len(slack_client.messages) == 1
+
+
 def test_sync_missed_archives_archives_finished_projects(db_session: Session, member: Actor) -> None:
     project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     slack_client = FakeSlackClient()
