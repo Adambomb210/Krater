@@ -62,6 +62,16 @@ def test_start_tells_the_runner_its_command_and_whether_it_resumes(http, machine
     assert row.runner_starts == 2
 
 
+def test_start_tells_the_runner_when_to_stop_its_machine_without_krater(http, machine) -> None:
+    _, row, token = machine
+
+    info = http.post("/runner/v1/start", headers=_auth(token)).json()
+
+    assert info["self_stop_after_seconds"] == 180 * 60
+    assert info["vast_instance_id"] == row.vast_instance_id
+    assert info["vast_api_url"] == "https://console.vast.ai"
+
+
 def test_a_wrong_or_missing_token_is_refused(http, machine) -> None:
     assert http.post("/runner/v1/start").status_code == 403
     assert http.post("/runner/v1/start", headers=_auth("not-a-token")).status_code == 403

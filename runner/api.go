@@ -17,6 +17,8 @@ type API struct {
 	BaseURL string
 	Token   string
 	HTTP    *http.Client
+	// Contact records each answer from Krater, for the dead-man switch (selfstop.go). Optional.
+	Contact *Contact
 }
 
 // StartInfo is Krater's answer to /start.
@@ -30,6 +32,10 @@ type StartInfo struct {
 	HeartbeatSeconds      int      `json:"heartbeat_seconds"`
 	CheckpointSyncSeconds int      `json:"checkpoint_sync_seconds"`
 	LogSyncSeconds        int      `json:"log_sync_seconds"`
+	// With no answer from Krater for this long, stop this machine (selfstop.go).
+	SelfStopAfterSeconds int    `json:"self_stop_after_seconds"`
+	VastInstanceID       int64  `json:"vast_instance_id"`
+	VastAPIURL           string `json:"vast_api_url"`
 	// The project's secrets, name -> value. Never logged.
 	Secrets map[string]string `json:"secrets"`
 }
@@ -81,6 +87,9 @@ func (a *API) post(ctx context.Context, path string, body any, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 500 {
+		a.Contact.Touch(time.Now()) // Krater itself answered (a 5xx may be its proxy saying it's down)
+	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if resp.StatusCode == http.StatusForbidden {
 		var e struct {

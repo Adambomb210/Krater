@@ -122,6 +122,9 @@ class ComputeInstance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     last_vast_status: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
     last_seen_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    # When Krater started watching it again after not seeing it for a while (Krater itself was down). The runner's
+    # deadlines count from here at the earliest, so a Krater outage doesn't read as a silent runner.
+    watch_resumed_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     running_since: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     # When it last went from not running to running (first start, or resume after a pause): Vast restarts the
     # container then, so the runner must start again within the start deadline.

@@ -115,6 +115,18 @@ POLICY_FIELDS: tuple[PolicyField, ...] = (
         30,
     ),
     PolicyField(
+        "runner_self_stop_minutes",
+        "Self-stop without Krater",
+        "A machine whose runner can't reach Krater for this long stops itself, keeping its disk, so nothing bills "
+        "unwatched while Krater is down. When Krater is back it starts a job's machine again (the job carries on "
+        "from the checkpoints on its disk) and shows a box as stopped. Keep it well above the time Krater may be "
+        "down for a deploy.",
+        "minutes",
+        30,
+        10080,
+        180,
+    ),
+    PolicyField(
         "box_sync_deadline_minutes",
         "Box sync deadline",
         "Before stopping a box, Krater asks its runner to save /workspace, and stops it anyway after this long.",
@@ -168,6 +180,7 @@ class ComputePolicy:
     reconcile_alert_percent: int
     runner_start_minutes: int
     heartbeat_timeout_minutes: int
+    runner_self_stop_minutes: int
     storage_quota_gb: int
     box_sync_deadline_minutes: int
     box_resume_timeout_minutes: int

@@ -78,6 +78,8 @@ IDLE_GPU_PERCENT = 5
 IDLE_CPU_PERCENT = 10
 #: The warning before a stopped box is destroyed.
 DESTROY_WARNING = timedelta(hours=1)
+#: A live instance Krater hasn't looked at for this long (Krater itself was down) restarts its runner deadlines.
+WATCH_GAP = timedelta(minutes=5)
 #: `destroy_reason` of a box the member asked to start again elsewhere.
 MOVED_BY_MEMBER = "moved by member"
 #: Rows a scheduler search asks for, cheapest first: plenty to choose from, and each row counts against Vast's daily
@@ -411,6 +413,15 @@ class Scheduler:
             return
 
         previously_seen = row.last_seen_at
+        if previously_seen is not None and self.now - previously_seen >= WATCH_GAP:
+            # Krater was away (down, or its passes failing): the runner may have been reporting into the void, and its
+            # heartbeats get through again within a minute. Don't fail it for Krater's own silence.
+            row.watch_resumed_at = self.now
+            logger.warning(
+                "krater.compute: instance %s unwatched since %s; runner deadlines restart now",
+                row.vast_instance_id,
+                previously_seen.isoformat(),
+            )
         row.last_seen_at = self.now
         row.last_vast_status = seen.actual_status
         self._record_ssh(row, seen)
@@ -496,6 +507,9 @@ class Scheduler:
                 self._check_idle(row, job, policy)
             return
 
+        if row.state is ComputeInstanceState.RUNNING and self._stopped_itself(row, seen, policy):
+            self._adopt_self_stop(row, job, policy)
+            return
         if row.state is ComputeInstanceState.RUNNING:
             # It was running and isn't now, without Krater stopping it: outbid (or the host went away).
             row.state = ComputeInstanceState.PAUSED
@@ -528,6 +542,8 @@ class Scheduler:
         since = row.entered_running_at or row.running_since
         if since is None:
             return
+        if row.watch_resumed_at is not None:
+            since = max(since, row.watch_resumed_at)
         if row.runner_starts < row.runner_starts_needed:
             if self.now - since >= timedelta(minutes=policy.runner_start_minutes):
                 if job.kind is ComputeJobKind.BOX and row.runner_starts > 0:
@@ -544,6 +560,8 @@ class Scheduler:
                 self._destroy(row, "runner never started")
             return
         last = row.last_heartbeat_at or row.runner_started_at
+        if row.watch_resumed_at is not None:
+            last = max(last, row.watch_resumed_at)
         if self.now - last >= timedelta(minutes=policy.heartbeat_timeout_minutes):
             if job.kind is ComputeJobKind.BOX:
                 self._stop_box(row, job, "the runner stopped reporting")
@@ -555,6 +573,49 @@ class Scheduler:
                 now=self.now,
             )
             self._destroy(row, "runner stopped reporting")
+
+    def _stopped_itself(self, row: ComputeInstance, seen: Instance, policy: ComputePolicy) -> bool:
+        """Whether a machine that stopped without Krater stopping it was stopped by its own runner, which does that
+        after `runner_self_stop_minutes` with no answer from Krater. Vast shows an outbid machine the same way (intended
+        status `stopped`), so the tell is the silence: an outbid runner was reporting until moments ago."""
+        last = row.last_heartbeat_at or row.runner_started_at
+        return (
+            seen.intended_status == "stopped"
+            and last is not None
+            and self.now - last >= timedelta(minutes=policy.runner_self_stop_minutes)
+        )
+
+    def _adopt_self_stop(self, row: ComputeInstance, job: ComputeJob, policy: ComputePolicy) -> None:
+        """The runner stopped its machine after losing Krater; its disk still holds the work done meanwhile. A box
+        becomes stopped, for its member to resume. A job's machine is started again (its runner resumes from the
+        checkpoints on its disk); if its GPU is taken, the pause rules move the job on as for an outbid machine."""
+        hours = f"{policy.runner_self_stop_minutes / 60:g} hours"
+        # Vast restarts the container on a start: the runner must start again.
+        row.runner_starts_needed = row.runner_starts + 1
+        if job.kind is ComputeJobKind.BOX:
+            row.state = ComputeInstanceState.STOPPED
+            row.stopped_at = self.now
+            row.stop_requested_at = None
+            row.start_requested_at = None
+            row.idle_since = None
+            job.state = ComputeJobState.STOPPED
+            synced = row.last_synced_at.strftime("%Y-%m-%d %H:%M UTC") if row.last_synced_at else "it started"
+            job.state_reason = (
+                f"Stopped itself after {hours} without an answer from Krater. Work since {synced} is on its disk, "
+                "not in storage: resume it to carry on."
+            )
+            _event(self.session, job, "self_stopped", job.state_reason, now=self.now, instance=row)
+            self._box_notice(compute_jobs.AUDIT_BOX_STOPPED, job, reason="it lost contact with Krater", synced=False)
+            return
+        row.state = ComputeInstanceState.PAUSED
+        row.paused_since = self.now
+        job.state = ComputeJobState.PAUSED
+        job.state_reason = (
+            f"The machine stopped itself after {hours} without an answer from Krater. Starting it again; the job "
+            "resumes from the checkpoints on its disk."
+        )
+        _event(self.session, job, "self_stopped", job.state_reason, now=self.now, instance=row)
+        self.client.start_instance(row.vast_instance_id)
 
     # -- Boxes -----------------------------------------------------------------------------------------
 

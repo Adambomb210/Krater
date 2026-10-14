@@ -20,6 +20,9 @@ minute (`compute_schedule`), under a procrastinate lock so passes never overlap,
    - paused past "move after" → destroyed, and the job requeued (attempt + 1, `KRATER_RESUMED=1`);
    - running past the job's max runtime → job failed, machine destroyed;
    - never running within 30 minutes → job failed (check the image), machine destroyed;
+   - stopped by its own runner after `runner_self_stop_minutes` without Krater (see [runner.md](runner.md)) → a
+     job's machine is started again (then the pause rules apply), a box becomes `stopped` for its member to resume;
+   - not looked at for 5 minutes or more (Krater was down) → its runner deadlines count from now;
    - gone from Vast unexpectedly → job requeued;
    - job finished (cancelled, failed, succeeded) → machine destroyed.
 5. **Start** queued jobs, oldest first. For each, search offers for its shape (GPU models or minimum VRAM, GPU

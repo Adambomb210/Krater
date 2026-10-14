@@ -12,7 +12,8 @@
 //  6. reports the exit code. Krater then destroys the machine.
 //
 // The runner is not the container's main process: the bootstrap shell is, and it waits forever after the runner
-// returns, because Vast restarts a container whose main process exits (and keeps billing). Only Krater ends a machine.
+// returns, because Vast restarts a container whose main process exits (and keeps billing). Only Krater ends a machine,
+// except that after hours without an answer from Krater the runner stops it (selfstop.go).
 //
 // It holds one secret, the instance's runner token ($KRATER_JOB_TOKEN), which works for this instance only. Storage
 // is reached only through presigned URLs Krater hands out for this job.
@@ -51,6 +52,8 @@ type Config struct {
 	SecretsProfile string
 	// Where the job's output log is kept before upload; blank means a krater-logs folder in the temp directory.
 	LogDir string
+	// The dead-man switch main runs beside the job (selfstop.go); nil in tests that don't need it.
+	SelfStop *SelfStop
 }
 
 func configFromEnv() (Config, error) {
@@ -107,17 +110,24 @@ func main() {
 		logf("%v", err)
 		return
 	}
+	cfg.SelfStop = NewSelfStop(&http.Client{Timeout: 60 * time.Second})
+	go cfg.SelfStop.Run(context.Background(), time.Minute)
 	code, err := Run(context.Background(), cfg, &http.Client{Timeout: 60 * time.Second}, &http.Client{}, nvidiaSMI)
 	if err != nil {
 		logf("%v", err)
 	}
 	logf("done (exit code %d); Krater stops this machine", code)
+	// Stay up for the dead-man switch: if Krater never comes to end this machine, it stops itself.
+	select {}
 }
 
 // Run does the whole job and returns the command's exit code. `api` and `storage` are separate clients: storage
 // requests can take far longer than API calls.
 func Run(ctx context.Context, cfg Config, apiHTTP, storageHTTP *http.Client, gpu func() (float64, bool)) (int, error) {
 	api := &API{BaseURL: cfg.RunnerURL, Token: cfg.Token, HTTP: apiHTTP}
+	if cfg.SelfStop != nil {
+		api.Contact = cfg.SelfStop.Contact
+	}
 	var info *StartInfo
 	err := retry(ctx, 10*time.Minute, func() error {
 		var err error
@@ -128,6 +138,7 @@ func Run(ctx context.Context, cfg Config, apiHTTP, storageHTTP *http.Client, gpu
 		return -1, fmt.Errorf("could not start: %w", err)
 	}
 	logf("job %s, attempt %d, resumed=%v", info.JobID, info.Attempt, info.Resumed)
+	cfg.SelfStop.Configure(info)
 
 	for _, dir := range []*string{&cfg.CheckpointDir, &cfg.OutputDir} {
 		usable, err := usableDir(*dir, os.TempDir())
@@ -214,9 +225,9 @@ func Run(ctx context.Context, cfg Config, apiHTTP, storageHTTP *http.Client, gpu
 
 	done := make(chan struct{})
 	var stopOnce sync.Once
-	stop := func() {
+	stop := func(why string) {
 		stopOnce.Do(func() {
-			logf("Krater asked to stop the job")
+			logf("%s", why)
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 			go func() {
 				select {
@@ -227,10 +238,21 @@ func Run(ctx context.Context, cfg Config, apiHTTP, storageHTTP *http.Client, gpu
 			}()
 		})
 	}
+	// Stopping itself, the machine first stops the command and gives it a moment to save a last checkpoint.
+	cfg.SelfStop.Before(func() {
+		stop("stopping the command: this machine is stopping itself")
+		select {
+		case <-done:
+		case <-time.After(45 * time.Second):
+		}
+	})
 	loops, cancelLoops := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); heartbeatLoop(loops, api, seconds(info.HeartbeatSeconds, 60), gpu, stop) }()
+	go func() {
+		defer wg.Done()
+		heartbeatLoop(loops, api, seconds(info.HeartbeatSeconds, 60), gpu, func() { stop("Krater asked to stop the job") })
+	}()
 	go func() {
 		defer wg.Done()
 		syncLoop(loops, checkpoints, seconds(info.CheckpointSyncSeconds, 600))
@@ -244,6 +266,12 @@ func Run(ctx context.Context, cfg Config, apiHTTP, storageHTTP *http.Client, gpu
 	close(done)
 	cancelLoops()
 	wg.Wait()
+	if cfg.SelfStop.Fired() {
+		// Not the job's own end: report nothing, or Krater would finish the job when it's back. The machine stops,
+		// and Krater starts it again; the command then resumes from its checkpoints.
+		logf("the command stopped (code %d) because this machine is stopping itself", code)
+		return code, nil
+	}
 	logf("the command exited with code %d", code)
 
 	for _, s := range []*Syncer{checkpoints, outputs} {
