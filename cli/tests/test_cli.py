@@ -295,6 +295,25 @@ def test_ssh_runs_ssh_with_the_boxs_address(http, fake) -> None:
     assert commands == [["ssh", "-p", "10483", "-L", "8888:localhost:8888", "root@1.2.3.4"]]
 
 
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ([], ["root@1.2.3.4"]),
+        (["--", "-i", "key", "nvidia-smi", "-L"], ["-i", "key", "root@1.2.3.4", "nvidia-smi", "-L"]),
+        (
+            ["--", "-ikey", "-oBatchMode=yes", "-vA", "ls /workspace"],
+            ["-ikey", "-oBatchMode=yes", "-vA", "root@1.2.3.4", "ls /workspace"],
+        ),
+        (["--", "-i", "key", "--", "-weird-command"], ["-i", "key", "root@1.2.3.4", "-weird-command"]),
+        (["--", "uptime"], ["root@1.2.3.4", "uptime"]),
+    ],
+)
+def test_ssh_puts_a_remote_command_after_the_address(extra, expected) -> None:
+    # Staging 2026-10-14: `krater ssh box -- -i key 'hostname'` put the command before the address, and ssh took it
+    # for the host name ("hostname contains invalid characters").
+    assert main.ssh_command("1.2.3.4", 10483, extra) == ["ssh", "-p", "10483", *expected]
+
+
 def test_a_secret_value_never_goes_on_the_command_line(http, fake) -> None:
     _login(http, [])
 
