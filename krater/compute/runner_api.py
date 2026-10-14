@@ -26,6 +26,7 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
+from krater import providers
 from krater.config import Settings
 from krater.models import ComputeEvent, ComputeInstance, ComputeJob, ComputeJobKind, ComputeJobState
 from krater.models.compute_job import ACTIVE_JOB_STATES
@@ -92,6 +93,7 @@ class StartInfo:
     log_sync_seconds: int = LOG_SYNC_SECONDS
     # With no answer from Krater for this long, the runner stops its own machine (the policy's
     # `runner_self_stop_minutes`), through Vast's API with the instance's own key, which Vast puts in the container.
+    # -1 turns the switch off, for a provider whose machines can't stop themselves (`Capabilities.self_stop`).
     self_stop_after_seconds: int = 0
     vast_instance_id: int | None = None
     vast_api_url: str = ""
@@ -120,6 +122,11 @@ def start(session: Session, instance: ComputeInstance, *, now: datetime, setting
     session.flush()
     keys = tuple(ssh_keys.authorized_keys_for(session, job.submitter_id)) if job.kind is ComputeJobKind.BOX else ()
     secrets_env = project_secrets.environment(session, job.project_id, settings)
+    provider = providers.active(settings)
+    if provider is None or provider.capabilities.self_stop:
+        self_stop_seconds = compute_settings.effective_policy(session, job.project).runner_self_stop_minutes * 60
+    else:
+        self_stop_seconds = -1
     return StartInfo(
         job_id=str(job.id),
         attempt=instance.attempt,
@@ -127,7 +134,7 @@ def start(session: Session, instance: ComputeInstance, *, now: datetime, setting
         command=job.command,
         kind=job.kind.value,
         ssh_keys=keys,
-        self_stop_after_seconds=compute_settings.effective_policy(session, job.project).runner_self_stop_minutes * 60,
+        self_stop_after_seconds=self_stop_seconds,
         vast_instance_id=instance.vast_instance_id,
         vast_api_url=settings.vast_api_url,
         secrets=secrets_env,

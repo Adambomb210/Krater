@@ -51,8 +51,14 @@ covers a machine whose exit Krater never came to collect. Back up, Krater tells 
 self-stop time. It starts a job's machine again (the runner resumes with the checkpoints still on its disk; if the GPU
 is taken, the pause rules move the job as for an outbid machine) and shows a box as stopped, for its member to resume.
 
-Checked with Go tests against a fake Vast and with the scheduler's tests; **not yet on a rented machine** (it needs
-a paid check: rent a job, stop the portal past a short project override of the self-stop time, and watch Vast).
+A `self_stop_after_seconds` of -1 turns the switch off, for a provider whose machines can't stop themselves
+(`Capabilities.self_stop`, [providers.md](providers.md)).
+
+Checked with Go tests against a fake Vast, the scheduler's tests, and a rehearsal on staging (2026-10-14): the real
+runner in a local container, a 30-minute project override, the portal stopped. It fired after 31 minutes, stopped
+the command, sent one stop to a fake Vast with the container key, and reported no exit; Krater, shown the machine
+stopped, paused the job and started the machine again. **Not yet on a rented machine**: Vast's container key has not
+been tried against the real API (a paid check: rent a job, stop the portal past a short override, and watch Vast).
 
 The scheduler doesn't count Krater's own downtime against a runner either: a live instance it hasn't looked at for
 5 minutes or more restarts its runner deadlines (`watch_resumed_at`), so the first pass after an outage doesn't fail

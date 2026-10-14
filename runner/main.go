@@ -116,7 +116,11 @@ func main() {
 	if err != nil {
 		logf("%v", err)
 	}
-	logf("done (exit code %d); Krater stops this machine", code)
+	if cfg.SelfStop.Fired() {
+		logf("done; the machine is stopping itself")
+	} else {
+		logf("done (exit code %d); Krater stops this machine", code)
+	}
 	// Stay up for the dead-man switch: if Krater never comes to end this machine, it stops itself.
 	select {}
 }

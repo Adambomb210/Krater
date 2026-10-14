@@ -52,8 +52,8 @@ ESCALATION_LABELS = {
 }
 
 
-def _require_vast() -> None:
-    if get_settings().compute_mode != "vast":
+def _require_compute() -> None:
+    if not get_settings().compute_on:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
 
 
@@ -99,7 +99,7 @@ def compute_index(
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(session_actor)],
 ):
-    _require_vast()
+    _require_compute()
     project = _project(db_session, actor, project_id)
     return _index_page(request, db_session, actor, project)
 
@@ -138,7 +138,7 @@ def set_secret(
     name: Annotated[str, Form()] = "",
     value: Annotated[str, Form()] = "",
 ):
-    _require_vast()
+    _require_compute()
     project = _project(db_session, actor, project_id)
     try:
         secret = project_secrets.set_secret(
@@ -165,7 +165,7 @@ def delete_secret(
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
 ):
-    _require_vast()
+    _require_compute()
     project = _project(db_session, actor, project_id)
     project_secrets.delete_secret(db_session, actor, project=project, name=name)
     db_session.commit()
@@ -198,7 +198,7 @@ def new_job(
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(session_actor)],
 ):
-    _require_vast()
+    _require_compute()
     project = _project(db_session, actor, project_id)
     if not _is_team(actor, project):
         raise NotAllowed("Only the project's team can run jobs on its budget.")
@@ -212,7 +212,7 @@ async def submit_job(
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
 ):
-    _require_vast()
+    _require_compute()
     project = _project(db_session, actor, project_id)
     form = await request.form()
     posted = {key: str(value) for key, value in form.items() if key != "csrf_token"}
@@ -279,7 +279,7 @@ def job_page(
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(session_actor)],
 ):
-    _require_vast()
+    _require_compute()
     project = _project(db_session, actor, project_id)
     job = _job(db_session, project, job_id)
     events = list(
@@ -328,7 +328,7 @@ def job_file(
     actor: Annotated[Actor, Depends(session_actor)],
 ):
     """Download one of the job's files: a redirect to a URL signed for 15 minutes, made on the click."""
-    _require_vast()
+    _require_compute()
     project = _project(db_session, actor, project_id)
     job = _job(db_session, project, job_id)
     url = compute_files.download_url(get_compute_store(), actor, job=job, area=area, name=name)
@@ -352,7 +352,7 @@ def job_action(
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
 ):
-    _require_vast()
+    _require_compute()
     if action not in _ACTIONS:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     project = _project(db_session, actor, project_id)

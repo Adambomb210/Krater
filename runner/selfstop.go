@@ -91,15 +91,20 @@ func NewSelfStop(httpClient *http.Client) *SelfStop {
 	}
 }
 
-// Configure takes the silence, the instance and Vast's address from Krater's answer to /start.
+// Configure takes the silence, the instance and Vast's address from Krater's answer to /start. A negative silence
+// turns the switch off.
 func (s *SelfStop) Configure(info *StartInfo) {
 	if s == nil || info == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if info.SelfStopAfterSeconds > 0 {
+	switch {
+	case info.SelfStopAfterSeconds > 0:
 		s.after = time.Duration(info.SelfStopAfterSeconds) * time.Second
+	case info.SelfStopAfterSeconds < 0:
+		// Krater's provider can't stop a machine from inside it: the provider ends abandoned work itself.
+		s.after = 0
 	}
 	if info.VastInstanceID > 0 {
 		s.instanceID = info.VastInstanceID
@@ -146,6 +151,9 @@ func (s *SelfStop) Check(ctx context.Context) {
 	s.mu.Lock()
 	after, before := s.after, s.before
 	s.mu.Unlock()
+	if after <= 0 {
+		return
+	}
 	silent := s.Now().Sub(s.Contact.Last())
 	if !s.fired.Load() {
 		if silent < after {

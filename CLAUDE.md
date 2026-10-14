@@ -42,6 +42,7 @@ krater/
   services/        domain logic (framework-free): approval_policy, projects, budget, audit, users
   weave/           WeaveClient protocol: OIDC sign-in, directory API, role mapping, dev stub
   quilt/           Quilt patch API client and the outbox sender (the only code that knows Quilt's URLs)
+  providers/       the compute-provider seam: capabilities, protocol, errors, registry (docs/compute/providers.md)
   vast/            Vast.ai client and its in-memory fake (the only code that knows Vast's URLs; worker only)
   compute/         Krater Compute: scheduler, spend, reconciliation, runner API, launch (docs/compute/)
   pricing/         the public GPU price catalog behind /pricing and the budget estimator

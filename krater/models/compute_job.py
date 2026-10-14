@@ -110,7 +110,10 @@ FINISHED_JOB_STATES = frozenset({ComputeJobState.SUCCEEDED, ComputeJobState.FAIL
 
 class ComputeInstance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "compute_instances"
-    __table_args__ = (sa.UniqueConstraint("job_id", "attempt", name="job_attempt"),)
+    __table_args__ = (
+        sa.UniqueConstraint("job_id", "attempt", name="job_attempt"),
+        sa.UniqueConstraint("provider", "vast_instance_id", name="provider_instance"),
+    )
 
     job_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), sa.ForeignKey("compute_jobs.id"), nullable=False, index=True
@@ -118,7 +121,10 @@ class ComputeInstance(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     attempt: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     # The Vast label, unique per instance: how a create whose response was lost is found again.
     label: Mapped[str] = mapped_column(sa.String(100), nullable=False, unique=True)
-    vast_instance_id: Mapped[int | None] = mapped_column(sa.BigInteger, nullable=True, unique=True)
+    # Which provider (`krater.providers`, the value of KRATER_COMPUTE_MODE) the machine is rented from.
+    provider: Mapped[str] = mapped_column(sa.String(32), nullable=False, default="vast", server_default="vast")
+    # The provider's own id for the machine (named for the first provider; docs/compute/providers.md).
+    vast_instance_id: Mapped[int | None] = mapped_column(sa.BigInteger, nullable=True)
     state: Mapped[ComputeInstanceState] = mapped_column(
         pg_enum(ComputeInstanceState, name="compute_instance_state"), nullable=False
     )

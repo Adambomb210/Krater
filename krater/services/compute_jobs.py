@@ -12,6 +12,8 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from krater import providers
+from krater.config import get_settings
 from krater.models import (
     ComputeEscalation,
     ComputeEvent,
@@ -92,8 +94,29 @@ def _validate(spec: JobSpec, *, cap_microusd: int) -> None:
         errors["max_runtime_minutes"] = "Choose a max runtime of 1 minute to 7 days."
     if spec.on_outbid is ComputeOutbid.HOLD and not spec.interruptible:
         errors["on_outbid"] = "Only interruptible machines are outbid: a limit order needs interruptible."
+    _check_provider(spec, errors)
     if errors:
         raise ValidationFailed(errors)
+
+
+def _check_provider(spec: JobSpec, errors: dict[str, str]) -> None:
+    """Refuse what the provider in use can't do (`krater.providers.Capabilities`)."""
+    provider = providers.active(get_settings())
+    if provider is None:
+        return
+    can, title = provider.capabilities, provider.title
+    if spec.kind is ComputeJobKind.BOX and not can.boxes:
+        errors["kind"] = f"{title} machines can't be boxes: run a job instead."
+    if spec.interruptible and not can.interruptible:
+        errors["interruptible"] = f"{title} has no interruptible machines."
+    if not spec.interruptible and not can.on_demand:
+        errors["interruptible"] = f"{title} only has interruptible machines."
+    if spec.on_outbid is ComputeOutbid.HOLD and not (can.bids and can.outbid_pauses):
+        errors.setdefault("on_outbid", f"{title} can't hold a limit order: use a target and max price.")
+    if spec.on_max_wait is ComputeEscalation.ON_DEMAND and not can.on_demand:
+        errors["on_max_wait"] = f"{title} has no on-demand machines to switch to."
+    if spec.on_max_wait is ComputeEscalation.RAISE_BID and not can.bids:
+        errors["on_max_wait"] = f"{title} sets its own prices: there is no bid to raise."
 
 
 def submit_job(

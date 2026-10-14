@@ -11,6 +11,10 @@ destroy, logs, charges and account SSH keys, built on what the 2026-10-11 spike 
 the 512-offer cap, the v1 list, never logging a create response). `FakeVast` serves the same API in tests and copies the
 behaviours that cost money to get wrong. Only the worker builds a client. See [vast-api.md](vast-api.md).
 
+**Providers** (`krater/providers/`). The seam a second provider plugs into: capabilities Krater branches on, the
+protocol the scheduler calls, neutral errors, and `KRATER_COMPUTE_MODE` naming the provider. Vast is the only one.
+[providers.md](providers.md) says how to add one, maps AWS and GCP onto it, and reports on integrating the OSPool.
+
 **Settings** (`/admin/compute`). Every policy number is a global default with per-project overrides, changed with a
 reason and an audit event: reliability floor, bid margin, pause grace, move after, box idle, destroy after, reconcile
 alert, runner start deadline, heartbeat timeout, storage quota, box sync deadline, box resume timeout.

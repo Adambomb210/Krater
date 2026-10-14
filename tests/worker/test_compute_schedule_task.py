@@ -1,7 +1,8 @@
-"""The `compute_schedule` periodic task: every minute, under a lock, and only with KRATER_COMPUTE_MODE=vast."""
+"""The `compute_schedule` periodic task: every minute, under a lock, and only with a provider in KRATER_COMPUTE_MODE."""
 
 from __future__ import annotations
 
+import dataclasses
 from unittest.mock import patch
 
 from krater.config import get_settings
@@ -16,10 +17,10 @@ def test_compute_schedule_runs_every_minute_under_a_lock() -> None:
     assert compute_schedule.queueing_lock == COMPUTE_SCHEDULER_LOCK
 
 
-def test_compute_schedule_does_nothing_unless_compute_mode_is_vast(monkeypatch) -> None:
+def test_compute_schedule_does_nothing_with_compute_off(monkeypatch) -> None:
     monkeypatch.setattr(get_settings(), "compute_mode", "off")
     with (
-        patch("krater.worker.app.get_vast_client") as mock_client,
+        patch("krater.vast.get_vast_client") as mock_client,
         patch("krater.worker.app.compute_scheduler") as mock_scheduler,
     ):
         compute_schedule.func(timestamp=1_791_700_000)
@@ -28,10 +29,10 @@ def test_compute_schedule_does_nothing_unless_compute_mode_is_vast(monkeypatch) 
         mock_scheduler.run_pass.assert_not_called()
 
 
-def test_compute_schedule_does_nothing_without_a_vast_client(monkeypatch) -> None:
+def test_compute_schedule_does_nothing_without_a_provider_client(monkeypatch) -> None:
     monkeypatch.setattr(get_settings(), "compute_mode", "vast")
     with (
-        patch("krater.worker.app.get_vast_client", return_value=None),
+        patch("krater.providers.get_provider", return_value=None),
         patch("krater.worker.app.compute_scheduler") as mock_scheduler,
     ):
         compute_schedule.func(timestamp=1_791_700_000)
@@ -42,7 +43,7 @@ def test_compute_schedule_does_nothing_without_a_vast_client(monkeypatch) -> Non
 def test_compute_schedule_runs_a_pass(monkeypatch) -> None:
     monkeypatch.setattr(get_settings(), "compute_mode", "vast")
     with (
-        patch("krater.worker.app.get_vast_client") as mock_client,
+        patch("krater.providers.get_provider") as mock_client,
         patch("krater.worker.app.compute_scheduler") as mock_scheduler,
         patch("krater.worker.app.get_sessionmaker") as mock_sessionmaker,
     ):
@@ -75,3 +76,18 @@ def test_compute_storage_cleanup_is_hourly_and_only_with_vast(monkeypatch) -> No
     with patch("krater.worker.app.compute_storage") as mock_cleanup:
         compute_storage_cleanup.func(timestamp=1_791_700_000)
         mock_cleanup.abort_abandoned_uploads.assert_not_called()
+
+
+def test_compute_reconcile_skips_a_provider_that_reports_no_charges(monkeypatch) -> None:
+    from krater import providers
+    from krater.worker.app import compute_reconcile
+
+    monkeypatch.setattr(get_settings(), "compute_mode", "vast")
+    vast = providers.registered()["vast"]
+    no_charges = dataclasses.replace(vast, capabilities=dataclasses.replace(vast.capabilities, charges=False))
+    with (
+        patch.dict(providers._REGISTRY, {"vast": no_charges}),
+        patch("krater.worker.app.compute_reconciler") as mock_reconciler,
+    ):
+        compute_reconcile.func(timestamp=1_791_700_000)
+        mock_reconciler.run.assert_not_called()

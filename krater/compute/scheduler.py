@@ -34,6 +34,7 @@ from decimal import ROUND_FLOOR, Decimal
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
+from krater import providers
 from krater.compute import launch, offers, runner_api, search_quota, spend
 from krater.compute.search_pacing import SearchPacer
 from krater.config import Settings
@@ -49,23 +50,17 @@ from krater.models import (
     Project,
 )
 from krater.models.compute_job import ACTIVE_JOB_STATES, FINISHED_JOB_STATES
+from krater.providers import (
+    ComputeProvider,
+    ProviderError,
+    ProviderRequestFailedError,
+    ProviderSearchQuotaError,
+    ProviderUnavailableError,
+)
 from krater.services import audit, budget, budget_alerts, compute_jobs, compute_settings
 from krater.services.compute_settings import ComputePolicy
 from krater.services.launch_rules import LAUNCHABLE_STATUSES, hourly_cap_cents
-from krater.vast import (
-    Instance,
-    Offer,
-    OfferQuery,
-    RentalType,
-    VastClient,
-    VastError,
-    VastRedirectError,
-    VastRequestFailedError,
-    VastSearchQuotaError,
-    VastUnavailableError,
-    microusd_to_usd,
-    usd_to_microusd,
-)
+from krater.vast import Instance, Offer, OfferQuery, RentalType, microusd_to_usd, usd_to_microusd
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +108,13 @@ def _dollars(microusd: int) -> str:
     return f"${microusd_to_usd(microusd).quantize(Decimal('0.0001'))}/h"
 
 
+def _span(minutes: int) -> str:
+    """`minutes` as members read it: "30 minutes", "1.5 hours", "3 hours"."""
+    if minutes < 90:
+        return f"{minutes} minutes"
+    return f"{minutes / 60:g} hours"
+
+
 def _requeue(session: Session, job: ComputeJob, reason: str, *, now: datetime) -> None:
     job.state = ComputeJobState.QUEUED
     job.state_reason = reason
@@ -135,7 +137,7 @@ class Scheduler:
     def __init__(
         self,
         session: Session,
-        client: VastClient,
+        client: ComputeProvider,
         settings: Settings,
         *,
         now: datetime,
@@ -145,6 +147,10 @@ class Scheduler:
         self.session = session
         self.client = client
         self.settings = settings
+        provider = providers.active(settings)
+        if provider is None:
+            raise ValueError("Krater Compute is off: no provider to schedule on")
+        self.provider = provider
         self.now = now
         # `None` when the runner binary isn't there to serve: nothing new is rented (it couldn't start).
         self.runner_sha256 = runner_sha256
@@ -184,6 +190,10 @@ class Scheduler:
         search_quota.record(self.session, self.client.search_quota, now=self.now)
         self.session.commit()
         return self.result
+
+    def _ours(self) -> sa.ColumnElement[bool]:
+        """Instances rented from this pass's provider: another provider's are its own scheduler's to watch."""
+        return ComputeInstance.provider == self.provider.name
 
     def _policy(self, project: Project) -> ComputePolicy:
         if project.id not in self._policies:
@@ -230,7 +240,7 @@ class Scheduler:
                 if row.is_live and row.vast_instance_id is not None:
                     try:
                         self._destroy(row, "budget reached")
-                    except VastError:
+                    except ProviderError:
                         # The job is finished, so the next pass's watch retries the destroy.
                         logger.exception("krater.compute: budget stop of instance %s failed", row.vast_instance_id)
                         self.result.errors += 1
@@ -246,12 +256,12 @@ class Scheduler:
     # -- 2. Lost creates -------------------------------------------------------------------------------
 
     def _settle_creates(self, by_label: dict[str, Instance]) -> None:
-        stmt = sa.select(ComputeInstance).where(ComputeInstance.state == ComputeInstanceState.CREATING)
+        stmt = sa.select(ComputeInstance).where(ComputeInstance.state == ComputeInstanceState.CREATING, self._ours())
         for row in self.session.scalars(stmt):
             found = by_label.get(row.label)
             job = row.job
             if found is not None and self.session.scalar(
-                sa.select(ComputeInstance.id).where(ComputeInstance.vast_instance_id == found.id)
+                sa.select(ComputeInstance.id).where(ComputeInstance.vast_instance_id == found.id, self._ours())
             ):
                 # Vast ids are never reused, so this is a stale label match (or a fake Vast restarted with its counter).
                 # Recording it would break the unique id and with it every scheduler pass; the sweep handles the
@@ -321,7 +331,7 @@ class Scheduler:
                             instance=row,
                             vast_instance_id=instance.id,
                         )
-            except VastError:
+            except ProviderError:
                 logger.exception("krater.compute: sweeping instance %s failed", instance.id)
                 self.result.errors += 1
         self.session.commit()
@@ -344,11 +354,12 @@ class Scheduler:
                 ]
             ),
             ComputeInstance.vast_instance_id.is_not(None),
+            self._ours(),
         )
         for row in list(self.session.scalars(stmt)):
             try:
                 self._watch_one(row, listing.get(row.vast_instance_id))
-            except VastError:
+            except ProviderError:
                 logger.exception("krater.compute: watching instance %s failed", row.vast_instance_id)
                 self.result.errors += 1
             self.session.commit()
@@ -603,7 +614,7 @@ class Scheduler:
         """The runner stopped its machine after losing Krater; its disk still holds the work done meanwhile. A box
         becomes stopped, for its member to resume. A job's machine is started again (its runner resumes from the
         checkpoints on its disk); if its GPU is taken, the pause rules move the job on as for an outbid machine."""
-        hours = f"{policy.runner_self_stop_minutes / 60:g} hours"
+        hours = _span(policy.runner_self_stop_minutes)
         # Vast restarts the container on a start: the runner must start again.
         row.runner_starts_needed = row.runner_starts + 1
         if job.kind is ComputeJobKind.BOX:
@@ -795,7 +806,7 @@ class Scheduler:
         if self._ssh_keys_on_account is None:
             try:
                 self._ssh_keys_on_account = bool(self.client.list_ssh_keys())
-            except VastError:
+            except ProviderError:
                 # Can't tell: refuse boxes this pass, but keep starting jobs.
                 logger.warning("krater.compute: could not check the Vast account's SSH keys; no boxes this pass")
                 self._ssh_keys_on_account = True
@@ -841,7 +852,7 @@ class Scheduler:
         limit = min(job.target_microusd, cap)
         try:
             searched = self._offers_for(job, rental_type=rental_type, limit=limit, policy=policy)
-        except VastSearchQuotaError as exc:
+        except ProviderSearchQuotaError as exc:
             job.state_reason = _quota_reason(exc.reset_at)
             return
         if searched is None:
@@ -906,11 +917,11 @@ class Scheduler:
             for job in list(self.session.scalars(stmt)):
                 try:
                     stop = self._start_one(job, taken)
-                except VastSearchQuotaError as exc:
+                except ProviderSearchQuotaError as exc:
                     logger.warning("krater.compute: %s; not searching until then", exc)
                     job.state_reason = _quota_reason(exc.reset_at)
                     stop = True
-                except VastError:
+                except ProviderError:
                     logger.exception("krater.compute: starting job %s failed", job.id)
                     self.result.errors += 1
                     stop = True
@@ -1056,6 +1067,7 @@ class Scheduler:
         row = ComputeInstance(
             job_id=job.id,
             attempt=attempt,
+            provider=self.provider.name,
             label=label,
             state=ComputeInstanceState.CREATING,
             offer_id=choice.offer.id,
@@ -1097,7 +1109,7 @@ class Scheduler:
         )
         try:
             vast_id = self.client.create_instance(choice.offer.id, request)
-        except VastUnavailableError:
+        except ProviderUnavailableError:
             logger.warning("krater.compute: create for %s unconfirmed; the next pass settles it by label", label)
             _event(
                 self.session,
@@ -1108,11 +1120,10 @@ class Scheduler:
                 instance=row,
             )
             return True
-        except VastRequestFailedError as exc:
-            if exc.status_code is not None and 200 <= exc.status_code < 300 and not isinstance(exc, VastRedirectError):
-                # A 200 that says `success: false`: Vast has rented the machine anyway (staging, 2026-10-11), so
-                # treat it like a lost answer and let the next pass find the machine by its label.
-                logger.warning("krater.compute: create for %s answered 200 without success; settling by label", label)
+        except ProviderRequestFailedError as exc:
+            if exc.may_have_happened:
+                # Treat it like a lost answer and let the next pass find the machine by its label.
+                logger.warning("krater.compute: create for %s refused but may have happened; settling by label", label)
                 _event(
                     self.session,
                     job,
@@ -1154,7 +1165,7 @@ class Scheduler:
 
 def run_pass(
     session: Session,
-    client: VastClient,
+    client: ComputeProvider,
     settings: Settings,
     *,
     now: datetime,
