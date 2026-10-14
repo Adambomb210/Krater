@@ -104,6 +104,18 @@ def test_the_watchdog_destroys_only_its_prefix_once_over_the_cap(client, fake) -
     assert mine not in fake.instances and other in fake.instances
 
 
+def test_the_watchdog_keeps_destroying_through_vast_errors(client, fake) -> None:  # noqa: F811
+    watchdog = _watchdog()
+    mine = client.create_instance(1001, CreateInstance(image="x", disk_gb=8, label="krater-staging-abc-1"))
+    watchdog.time.sleep = lambda seconds: None
+    fake.fail_next(500, times=12)  # the check, and the first destroy rounds
+
+    code = watchdog.watch(client, prefix="krater-staging-", cap=Decimal(1), deadline=timedelta(0), every=0, once=True)
+
+    assert code == 0
+    assert mine not in fake.instances
+
+
 def test_the_watchdog_refuses_a_broad_prefix(client) -> None:  # noqa: F811
     with pytest.raises(SystemExit):
         _watchdog().watch(client, prefix="krater-", cap=Decimal(1), deadline=timedelta(hours=1), every=0, once=True)

@@ -277,7 +277,7 @@ def job_page(
     project_id: uuid.UUID,
     job_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
-    actor: Annotated[Actor, Depends(session_actor)],
+    actor: Annotated[Actor, Depends(fresh_actor)],  # it shows or signs the job's files
 ):
     _require_compute()
     project = _project(db_session, actor, project_id)
@@ -325,7 +325,7 @@ def job_file(
     area: str,
     name: str,
     db_session: Annotated[Session, Depends(get_session)],
-    actor: Annotated[Actor, Depends(session_actor)],
+    actor: Annotated[Actor, Depends(fresh_actor)],  # it shows or signs the job's files
 ):
     """Download one of the job's files: a redirect to a URL signed for 15 minutes, made on the click."""
     _require_compute()

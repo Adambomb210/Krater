@@ -121,6 +121,22 @@ def test_a_limit_and_a_target_together_are_refused(client: TestClient, project) 
     assert response.status_code == 422 and "limit_usd_per_hour" in response.json()["fields"]
 
 
+@pytest.mark.parametrize(
+    ("change", "field"),
+    [
+        ({"max_usd_per_hour": "NaN"}, "max_usd_per_hour"),
+        ({"target_usd_per_hour": "Infinity"}, "target_usd_per_hour"),
+        ({"command": ["sleep", "1"]}, "command"),
+        ({"command": 123}, "command"),
+        ({"gpu_names": ["RTX 3060"] * 51}, "gpu_names"),
+    ],
+)
+def test_malformed_job_fields_are_refused_not_a_500(client: TestClient, project, change, field) -> None:
+    response = client.post(f"/api/v1/projects/{project.id}/jobs", json={**JOB, **change}, headers=_as(MEMBER_SUB))
+
+    assert response.status_code == 422 and field in response.json()["fields"]
+
+
 def test_an_unknown_choice_names_its_field(client: TestClient, project) -> None:
     response = client.post(
         f"/api/v1/projects/{project.id}/jobs", json={**JOB, "on_outbid": "panic"}, headers=_as(MEMBER_SUB)

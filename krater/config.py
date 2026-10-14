@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #: Sentinel used as the default `secret_key`. Production must override it (and, either way, production
@@ -187,6 +187,17 @@ class Settings(BaseSettings):
     def compute_on(self) -> bool:
         """Whether Krater Compute runs, with any provider."""
         return self.compute_mode != "off"
+
+    @field_validator("compute_label_prefix")
+    @classmethod
+    def _label_prefix_is_specific(cls, value: str) -> str:
+        # The scheduler destroys every instance with this prefix that it has no record of. An empty or bare
+        # "krater" prefix would match other tools' machines on a shared Vast account.
+        if len(value) < 7 or not value.endswith("-") or value.rstrip("-") == "krater":
+            raise ValueError(
+                "KRATER_COMPUTE_LABEL_PREFIX must be specific to this deployment and end with '-' (e.g. 'krater-prod-')"
+            )
+        return value
 
     @model_validator(mode="after")
     def _validate_production_safety(self) -> Settings:

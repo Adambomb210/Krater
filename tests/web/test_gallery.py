@@ -161,3 +161,19 @@ def test_unknown_age_counts_as_under_18_in_the_gallery(
     page = client.get(f"/gallery/{project.id}").text
 
     assert "<li>Mia</li>" in page and "Mia Member" not in page
+
+
+@pytest.mark.parametrize("setting", ["full", "first"])
+def test_a_member_weave_no_longer_returns_is_never_shown_by_patchwork_id(
+    client: TestClient, login_as, approved_project, db_session: Session, weave_stub, setting
+) -> None:
+    member = login_as(MEMBER_SUB)
+    reviewer = login_as(REVIEWER_SUB)
+    project = _completed_project(db_session, approved_project, member, reviewer, weave_stub=weave_stub)
+    site_settings.current(db_session).gallery_minor_names = GalleryMinorNames(setting)
+    db_session.flush()
+    weave_stub.remove_user(MEMBER_SUB)  # e.g. a guardian withdrew consent: the directory 404s
+
+    page = client.get(f"/gallery/{project.id}").text
+
+    assert MEMBER_SUB not in page and "1 team member" in page

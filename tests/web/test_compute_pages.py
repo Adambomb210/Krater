@@ -432,6 +432,20 @@ def test_a_file_link_redirects_to_a_short_lived_url(client: TestClient, login_as
     assert missing.status_code == 404
 
 
+def test_a_member_weave_dropped_can_no_longer_read_the_files(
+    client: TestClient, login_as, project, db_session, store, weave_stub
+) -> None:
+    """Files are read with a live Weave check, not the roles from sign-in."""
+    member = login_as(MEMBER_SUB)
+    job = _job(db_session, project, member)
+    _stored(store, job, "outputs", "x.txt", b"x")
+    weave_stub.set_active(MEMBER_SUB, False)
+
+    download = client.get(f"/projects/{project.id}/compute/{job.id}/files/outputs/x.txt", follow_redirects=False)
+
+    assert download.status_code == 403
+
+
 def test_reviewers_see_the_job_but_not_its_output(client: TestClient, login_as, project, db_session, store) -> None:
     member = login_as(MEMBER_SUB)
     job = _job(db_session, project, member)

@@ -13,7 +13,6 @@ charges), and Quilt gets that as `spend.corrected`.
 
 from __future__ import annotations
 
-import math
 import uuid
 from datetime import datetime
 
@@ -41,6 +40,11 @@ BILLING_STATES = (
     ComputeInstanceState.PAUSED,
     ComputeInstanceState.STOPPED,
 )
+
+
+def ceil_div(numerator: int, denominator: int) -> int:
+    """`numerator / denominator` rounded up, in integers: money never goes through a float."""
+    return -(-numerator // denominator)
 
 
 def hourly_rate_microusd(instance: ComputeInstance) -> int:
@@ -76,7 +80,7 @@ def accrue(session: Session, *, now: datetime) -> set[uuid.UUID]:
     projects: set[uuid.UUID] = set()
     for job_id, total in totals:
         job = session.get(ComputeJob, job_id)
-        job.spend_cents = math.ceil(int(total or 0) / MICROUSD_PER_CENT)
+        job.spend_cents = ceil_div(int(total or 0), MICROUSD_PER_CENT)
         projects.add(job.project_id)
     session.flush()
     return projects
@@ -90,7 +94,7 @@ def project_compute_spend_cents(session: Session, project: Project) -> int:
         .join(ComputeJob, ComputeJob.id == ComputeInstance.job_id)
         .where(ComputeJob.project_id == project.id)
     )
-    return math.ceil(int(total or 0) / MICROUSD_PER_CENT)
+    return ceil_div(int(total or 0), MICROUSD_PER_CENT)
 
 
 def record_snapshots(
@@ -121,4 +125,4 @@ def next_minute_cents(session: Session, project: Project) -> int:
         .join(ComputeJob, ComputeJob.id == ComputeInstance.job_id)
         .where(ComputeJob.project_id == project.id, ComputeInstance.state.in_(BILLING_STATES))
     )
-    return math.ceil(sum(hourly_rate_microusd(row) for row in rows) / 60 / MICROUSD_PER_CENT)
+    return ceil_div(sum(hourly_rate_microusd(row) for row in rows), 60 * MICROUSD_PER_CENT)

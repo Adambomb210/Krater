@@ -197,6 +197,22 @@ def test_moving_a_stopped_box_starts_it_elsewhere_resumed(db_session, member, pr
     assert "KRATER_RESUMED=1" in fake.instances[new.vast_instance_id]["env"]
 
 
+def test_a_box_cancelled_while_moving_stays_cancelled(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job, row = _running_box(db_session, member, project, client, fake)
+    compute_jobs.stop_box(db_session, member, job=job, now=NOW + timedelta(minutes=3))
+    runner_api.synced(db_session, row, now=NOW + timedelta(minutes=3, seconds=10))
+    _pass(db_session, client, NOW + timedelta(minutes=4))
+    compute_jobs.move_box(db_session, member, job=job, now=NOW + timedelta(minutes=10))
+
+    compute_jobs.cancel_job(db_session, member, job=job, now=NOW + timedelta(minutes=10, seconds=30))
+    _pass(db_session, client, NOW + timedelta(minutes=11))
+    _pass(db_session, client, NOW + timedelta(minutes=12))
+
+    assert row.state is ComputeInstanceState.DESTROYED
+    assert job.state is ComputeJobState.CANCELLED
+    assert _instance(db_session, job).id == row.id  # nothing rented again
+
+
 def test_a_box_started_outside_krater_is_billed_and_stopped_again(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_box(db_session, member, project, client, fake)
     compute_jobs.stop_box(db_session, member, job=job, now=NOW + timedelta(minutes=3))

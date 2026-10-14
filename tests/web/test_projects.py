@@ -174,6 +174,24 @@ def test_submitter_can_edit_and_save_their_draft(
     assert project.current_revision.budget_requested_cents == 50_000
 
 
+def test_blanking_the_repo_link_clears_it(client: TestClient, login_as, create_project, db_session: Session) -> None:
+    member = login_as(MEMBER_SUB)
+    project = create_project(member, title="Linked")
+    project.repo_url = "https://github.com/x/rover"
+    db_session.commit()
+    csrf = get_csrf_token(client.get(f"/projects/{project.id}/edit").text)
+
+    response = client.post(
+        f"/projects/{project.id}/edit",
+        data={"csrf_token": csrf, "title": "Linked", "repo_url": "", "write_up": "W.", "poc_budget": "500"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    db_session.refresh(project)
+    assert project.repo_url is None
+
+
 def test_reviewer_cannot_edit_someone_elses_draft(client: TestClient, login_as, create_project) -> None:
     member = login_as(MEMBER_SUB)
     project = create_project(member)

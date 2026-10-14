@@ -10,6 +10,7 @@ price (which the estimate then uses) and the amount they request.
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
@@ -22,6 +23,9 @@ from krater.web.money import format_cents
 
 #: The GPU `<select>` value for a card Krater has no price for; the team names it and gives its hourly price.
 OTHER_GPU = "other"
+# Far above any real proposal; they keep nonsense like "1e308" out of the arithmetic.
+MAX_ESTIMATE_HOURS = 100_000
+MAX_MARGIN_PERCENT = 1000
 #: The posted fields of one estimator, without its prefix (`estimator_` on the JSON endpoint, `poc_`/`full_` on the
 #: application form).
 FIELDS = ("gpu", "gpu_other", "gpu_count", "hours", "basis", "margin_percent", "rate")
@@ -182,7 +186,7 @@ def parse_and_estimate(
 
     try:
         hours = float(estimator_hours)
-        if hours <= 0:
+        if not math.isfinite(hours) or not 0 < hours <= MAX_ESTIMATE_HOURS:
             raise ValueError
     except (TypeError, ValueError):
         raise ValidationFailed({"estimator_hours": "Enter the number of hours."}) from None
@@ -190,9 +194,9 @@ def parse_and_estimate(
     raw_margin = (estimator_margin_percent or "").strip()
     try:
         margin_percent = int(float(raw_margin)) if raw_margin else 0
-        if margin_percent < 0:
+        if not 0 <= margin_percent <= MAX_MARGIN_PERCENT:
             raise ValueError
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ValidationFailed({"estimator_margin_percent": "Enter a whole, non-negative number."}) from None
 
     return pricing.estimate_cost(

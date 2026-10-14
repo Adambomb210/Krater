@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import ROUND_FLOOR, Decimal
@@ -492,6 +491,7 @@ class Scheduler:
             elif row.state is ComputeInstanceState.PAUSED:
                 row.state = ComputeInstanceState.RUNNING
                 row.paused_since = None
+                row.start_requested_at = None
                 row.entered_running_at = self.now  # Vast restarted the container: the runner starts again
                 job.state = ComputeJobState.RUNNING
                 job.state_reason = None
@@ -547,6 +547,14 @@ class Scheduler:
                 vast_status=seen.actual_status,
             )
             return
+        if (
+            row.state is ComputeInstanceState.PAUSED
+            and row.start_requested_at is not None
+            and seen.intended_status == "stopped"
+        ):
+            # The start after a self-stop hasn't taken yet. Keep asking; meanwhile the pause rules below move the job
+            # if the machine's GPU stays taken.
+            self._start_self_stopped(row)
         if row.state is ComputeInstanceState.PAUSED and row.paused_since is not None:
             paused_for = self.now - row.paused_since
             if job.on_outbid is ComputeOutbid.HOLD:
@@ -640,7 +648,17 @@ class Scheduler:
             "resumes from the checkpoints on its disk."
         )
         _event(self.session, job, "self_stopped", job.state_reason, now=self.now, instance=row)
-        self.client.start_instance(row.vast_instance_id)
+        row.start_requested_at = self.now
+        self._start_self_stopped(row)
+
+    def _start_self_stopped(self, row: ComputeInstance) -> None:
+        """Ask Vast to start a job's self-stopped machine. Vast never resumes a machine stopped on purpose by itself
+        (unlike an outbid one), so a failed call is retried on every pass until it runs (`start_requested_at`)."""
+        try:
+            self.client.start_instance(row.vast_instance_id)
+        except ProviderError:
+            logger.warning("krater.compute: starting self-stopped instance %s failed; retrying", row.vast_instance_id)
+            self.result.errors += 1
 
     # -- Boxes -----------------------------------------------------------------------------------------
 
@@ -835,6 +853,9 @@ class Scheduler:
         self.session.commit()
 
     def _requeue_moved(self, job: ComputeJob) -> None:
+        # A member may have cancelled the job, or a budget stop ended it, since this pass loaded it: never revive it.
+        if not self._still_active(job):
+            return
         _requeue(
             self.session,
             job,
@@ -949,8 +970,17 @@ class Scheduler:
                     pass
         return rental_type, limit
 
+    def _still_active(self, job: ComputeJob, *states: ComputeJobState) -> bool:
+        """Re-read `job` under a row lock, and whether it is still active (in one of `states`, if given). The pass
+        works from rows it loaded earlier (`expire_on_commit=False`), and a member's cancel may have landed since:
+        writing to the stale row would overwrite it. The lock holds until this job's commit, so a cancel waits."""
+        self.session.refresh(job, with_for_update=True)
+        return job.state in states if states else job.is_active
+
     def _start_one(self, job: ComputeJob, taken: set[int]) -> bool:
         """Try to rent for `job`. Returns `True` when the pass should stop starting jobs (Vast unreachable)."""
+        if not self._still_active(job, ComputeJobState.QUEUED):
+            return False  # cancelled since this pass listed the queue
         project = job.project
         if project.status not in LAUNCHABLE_STATUSES:
             _finish(job, ComputeJobState.CANCELLED, f"The project is {project.status.value}.", now=self.now)
@@ -1001,14 +1031,14 @@ class Scheduler:
         # Budget: under the project's row lock, so two jobs can't hold the same dollars.
         self.session.execute(sa.select(Project.id).where(Project.id == project.id).with_for_update())
         available = budget.remaining_cents(self.session, project) - self._held_cents(project, exclude=job)
-        hour_cents = math.ceil(choice.full_microusd / MICROUSD_PER_CENT)
+        hour_cents = spend.ceil_div(choice.full_microusd, MICROUSD_PER_CENT)
         if available < hour_cents:
             job.state_reason = (
                 f"Waiting for budget: one hour at {_dollars(choice.full_microusd)} needs ${hour_cents / 100:.2f}, "
                 f"${max(available, 0) / 100:.2f} is free."
             )
             return False
-        run_cents = math.ceil(choice.full_microusd * job.max_runtime_minutes / 60 / MICROUSD_PER_CENT)
+        run_cents = spend.ceil_div(choice.full_microusd * job.max_runtime_minutes, 60 * MICROUSD_PER_CENT)
         self._rented_from.add(pace_key)
         return self._rent(job, choice, hold_cents=min(run_cents, available), taken=taken)
 

@@ -231,7 +231,7 @@ def _price(body: dict, field: str) -> int:
         value = Decimal(str(body[field]))
     except (KeyError, InvalidOperation):
         raise ValidationFailed({field: "Give a price in dollars per hour, such as 0.12."}) from None
-    if not Decimal(0) < value <= Decimal(1000):
+    if not value.is_finite() or not Decimal(0) < value <= Decimal(1000):
         raise ValidationFailed({field: "Give a price above zero, in dollars per hour."})
     return usd_to_microusd(value)
 
@@ -264,8 +264,11 @@ async def submit(project_id: uuid.UUID, request: Request, actor: Me, db_session:
         return _error(400, "Send a JSON object.")
     try:
         gpus = body.get("gpu_names", [])
-        if not isinstance(gpus, list) or not all(isinstance(g, str) for g in gpus):
+        if not isinstance(gpus, list) or not all(isinstance(g, str) and len(g) <= 100 for g in gpus) or len(gpus) > 50:
             raise ValidationFailed({"gpu_names": "Give a list of GPU model names."})
+        command = body.get("command")
+        if command is not None and not isinstance(command, str):
+            raise ValidationFailed({"command": "Give the command as one string."})
         if "limit_usd_per_hour" in body:
             # A limit order: one price it starts at or under and never pays more than, and it holds its machine
             # when outbid rather than starting over elsewhere.
@@ -279,7 +282,7 @@ async def submit(project_id: uuid.UUID, request: Request, actor: Me, db_session:
         spec = JobSpec(
             name=str(body.get("name", "")),
             image=str(body.get("image", "")).strip(),
-            command=body.get("command") or None,
+            command=command or None,
             kind=ComputeJobKind.BOX if body.get("kind") == "box" else ComputeJobKind.JOB,
             gpu_names=tuple(gpus),
             min_gpu_ram_gb=_int(body, "min_gpu_ram_gb", None),

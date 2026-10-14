@@ -25,6 +25,7 @@ from krater.models import (
     ComputeOutbid,
     ProjectStatus,
 )
+from krater.providers.errors import ProviderUnavailableError
 from krater.services import budget, compute_jobs
 from krater.services.compute_jobs import JobSpec
 from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
@@ -909,6 +910,28 @@ def test_a_machine_that_stopped_itself_is_started_again(db_session, member, proj
     _pass(db_session, client, NOW + timedelta(minutes=251))
     assert job.state is ComputeJobState.RUNNING
     assert row.runner_starts_needed == row.runner_starts + 1  # its runner must report again
+
+
+def test_a_failed_start_after_a_self_stop_is_retried(db_session, member, project, client, fake, monkeypatch) -> None:  # noqa: F811
+    """Vast never resumes a machine stopped on purpose, so one failed start must not leave it stopped for good."""
+    job, row = _running_job(db_session, member, project, client, fake)
+    _beat(db_session, row, NOW + timedelta(minutes=6))
+    fake.set_status(row.vast_instance_id, "stopped", intended_status="stopped")
+    real_start = client.start_instance
+
+    def unavailable(instance_id):
+        raise ProviderUnavailableError("Vast is down")
+
+    monkeypatch.setattr(client, "start_instance", unavailable)
+    _pass(db_session, client, NOW + timedelta(minutes=250))
+    assert job.state is ComputeJobState.PAUSED and "self_stopped" in _events(db_session, job)
+    assert fake.instances[row.vast_instance_id]["intended_status"] == "stopped"
+
+    monkeypatch.setattr(client, "start_instance", real_start)
+    _pass(db_session, client, NOW + timedelta(minutes=251))
+    assert fake.instances[row.vast_instance_id]["intended_status"] == "running"
+    _pass(db_session, client, NOW + timedelta(minutes=252))
+    assert job.state is ComputeJobState.RUNNING and row.start_requested_at is None
 
 
 def test_an_outbid_machine_is_still_a_pause(db_session, member, project, client, fake) -> None:  # noqa: F811

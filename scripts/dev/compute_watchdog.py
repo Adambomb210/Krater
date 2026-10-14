@@ -20,9 +20,12 @@ from pathlib import Path
 
 from krater.vast import VastClient, VastError
 
+DESTROY_ATTEMPTS = 20
+
 
 def charged(client: VastClient, prefix: str, since: datetime, now: datetime) -> Decimal:
-    """Dollars Vast has charged so far for instances labelled with `prefix`."""
+    """Dollars Vast has charged for instances labelled with `prefix` since 00:00 UTC on `since`'s day. Earlier runs
+    that day count too: the cap is a day's spend for the prefix, the cautious reading."""
     day_start = since.replace(hour=0, minute=0, second=0, microsecond=0)
     return sum(
         (c.amount for c in client.charges(day_start, now) if (c.label or "").startswith(prefix)),
@@ -61,9 +64,18 @@ def watch(client: VastClient, *, prefix: str, cap: Decimal, deadline: timedelta,
         if over or late:
             reason = "spend cap" if over else "deadline"
             print(f"{reason} reached: destroying everything with {prefix!r}", flush=True)
-            left = destroy_all(client, prefix)
-            print(f"left afterwards: {left}", flush=True)
-            return 1 if left else 0
+            # It fires exactly when Vast may be misbehaving: keep trying until nothing is left, never crash out.
+            for attempt in range(1, DESTROY_ATTEMPTS + 1):
+                try:
+                    left = destroy_all(client, prefix)
+                except VastError as exc:
+                    print(f"destroy round {attempt} failed: {exc}", flush=True)
+                    left = None
+                print(f"left afterwards: {left}", flush=True)
+                if left == []:
+                    return 0
+                time.sleep(min(every, 30.0))
+            return 1
         if once:
             return 0
         time.sleep(every)

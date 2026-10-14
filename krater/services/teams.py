@@ -105,6 +105,9 @@ def accept(session: Session, actor: Actor, *, member_id: uuid.UUID, now: datetim
     member = _own_invitation(session, actor, member_id)
     if not actor.is_member:
         raise NotAllowed("Only Ganymede members can join a project team.")
+    # The project row lock every grant takes first (`projects._lock_project`): without it, a join racing an approval
+    # could read the budget as 0 and skip the gate while the approval checked the team from before the join.
+    session.refresh(member.project, with_for_update=True)
     _require_open(member.project)
     if member.accepted:
         raise InvalidState("You're on this team already.")
