@@ -287,6 +287,26 @@ def test_searches_ask_for_a_limited_number_of_rows(db_session, member, project, 
     assert fake.search_bodies[0]["limit"] == scheduler.SEARCH_LIMIT
 
 
+def test_a_search_asks_only_for_offers_under_the_jobs_price(db_session, member, project, client, fake) -> None:  # noqa: F811
+    # Vast's quota counts rows, so a job waiting for a low price should cost none.
+    job = _submit(db_session, member, project, target_microusd=20_000)
+
+    _pass(db_session, client)
+
+    assert fake.search_bodies[0]["min_bid"] == {"lte": 0.02}
+    assert job.state is ComputeJobState.QUEUED
+    assert job.state_reason == "Waiting for a bid offer at or under $0.0200/h (none right now; see the price history)."
+
+
+def test_an_on_demand_search_filters_on_the_full_price(db_session, member, project, client, fake) -> None:  # noqa: F811
+    _submit(db_session, member, project, interruptible=False, target_microusd=90_000, max_microusd=100_000)
+
+    _pass(db_session, client)
+
+    assert fake.search_bodies[0]["dph_total"] == {"lte": 0.09}
+    assert "min_bid" not in fake.search_bodies[0]
+
+
 def test_a_waiting_job_is_searched_for_less_and_less_often(db_session, member, project, client, fake) -> None:  # noqa: F811
     job = _submit(db_session, member, project, target_microusd=50_000)
     pacer = SearchPacer()
