@@ -30,7 +30,7 @@ from krater.models import (
     User,
 )
 from krater.services import budget as budget_service
-from krater.services import people, slack_membership, teams
+from krater.services import guardian, people, slack_membership, teams
 from krater.services import projects as project_service
 from krater.services import screenshots as screenshot_service
 from krater.services.actor import Actor
@@ -482,6 +482,13 @@ def _build_detail_context(
 
     screenshots = _screenshot_entries(get_object_store(), current) if current is not None else []
 
+    # Team members under 18 without a verified guardian in Weave block every budget grant (docs/SPEC.md
+    # "Guardian verification"). A finished project gets no more budget, so it doesn't ask. `None` means Weave
+    # couldn't say right now; the decision itself still checks Weave fresh.
+    guardian_pending = (
+        guardian.pending_for_display(session, weave_client, project) if project.status not in _TERMINAL_STATUSES else []
+    )
+
     # For each revision with an estimate, whether the amount it asks for has drifted far enough from that estimate to
     # flag for reviewers -- e.g. the team estimated one thing, then typed a requested amount well past it. An
     # amendment's estimate is the extra compute, so it's compared with what the amendment adds to the ceiling; that's
@@ -510,6 +517,7 @@ def _build_detail_context(
         "summary": summary,
         "budget_flag": budget_flag,
         "screenshots": screenshots,
+        "guardian_pending": guardian_pending,
         "revisions": revisions,
         "estimate_mismatch_by_revision": estimate_mismatch_by_revision,
         "amendment_adds_cents": amendment_adds_cents,
@@ -748,9 +756,10 @@ def accept_team_invitation(
     member_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
 ):
     try:
-        teams.accept(db_session, actor, member_id=member_id)
+        teams.accept(db_session, actor, weave_client, member_id=member_id)
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
     return _success_redirect(
@@ -828,7 +837,13 @@ def record_review(
     revision = project.current_revision
     try:
         project_service.record_review(
-            db_session, actor, revision=revision, decision=decision_enum, reason=reason or None, source=ReviewSource.WEB
+            db_session,
+            actor,
+            revision=revision,
+            decision=decision_enum,
+            reason=reason or None,
+            source=ReviewSource.WEB,
+            weave_client=weave_client,
         )
     except ValidationFailed as exc:
         db_session.rollback()
@@ -882,7 +897,9 @@ def admin_decide(
 
     revision = project.current_revision
     try:
-        project_service.admin_decide(db_session, actor, revision=revision, decision=decision_enum, reason=reason)
+        project_service.admin_decide(
+            db_session, actor, revision=revision, decision=decision_enum, reason=reason, weave_client=weave_client
+        )
     except ValidationFailed as exc:
         db_session.rollback()
         context = _build_detail_context(
@@ -943,7 +960,7 @@ def admin_adjust_budget(
 
     try:
         project_service.admin_adjust_budget(
-            db_session, actor, project=project, amount_cents=amount_cents, reason=reason
+            db_session, actor, project=project, amount_cents=amount_cents, reason=reason, weave_client=weave_client
         )
     except (ValidationFailed, NotAllowed) as exc:
         # An admin's NotAllowed here is the own-project rule, worth showing next to the amount; anyone else's

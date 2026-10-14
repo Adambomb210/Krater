@@ -12,6 +12,7 @@ from krater.models import (
     ApprovalPolicy,
     ApprovalStage,
     AuditEvent,
+    BudgetEntryKind,
     ComputeEscalation,
     ComputeJob,
     ComputeJobKind,
@@ -22,8 +23,9 @@ from krater.models import (
     RevisionOutcome,
 )
 from krater.services import approval_policy, projects, teams
+from krater.services import budget as budget_service
 from krater.services.actor import GROUP_MEMBER, GROUP_REVIEWER, Actor
-from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
+from krater.services.errors import GuardianVerificationRequired, InvalidState, NotAllowed, NotFound, ValidationFailed
 from krater.weave import StubWeaveClient
 from tests.factories import new_project
 from tests.services.conftest import PROFILES, add_to_team
@@ -53,7 +55,7 @@ def test_the_lead_invites_by_patchwork_id_or_email_and_access_starts_at_accept(
     with pytest.raises(NotAllowed):
         projects.update_draft(db_session, by_id, project=project, write_up="sneaky")
 
-    teams.accept(db_session, by_id, member_id=first.id)
+    teams.accept(db_session, by_id, weave, member_id=first.id)
 
     assert teams.on_team(project, by_id.user.id)
     assert teams.team_user_ids(project) == [member.user.id, by_id.user.id]
@@ -131,14 +133,14 @@ def test_outsiders_cant_invite_and_closed_projects_cant_change(
         teams.invite(db_session, member, weave, project=project, query=newcomer.user.weave_sub)
 
 
-def test_only_the_invitee_answers_an_invitation(db_session: Session, member: Actor, make_actor) -> None:
+def test_only_the_invitee_answers_an_invitation(db_session: Session, member: Actor, make_actor, weave) -> None:
     invitee = make_actor(groups=frozenset({GROUP_MEMBER}))
     someone_else = make_actor(groups=frozenset({GROUP_MEMBER}))
     project = _project(db_session, member)
     invitation = add_to_team(db_session, project, invitee, accepted=False)
 
     with pytest.raises(NotFound):
-        teams.accept(db_session, someone_else, member_id=invitation.id)
+        teams.accept(db_session, someone_else, weave, member_id=invitation.id)
     with pytest.raises(NotFound):
         teams.decline(db_session, member, member_id=invitation.id)
 
@@ -179,7 +181,7 @@ def test_my_projects_lists_joined_teams_and_invitations_separately(
 
 
 def test_an_approval_from_a_reviewer_who_later_joins_the_team_stops_counting(
-    db_session: Session, member: Actor, make_actor
+    db_session: Session, member: Actor, make_actor, weave
 ) -> None:
     # Two approvals needed, so the first one leaves the revision pending.
     db_session.add(ApprovalPolicy(stage=ApprovalStage.PROPOSAL, min_approvals=2))
@@ -188,12 +190,22 @@ def test_an_approval_from_a_reviewer_who_later_joins_the_team_stops_counting(
     project = projects.submit(db_session, member, project=_project(db_session, member))
     revision = project.current_revision
     projects.record_review(
-        db_session, first, revision=revision, decision=ReviewDecision.APPROVE, source=ReviewSource.WEB
+        db_session,
+        first,
+        revision=revision,
+        decision=ReviewDecision.APPROVE,
+        source=ReviewSource.WEB,
+        weave_client=weave,
     )
     add_to_team(db_session, project, first, accepted=False)
 
     projects.record_review(
-        db_session, second, revision=revision, decision=ReviewDecision.APPROVE, source=ReviewSource.WEB
+        db_session,
+        second,
+        revision=revision,
+        decision=ReviewDecision.APPROVE,
+        source=ReviewSource.WEB,
+        weave_client=weave,
     )
 
     assert revision.outcome is RevisionOutcome.PENDING
@@ -230,3 +242,27 @@ def test_nobody_leaves_or_is_removed_with_a_job_still_running(db_session: Sessio
     job.state = ComputeJobState.CANCELLED
     teams.remove(db_session, member, project=project, member_id=row.id)
     assert project.members == []
+
+
+def test_joining_a_funded_project_needs_a_verified_guardian_for_a_minor(
+    db_session: Session, member: Actor, make_actor, weave: StubWeaveClient
+) -> None:
+    # The grant was checked against the team as it was; someone joining later is checked when they accept.
+    minor = make_actor(groups=frozenset({GROUP_MEMBER}))
+    weave.set_minor(minor.user.weave_sub, True)
+    project = _project(db_session, member)
+    draft = teams.invite(db_session, member, weave, project=project, query=minor.user.weave_sub)
+    teams.accept(db_session, minor, weave, member_id=draft.id)  # no budget yet: the approval will check them
+    teams.remove(db_session, member, project=project, member_id=draft.id)
+    budget_service.add_entry(
+        db_session, project=project, kind=BudgetEntryKind.ADMIN_ADJUSTMENT, amount_cents=500, actor=member, reason="t"
+    )
+    invitation = teams.invite(db_session, member, weave, project=project, query=minor.user.weave_sub)
+
+    with pytest.raises(GuardianVerificationRequired):
+        teams.accept(db_session, minor, weave, member_id=invitation.id)
+    assert not invitation.accepted
+
+    weave.set_guardian_verified(minor.user.weave_sub, True)
+    teams.accept(db_session, minor, weave, member_id=invitation.id)
+    assert invitation.accepted

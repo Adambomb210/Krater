@@ -95,7 +95,7 @@ def _validate(spec: JobSpec, *, cap_microusd: int) -> None:
 def submit_job(
     session: Session, actor: Actor, *, project: Project, spec: JobSpec, cap_cents: int, now: datetime
 ) -> ComputeJob:
-    """Queue `spec` for `project`. Only the project's submitter and credited builders may, and only while the project
+    """Queue `spec` for `project`. Only the project's team (lead and accepted members) may, and only while the project
     can launch. `cap_cents` is the project's hourly cap (`launch_rules.hourly_cap_cents`)."""
     if not _can_launch_for(actor, project):
         raise NotAllowed("Only the project's team can run jobs on its budget.")

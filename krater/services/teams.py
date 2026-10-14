@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from krater.models import ComputeJob, Project, ProjectMember, ProjectStatus
 from krater.models.compute_job import FINISHED_JOB_STATES
-from krater.services import audit, people
+from krater.services import audit, budget, guardian, people
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
 from krater.weave import WeaveClient
@@ -100,14 +100,24 @@ def _own_invitation(session: Session, actor: Actor, member_id: uuid.UUID) -> Pro
     return member
 
 
-def accept(session: Session, actor: Actor, *, member_id: uuid.UUID, now: datetime | None = None) -> ProjectMember:
-    """Accept the actor's own invitation. Only a Ganymede member can join a team."""
+def accept(
+    session: Session,
+    actor: Actor,
+    weave_client: WeaveClient,
+    *,
+    member_id: uuid.UUID,
+    now: datetime | None = None,
+) -> ProjectMember:
+    """Accept the actor's own invitation. Only a Ganymede member can join a team, and joining a project that already
+    has budget passes the guardian gate (`guardian.require_member_cleared`), as the grant itself did."""
     member = _own_invitation(session, actor, member_id)
     if not actor.is_member:
         raise NotAllowed("Only Ganymede members can join a project team.")
     _require_open(member.project)
     if member.accepted:
         raise InvalidState("You're on this team already.")
+    if budget.ceiling_cents(session, member.project) > 0:
+        guardian.require_member_cleared(weave_client, actor.user, member.project)
     member.accepted_at = now or datetime.now(UTC)
     session.flush()
     audit.record(session, actor, "team_join", project=member.project, payload={"member_sub": actor.user.weave_sub})

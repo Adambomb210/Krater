@@ -196,7 +196,7 @@ def me(actor: Me):
 
 @router.get("/projects")
 def my_projects(actor: Me, db_session: Db):
-    """The projects the member is on the team of (submitter or credited builder)."""
+    """The projects the member is on the team of (lead or accepted member)."""
     projects = [
         p for p in db_session.scalars(sa.select(Project).order_by(Project.created_at.desc())) if _is_team(actor, p)
     ]
