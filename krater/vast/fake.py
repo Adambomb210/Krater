@@ -272,12 +272,13 @@ class FakeVast:
         storage = float(body.get("allocated_storage", DEFAULT_ALLOCATED_STORAGE))
         results = []
         for offer in self.offers.values():
-            if not all(_matches(offer.get(k), v) for k, v in body.items() if k not in _SEARCH_CONTROL_KEYS):
-                continue
+            # Priced first, as the live API does: a `dph_total` filter compares the price at `allocated_storage`.
             priced = dict(offer)
             disk = Decimal(str(offer["storage_cost"])) * Decimal(str(storage)) / HOURS_PER_MONTH
             priced["dph_total"] = float(Decimal(str(offer["dph_base"])) + disk)
             priced["is_bid"] = body.get("type") == "bid"
+            if not all(_matches(priced.get(k), v) for k, v in body.items() if k not in _SEARCH_CONTROL_KEYS):
+                continue
             results.append(priced)
         results.sort(key=lambda o: o["dph_total"])
         limit = min(int(body.get("limit", 64)), SEARCH_RESULT_CAP)

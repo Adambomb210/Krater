@@ -837,6 +837,7 @@ class Scheduler:
             min_reliability=policy.reliability_floor,
             min_direct_ports=1 if job.kind is ComputeJobKind.BOX else 0,
             limit=SEARCH_LIMIT,
+            max_price_microusd=limit,
         )
         key = json.dumps(query.to_body(), sort_keys=True)
         # The price is part of what's paced: an escalated job (a higher limit) searches at once.
@@ -870,7 +871,7 @@ class Scheduler:
             )
             kind = "bid" if rental_type == "bid" else "on-demand"
             job.state_reason = f"Waiting for a {kind} offer at or under {_dollars(limit)}" + (
-                f" (cheapest now {_dollars(low)})." if low is not None else " (no matching offers now)."
+                f" (cheapest now {_dollars(low)})." if low is not None else " (none right now; see the price history)."
             )
             return False
 
