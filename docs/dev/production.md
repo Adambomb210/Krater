@@ -41,15 +41,17 @@ Backups are a `krater-backup` timer (03:30 UTC) writing to `/var/lib/krater/back
 
 **Compute off (the first deploy).** Krater ships to production with `KRATER_COMPUTE_MODE=off`: proposals, review,
 budgets, Slack, the gallery and Quilt events, but no rented machines, until the paid checks in
-[compute/README.md](../compute/README.md) pass. With nothing launched, the 80% and 100% budget alerts never fire.
+[compute/README.md](../compute/README.md) pass (all of them have on staging, the runner's self-stop last, on
+2026-10-14) and the Vast key has been rotated. With nothing launched, the 80% and 100% budget alerts never fire.
 `KRATER_PRICING_MODE=live` (or its old name, `KRATER_SKYPILOT_MODE`) fetches the public GPU catalog the budget estimator
 reads; it needs no server or credentials.
 
 **Turning compute on** later is, in infra's `modules/krater`: `compute.enable = true` and `compute.vastKeyFile` (an
 agenix secret; the module puts the key in the worker's env alone, as `KRATER_VAST_API_KEY`), which also sets
 `KRATER_VAST_MODE=live`, `KRATER_COMPUTE_MODE=vast` and a production `KRATER_COMPUTE_LABEL_PREFIX` (`compute.labelPrefix`,
-`krater-prod-` by default; production refuses Krater's own default, since the scheduler destroys unknown instances
-with its prefix). `projectSecretsKeyFile` turns project secrets on (the portal's env alone; to rotate its key, put a new first line in
+`krater-prod-` by default; production refuses Krater's own default, and every deployment refuses a prefix shorter
+than 7 characters, without a trailing `-`, or plain `krater-`, since the scheduler destroys unknown instances with its
+prefix). `projectSecretsKeyFile` turns project secrets on (the portal's env alone; to rotate its key, put a new first line in
 the file, restart, run `python -m krater.rotate_project_secrets` in the portal container, then drop the old line), and
 `weave.cliClientId` the `krater` CLI's API. With Compose instead, mount the key into the worker only and set
 `KRATER_VAST_API_KEY_FILE`. The deploy's `ensure_bucket` creates the `krater-compute` bucket for checkpoints. Project secrets also need
