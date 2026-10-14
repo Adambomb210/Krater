@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
+from krater import providers
 from krater.compute import runner_api
 from krater.config import get_settings
 from krater.db import get_session
@@ -44,6 +46,12 @@ def machine(db_session, member, project, client, fake):  # noqa: F811
     return job, row, _token(fake, row)
 
 
+@pytest.fixture
+def vast_mode(monkeypatch) -> None:
+    """The active provider is Vast, as in production (the tests' default is compute off)."""
+    monkeypatch.setattr(get_settings(), "compute_mode", "vast")
+
+
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
@@ -62,7 +70,7 @@ def test_start_tells_the_runner_its_command_and_whether_it_resumes(http, machine
     assert row.runner_starts == 2
 
 
-def test_start_tells_the_runner_when_to_stop_its_machine_without_krater(http, machine) -> None:
+def test_start_tells_the_runner_when_to_stop_its_machine_without_krater(http, machine, vast_mode) -> None:
     _, row, token = machine
 
     info = http.post("/runner/v1/start", headers=_auth(token)).json()
@@ -70,6 +78,41 @@ def test_start_tells_the_runner_when_to_stop_its_machine_without_krater(http, ma
     assert info["self_stop_after_seconds"] == 180 * 60
     assert info["vast_instance_id"] == int(row.provider_instance_id)  # the wire name the runner reads
     assert info["vast_api_url"] == "https://console.vast.ai"
+    # The provider-neutral descriptor, with the id as a string; the legacy fields above stay for deployed runners.
+    assert info["self_stop"] == {
+        "method": "vast_api",
+        "url": "https://console.vast.ai",
+        "instance_id": row.provider_instance_id,
+    }
+    assert isinstance(info["self_stop"]["instance_id"], str)
+
+
+def test_a_provider_that_cannot_stop_itself_sends_no_self_stop(http, machine, monkeypatch, vast_mode) -> None:
+    _, _, token = machine
+    vast = providers.registered()["vast"]
+    monkeypatch.setitem(
+        providers._REGISTRY,
+        "vast",
+        dataclasses.replace(
+            vast, self_stop_method=None, capabilities=dataclasses.replace(vast.capabilities, self_stop=False)
+        ),
+    )
+
+    info = http.post("/runner/v1/start", headers=_auth(token)).json()
+
+    assert info["self_stop"] is None
+    assert info["self_stop_after_seconds"] == -1
+
+
+def test_a_shutdown_provider_sends_the_shutdown_method(http, machine, monkeypatch, vast_mode) -> None:
+    _, _, token = machine
+    vast = providers.registered()["vast"]
+    monkeypatch.setitem(providers._REGISTRY, "vast", dataclasses.replace(vast, self_stop_method="shutdown"))
+
+    info = http.post("/runner/v1/start", headers=_auth(token)).json()
+
+    assert info["self_stop"] == {"method": "shutdown"}
+    assert info["self_stop_after_seconds"] == 180 * 60
 
 
 def test_a_wrong_or_missing_token_is_refused(http, machine) -> None:

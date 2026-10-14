@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,25 @@ const DefaultSelfStopAfter = 3 * time.Hour
 
 // DefaultVastURL is where Vast's API is, unless /start names another.
 const DefaultVastURL = "https://console.vast.ai"
+
+// Methods of stopping a machine that Krater's /start can name (`self_stop.method`).
+const (
+	// MethodVastAPI stops the instance through Vast's API with the container's own key.
+	MethodVastAPI = "vast_api"
+	// MethodShutdown has the machine shut itself down, for a cloud VM whose shutdown behaviour is stop.
+	MethodShutdown = "shutdown"
+)
+
+// SelfStopDescriptor is how Krater says this machine stops itself. The instance id is a string because providers'
+// ids aren't all integers (Vast's is).
+type SelfStopDescriptor struct {
+	Method     string `json:"method"`
+	URL        string `json:"url"`
+	InstanceID string `json:"instance_id"`
+}
+
+// shutdownCommands are tried in turn: the first that runs ends the machine.
+var shutdownCommands = [][]string{{"shutdown", "-h", "now"}, {"poweroff"}, {"halt"}}
 
 // Contact is when Krater last answered this runner, whatever it said: a refusal is an answer too. A gateway error
 // (Krater down behind its proxy) or no connection at all is not.
@@ -68,11 +88,15 @@ type SelfStop struct {
 	// container's environment, which a process started from `onstart` may not inherit, so the default also reads
 	// /proc/1/environ.
 	Env func(name string) string
+	// Exec runs a command to completion; tests replace it so nothing shuts down.
+	Exec func(name string, args ...string) error
 
 	mu         sync.Mutex
 	after      time.Duration
 	instanceID int64
 	vastURL    string
+	method     string // "" is Vast's API, as before /start named a method
+	disabled   string // why the stop call is off (an unknown method, an unusable id): logged once, when it fires
 	before     func()
 	fired      atomic.Bool
 	stopped    atomic.Bool
@@ -86,6 +110,7 @@ func NewSelfStop(httpClient *http.Client) *SelfStop {
 		HTTP:    httpClient,
 		Now:     time.Now,
 		Env:     containerEnv,
+		Exec:    runCommand,
 		after:   DefaultSelfStopAfter,
 		vastURL: DefaultVastURL,
 	}
@@ -106,11 +131,42 @@ func (s *SelfStop) Configure(info *StartInfo) {
 		// Krater's provider can't stop a machine from inside it: the provider ends abandoned work itself.
 		s.after = 0
 	}
+	if d := info.SelfStop; d != nil {
+		// The descriptor wins over the legacy Vast fields: a Krater that sends it names the method itself.
+		s.configureMethod(d)
+		return
+	}
+	// An older Krater: only Vast's two fields.
 	if info.VastInstanceID > 0 {
 		s.instanceID = info.VastInstanceID
 	}
 	if info.VastAPIURL != "" {
 		s.vastURL = info.VastAPIURL
+	}
+}
+
+// configureMethod applies a descriptor; s.mu is held.
+func (s *SelfStop) configureMethod(d *SelfStopDescriptor) {
+	s.method, s.disabled = d.Method, ""
+	switch d.Method {
+	case MethodVastAPI:
+		if d.URL != "" {
+			s.vastURL = d.URL
+		}
+		s.instanceID = 0
+		if d.InstanceID == "" {
+			return // the container's own id is used, as for an old Krater that sent none
+		}
+		// Digits only: ParseInt would take "+5" or "-5", and an id Krater got wrong must not stop another instance.
+		id, err := strconv.ParseInt(d.InstanceID, 10, 64)
+		if err != nil || id <= 0 || strings.Trim(d.InstanceID, "0123456789") != "" {
+			s.disabled = fmt.Sprintf("Krater sent a Vast instance id this runner can't use: %q", d.InstanceID)
+			return
+		}
+		s.instanceID = id
+	case MethodShutdown:
+	default:
+		s.disabled = fmt.Sprintf("Krater named a self-stop method this runner doesn't know: %s", d.Method)
 	}
 }
 
@@ -149,7 +205,7 @@ func (s *SelfStop) Check(ctx context.Context) {
 		return
 	}
 	s.mu.Lock()
-	after, before := s.after, s.before
+	after, before, method, disabled := s.after, s.before, s.method, s.disabled
 	s.mu.Unlock()
 	if after <= 0 {
 		return
@@ -165,6 +221,21 @@ func (s *SelfStop) Check(ctx context.Context) {
 		if before != nil {
 			before()
 		}
+		if disabled != "" {
+			// The command is stopped, which is all this runner can do; asking again every minute would only repeat this.
+			logf("%s; the command is stopped and the machine is left running", disabled)
+			s.stopped.Store(true)
+			return
+		}
+	}
+	if method == MethodShutdown {
+		if err := s.shutDown(); err != nil {
+			logf("could not shut this machine down: %v; trying again in a minute", err)
+			return
+		}
+		s.stopped.Store(true)
+		logf("shut this machine down")
+		return
 	}
 	if err := s.stopMachine(ctx); err != nil {
 		logf("could not stop this machine: %v; trying again in a minute", err)
@@ -172,6 +243,23 @@ func (s *SelfStop) Check(ctx context.Context) {
 	}
 	s.stopped.Store(true)
 	logf("asked Vast to stop this machine")
+}
+
+// shutDown ends the machine from inside, with the first of shutdownCommands that works.
+func (s *SelfStop) shutDown() error {
+	var failures []string
+	for _, argv := range shutdownCommands {
+		err := s.Exec(argv[0], argv[1:]...)
+		if err == nil {
+			return nil
+		}
+		failures = append(failures, fmt.Sprintf("%s: %v", argv[0], err))
+	}
+	return fmt.Errorf("%s", strings.Join(failures, "; "))
+}
+
+func runCommand(name string, args ...string) error {
+	return exec.Command(name, args...).Run()
 }
 
 func (s *SelfStop) stopMachine(ctx context.Context) error {

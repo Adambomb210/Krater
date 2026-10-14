@@ -59,6 +59,22 @@ is taken, the pause rules move the job as for an outbid machine) and shows a box
 A `self_stop_after_seconds` of -1 turns the switch off, for a provider whose machines can't stop themselves
 (`Capabilities.self_stop`, [providers.md](providers.md)).
 
+**How the machine stops is the provider's to say.** `/start` carries a `self_stop` descriptor, built from the active
+provider's `self_stop_method` (never from its name):
+
+| `self_stop` | The runner |
+|---|---|
+| `{"method": "vast_api", "url", "instance_id"}` | `PUT`s the stop to Vast's API as above; `instance_id` is a string of digits (anything else disables the stop call) |
+| `{"method": "shutdown"}` | runs `shutdown -h now`, falling back to `poweroff`, then `halt`, retrying every minute until one runs (a cloud VM whose shutdown behaviour is stop) |
+| `null` | has no stop call; Krater then also sends `self_stop_after_seconds: -1` |
+| any other `method` | logs once, when it fires, "Krater named a self-stop method this runner doesn't know: X"; it still stops the command first and leaves the machine running |
+
+The descriptor wins over the legacy fields. Krater still sends `vast_instance_id` (an integer) and `vast_api_url`
+next to it, for runners already on machines: they ignore the unknown `self_stop` key and keep stopping through Vast
+as before. A runner that gets no descriptor (an older Krater) falls back to those two fields.
+`self_stop_after_seconds` keeps its meaning whatever the method: above 0 the silence in seconds, below 0 off, 0 the
+3-hour default.
+
 Checked with Go tests against a fake Vast, the scheduler's tests, and a rehearsal on staging (2026-10-14): the real
 runner in a local container, a 30-minute project override, the portal stopped. It fired after 31 minutes, stopped
 the command, sent one stop to a fake Vast with the container key, and reported no exit; Krater, shown the machine
