@@ -31,6 +31,7 @@ from krater.providers.errors import (
     ProviderSearchQuotaError,
     ProviderUnavailableError,
 )
+from krater.providers.launch import Launch
 from krater.providers.phase import Phase
 
 if TYPE_CHECKING:
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
 __all__ = [
     "Capabilities",
     "ComputeProvider",
+    "Launch",
     "Phase",
     "ProviderError",
     "ProviderInfo",
@@ -133,6 +135,8 @@ class ProviderInfo:
     #: The worker's client for these settings, or `None` when Krater has no usable account with the provider. Called
     #: on every pass, so a rotated credential takes effect without a restart; cache inside if building is costly.
     client: Callable[[Settings], ComputeProvider | None]
+    #: The provider's create request for a `Launch` (`krater.providers.launch`), passed to `create_instance`.
+    create_request: Callable[[Launch], Any]
 
     def __post_init__(self) -> None:
         # A runner told to self-stop with no method would fall back to Vast's API, the wrong call anywhere else.
@@ -180,6 +184,12 @@ def _vast_client(settings: Settings) -> ComputeProvider | None:
     return get_vast_client()
 
 
+def _vast_create_request(launch: Launch) -> Any:
+    from krater.vast.launch import create_request
+
+    return create_request(launch)
+
+
 register(
     ProviderInfo(
         name="vast",
@@ -197,5 +207,6 @@ register(
         ),
         self_stop_method="vast_api",
         client=_vast_client,
+        create_request=_vast_create_request,
     )
 )

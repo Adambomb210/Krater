@@ -1,14 +1,8 @@
-"""What Krater asks Vast to start in a job's container: a small bootstrap that fetches and runs Krater's runner.
-
-Krater launches in Vast's `args` mode and replaces the image's ENTRYPOINT with `sh`: in that mode Vast's `onstart`
-field *is* the entrypoint override (Vast's own CLI sends `--entrypoint X` as `"onstart": X`), and `args` are passed
-to it. Without the override, an image with its own ENTRYPOINT would get `sh -c ...` as arguments, exit, and be
-restarted by Vast in a billing loop. So an image needs a POSIX `sh`, and a member whose image's entrypoint does setup
-(activating an environment, say) puts that in the command. Checked on staging (2026-10-11): `nginx:1.27-alpine`,
-whose ENTRYPOINT is `/docker-entrypoint.sh`, ran the member's command.
+"""What Krater starts on every machine, whatever the provider: a small bootstrap that fetches and runs Krater's
+runner. How the bootstrap gets to run is each provider's (`krater.vast.launch` for Vast's launch modes).
 
 The bootstrap downloads the runner from Krater with curl, wget or Python (whichever the image has), checks its
-sha256, and runs it; the runner asks Krater for the command. Then the shell waits forever, whatever happened: Vast
+sha256, and runs it; the runner asks Krater for the command. Then a job's shell waits forever, whatever happened: Vast
 restarts a container whose main process ends, which would rerun the job and keep billing (spike, 2026-10-11), so
 only Krater ends a machine, by destroying it. If the runner never starts, the scheduler's start deadline does.
 """
@@ -20,10 +14,8 @@ from decimal import Decimal
 from pathlib import Path
 
 from krater.models import ComputeJob, ComputeJobKind
-from krater.vast import CreateInstance
+from krater.providers.launch import Launch
 
-#: Vast's `onstart` in `args` mode: the entrypoint that replaces the image's own.
-ENTRYPOINT = "sh"
 RUNNER_PATH = "/runner/v1/krater-runner"
 
 #: Downloads the runner and checks its sha256; leaves OK=1 when it may run.
@@ -56,15 +48,10 @@ _JOB_TAIL = r"""[ "$OK" = 1 ] && "$R"
 echo "krater: waiting for Krater to stop this machine"
 while :; do sleep 3600; done"""
 
-#: A box: Vast's own init is the main process (SSH mode), and this runs as its startup script, so the runner goes in
-#: the background and the script returns.
+#: A box: the provider's own init is the main process (it runs sshd), and this runs as its startup script, so the
+#: runner goes in the background and the script returns.
 _BOX_TAIL = r"""[ "$OK" = 1 ] && nohup "$R" >>/var/log/krater-runner.log 2>&1 &
 exit 0"""
-
-#: Boxes launch in Vast's SSH mode, where Vast sets up sshd and `onstart` is a startup script run after its init.
-#: Checked on staging (2026-10-11) with plain `ubuntu:24.04`: Vast brings its own sshd, the startup script runs and
-#: starts the runner, authorized_keys holds only the keys the runner installs, and 22/tcp is mapped to a public port.
-BOX_RUNTYPE = "ssh_direct"
 
 
 def _check_sha(runner_sha256: str) -> None:
@@ -78,34 +65,19 @@ def bootstrap_script(runner_sha256: str, *, box: bool = False) -> str:
     return fetch + (_BOX_TAIL if box else _JOB_TAIL)
 
 
-def startup_args(runner_sha256: str) -> tuple[str, ...]:
-    """The arguments to `ENTRYPOINT`, for a job."""
-    return ("-c", bootstrap_script(runner_sha256))
-
-
-def create_request(
+def launch_for(
     job: ComputeJob, *, label: str, bid_price: Decimal | None, env: dict[str, str], runner_sha256: str
-) -> CreateInstance:
-    """Everything Krater asks Vast to start, for a job or a box. The one place that knows Vast's launch modes."""
-    if job.kind is ComputeJobKind.BOX:
-        return CreateInstance(
-            image=job.image,
-            disk_gb=job.disk_gb,
-            label=label,
-            bid_price=bid_price,
-            env=env,
-            runtype=BOX_RUNTYPE,
-            onstart=bootstrap_script(runner_sha256, box=True),
-        )
-    return CreateInstance(
+) -> Launch:
+    """What to start for a job or a box; the provider decides how (`ProviderInfo.create_request`)."""
+    box = job.kind is ComputeJobKind.BOX
+    return Launch(
         image=job.image,
         disk_gb=job.disk_gb,
         label=label,
+        bootstrap=bootstrap_script(runner_sha256, box=box),
+        box=box,
         bid_price=bid_price,
         env=env,
-        runtype="args",
-        onstart=ENTRYPOINT,
-        args=startup_args(runner_sha256),
     )
 
 
