@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -89,6 +90,38 @@ def test_estimate_endpoint_unknown_gpu_key_is_a_field_error(client: TestClient, 
 
     assert response.status_code == 422
     assert "estimator_gpu" in response.json()["errors"]
+
+
+@pytest.mark.parametrize(
+    ("hours", "margin", "field"),
+    [
+        ("nan", "20", "estimator_hours"),
+        ("inf", "20", "estimator_hours"),
+        ("1e308", "20", "estimator_hours"),
+        ("40", "inf", "estimator_margin_percent"),
+        ("40", "1e400", "estimator_margin_percent"),
+    ],
+)
+def test_estimate_endpoint_refuses_non_finite_numbers(
+    client: TestClient, login_as, db_session: Session, hours, margin, field
+) -> None:
+    login_as(MEMBER_SUB)
+    _seed_price(db_session, name="A100", count=1, median_cents=110)
+    csrf = get_csrf_token(client.get("/projects/new").text)
+
+    response = client.post(
+        "/pricing/estimate",
+        data={
+            "csrf_token": csrf,
+            "estimator_gpu": "A100:1",
+            "estimator_hours": hours,
+            "estimator_basis": "on_demand",
+            "estimator_margin_percent": margin,
+        },
+    )
+
+    assert response.status_code == 422
+    assert field in response.json()["errors"]
 
 
 def test_estimate_endpoint_ignores_any_client_sent_rate_or_total(

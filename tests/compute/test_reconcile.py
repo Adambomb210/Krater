@@ -71,6 +71,17 @@ def test_a_lower_charge_never_lowers_a_live_instances_estimate(db_session, membe
     assert row.accrued_microusd == estimate
 
 
+def test_a_kept_estimate_keeps_accruing_from_where_it_was(db_session, member, project, client, fake) -> None:  # noqa: F811
+    """The minute between the last pass and the reconcile must still be billed when the estimate stands."""
+    job, row = _ran_an_hour(db_session, member, project, client, fake)
+    accrued_until = row.accrued_until
+    fake.add_charge(row.vast_instance_id, gpu="0.010", disk="0.001")
+
+    _reconcile(db_session, client)
+
+    assert row.accrued_until == accrued_until
+
+
 def test_a_destroyed_instance_takes_vasts_lower_figure_and_quilt_gets_a_correction(
     db_session,
     member,

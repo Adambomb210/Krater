@@ -373,9 +373,9 @@ async def update_draft(
             actor,
             project=project,
             title=values["title"],
-            repo_url=values["repo_url"] or None,
+            repo_url=values["repo_url"],  # "" clears it
             write_up=values["write_up"],
-            demo_url=values["demo_url"] or None,
+            demo_url=values["demo_url"],  # "" clears it
             tags=parse_tags(values["tags"]),
         )
         db_session.commit()

@@ -113,9 +113,12 @@ def run(session: Session, client: ComputeProvider, settings: Settings, *, now: d
         row.charged_at = now
         if row.destroyed_at is None:
             # Live: Vast's charges may lag what is running now, so never correct downwards here (a lower
-            # estimate would make the budget stop late). Accrual continues from here.
-            row.accrued_microusd = max(estimate, actual)
-            row.accrued_until = now
+            # estimate would make the budget stop late). When Vast's figure is higher it covers up to now, and accrual
+            # continues from here; otherwise the estimate stands and so does its accrual mark, or the time since
+            # the last accrual would never be counted.
+            if actual > estimate:
+                row.accrued_microusd = actual
+                row.accrued_until = now
         else:
             # Destroyed: nothing more will be charged, so Vast's figure is final.
             row.accrued_microusd = actual

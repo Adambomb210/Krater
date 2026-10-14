@@ -153,13 +153,24 @@ def test_a_job_only_sees_its_own_files(http, machine, store) -> None:
     assert [(f["name"], f["size"]) for f in outputs] == [("result.json", 2)]
 
 
-@pytest.mark.parametrize("name", ["../x", "a/../../x", "/abs", "a//b", "dir/", "", "a b"])
+@pytest.mark.parametrize(
+    "name", ["../x", "a/../../x", "/abs", "a//b", "dir/", "", ".", "a/./b", "x/.", "a\b", " lead", "tab	x", "é.pt"]
+)
 def test_upload_names_must_stay_inside_the_jobs_prefix(http, machine, store, name) -> None:
     _, _, token = machine
 
     response = http.post("/runner/v1/files/checkpoints/upload", headers=_auth(token), json={"name": name, "size": 1})
 
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("name", ["epoch=3-step=100.ckpt", "run 2/model.pt", "a+b,c@d~e.bin"])
+def test_names_ml_tools_write_are_accepted(http, machine, store, name) -> None:
+    _, _, token = machine
+
+    response = http.post("/runner/v1/files/checkpoints/upload", headers=_auth(token), json={"name": name, "size": 1})
+
+    assert response.status_code == 200, response.text
 
 
 def test_unknown_areas_are_refused(http, machine, store) -> None:

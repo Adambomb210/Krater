@@ -47,7 +47,9 @@ MAX_UPLOAD_BYTES = 500 * 1024**3
 URL_EXPIRES_SECONDS = 3600
 
 AREAS = ("checkpoints", "outputs", "workspace", "logs")
-_NAME_RE = re.compile(r"^[A-Za-z0-9._\-][A-Za-z0-9._\-/]{0,511}$")
+# Wide enough for the names ML tools write (Lightning's `epoch=3-step=100.ckpt`), with no control characters or
+# backslashes, which would trip the CLI writing them to a member's disk.
+_NAME_RE = re.compile(r"^[A-Za-z0-9._\-=+,@~][A-Za-z0-9._\-=+,@~ /]{0,511}$")
 
 
 def new_token() -> tuple[str, str]:
@@ -196,8 +198,11 @@ def _prefix(instance: ComputeInstance, area: str) -> str:
 
 
 def _key(instance: ComputeInstance, area: str, name: str) -> str:
-    if not _NAME_RE.match(name) or ".." in name.split("/") or "//" in name or name.endswith("/"):
-        raise ValidationFailed({"name": "Use a relative path of letters, digits, '.', '_', '-' and '/'."})
+    segments = name.split("/")
+    if not _NAME_RE.match(name) or any(s in ("", ".", "..") for s in segments) or name != name.strip():
+        raise ValidationFailed(
+            {"name": "Use a relative path of letters, digits, spaces and . _ - = + , @ ~, with '/' between folders."}
+        )
     return _prefix(instance, area) + name
 
 

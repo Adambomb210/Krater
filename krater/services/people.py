@@ -35,6 +35,8 @@ class Person:
     email: str | None = None
     #: What Weave says about their age: `True` under 18, `None` when it didn't say (or didn't answer).
     minor: bool | None = None
+    #: Whether Weave returned a record (with a name). When not, `name` is just the Patchwork ID.
+    known: bool = True
 
     @property
     def label(self) -> str:
@@ -49,8 +51,10 @@ def lookup(weave_client: WeaveClient, sub: str) -> Person:
         logger.warning("Weave unavailable; showing %s by Patchwork ID", sub)
         record = None
     if record is None:
-        return Person(sub=sub, name=sub)
-    return Person(sub=sub, name=record.name or sub, email=record.email or None, minor=record.minor)
+        return Person(sub=sub, name=sub, known=False)
+    return Person(
+        sub=sub, name=record.name or sub, email=record.email or None, minor=record.minor, known=bool(record.name)
+    )
 
 
 def names(weave_client: WeaveClient, users: Iterable[User]) -> dict[uuid.UUID, str]:
@@ -62,12 +66,16 @@ def public_names(
     weave_client: WeaveClient, users: Iterable[User], *, minors: GalleryMinorNames
 ) -> tuple[list[str], int]:
     """How the public gallery names `users`: (the names it shows, how many it leaves unnamed). Anyone Weave doesn't
-    say is an adult counts as under 18 here, since this is public: a first name is all that unknown age costs."""
+    say is an adult counts as under 18 here, since this is public: a first name is all that unknown age costs. Someone
+    Weave doesn't return (gone, consent withdrawn, or Weave down) is left unnamed: the fallback label is their
+    Patchwork ID, which never goes on a public page."""
     shown: list[str] = []
     unnamed = 0
     for user in users:
         person = lookup(weave_client, user.weave_sub)
-        if person.minor is False or minors is GalleryMinorNames.FULL:
+        if not person.known:
+            unnamed += 1
+        elif person.minor is False or minors is GalleryMinorNames.FULL:
             shown.append(person.label)
         elif minors is GalleryMinorNames.FIRST:
             shown.append(person.label.split()[0] if person.label.strip() else person.label)

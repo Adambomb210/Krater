@@ -98,7 +98,7 @@ def parse(
         if name not in ("title", "repo_url"):
             changes[name] = values[name]
     changes["title"] = values["title"]
-    changes["repo_url"] = values["repo_url"] or None
+    changes["repo_url"] = values["repo_url"]  # "" clears it; update_draft takes None as "unchanged"
     if values["affiliation"] not in project_service.AFFILIATIONS:
         posted.errors["affiliation"] = "Choose one of the answers."
     if len(values["summary"]) > project_service.SUMMARY_MAX_CHARS:
