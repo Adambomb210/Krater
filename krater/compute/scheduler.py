@@ -236,20 +236,20 @@ class Scheduler:
             _finish(job, ComputeJobState.FAILED, "Stopped: the project reached its budget.", now=self.now)
             _event(self.session, job, "budget_stop", "Stopped: the project reached its budget.", now=self.now)
             for row in job.instances:
-                if row.is_live and row.vast_instance_id is not None:
+                if row.is_live and row.provider_instance_id is not None:
                     try:
                         self._destroy(row, "budget reached")
                     except ProviderError:
                         # The job is finished, so the next pass's watch retries the destroy.
-                        logger.exception("krater.compute: budget stop of instance %s failed", row.vast_instance_id)
+                        logger.exception("krater.compute: budget stop of instance %s failed", row.provider_instance_id)
                         self.result.errors += 1
-                    stopped.append(row.vast_instance_id)
+                    stopped.append(row.provider_instance_id)
         budget_alerts.record_teardown(
             self.session,
             project,
             ceiling_cents=ceiling_cents,
             spend_cents=spend_cents,
-            details={"vast_instance_ids": stopped},
+            details={"provider_instance_ids": stopped},
         )
 
     # -- 2. Lost creates -------------------------------------------------------------------------------
@@ -260,7 +260,7 @@ class Scheduler:
             found = by_label.get(row.label)
             job = row.job
             if found is not None and self.session.scalar(
-                sa.select(ComputeInstance.id).where(ComputeInstance.vast_instance_id == found.id, self._ours())
+                sa.select(ComputeInstance.id).where(ComputeInstance.provider_instance_id == found.id, self._ours())
             ):
                 # Vast ids are never reused, so this is a stale label match (or a fake Vast restarted with its counter).
                 # Recording it would break the unique id and with it every scheduler pass; the sweep handles the
@@ -270,9 +270,9 @@ class Scheduler:
                 )
                 found = None
             if found is not None:
-                row.vast_instance_id = found.id
+                row.provider_instance_id = found.id
                 row.state = ComputeInstanceState.PROVISIONING
-                row.machine_id = found.machine_id
+                row.provider_machine_id = found.machine_id
                 _event(
                     self.session,
                     job,
@@ -280,7 +280,7 @@ class Scheduler:
                     f"Found instance {found.id} after an unconfirmed create.",
                     now=self.now,
                     instance=row,
-                    vast_instance_id=found.id,
+                    provider_instance_id=found.id,
                 )
             elif self.now - row.created_at >= CREATE_SETTLE:
                 row.state = ComputeInstanceState.CREATE_FAILED
@@ -328,17 +328,17 @@ class Scheduler:
                             f"Destroyed instance {instance.id}, which Krater no longer expected.",
                             now=self.now,
                             instance=row,
-                            vast_instance_id=instance.id,
+                            provider_instance_id=instance.id,
                         )
             except ProviderError:
                 logger.exception("krater.compute: sweeping instance %s failed", instance.id)
                 self.result.errors += 1
         self.session.commit()
 
-    def _destroy_and_confirm(self, vast_instance_id: int) -> bool:
+    def _destroy_and_confirm(self, provider_instance_id: str) -> bool:
         """Destroy and check it's gone. `True` once Vast no longer shows it."""
-        self.client.destroy_instance(vast_instance_id)
-        return self.client.show_instance(vast_instance_id) is None
+        self.client.destroy_instance(provider_instance_id)
+        return self.client.show_instance(provider_instance_id) is None
 
     # -- 4. Watch --------------------------------------------------------------------------------------
 
@@ -352,14 +352,14 @@ class Scheduler:
                     ComputeInstanceState.STOPPED,
                 ]
             ),
-            ComputeInstance.vast_instance_id.is_not(None),
+            ComputeInstance.provider_instance_id.is_not(None),
             self._ours(),
         )
         for row in list(self.session.scalars(stmt)):
             try:
-                self._watch_one(row, listing.get(row.vast_instance_id))
+                self._watch_one(row, listing.get(row.provider_instance_id))
             except ProviderError:
-                logger.exception("krater.compute: watching instance %s failed", row.vast_instance_id)
+                logger.exception("krater.compute: watching instance %s failed", row.provider_instance_id)
                 self.result.errors += 1
             self.session.commit()
 
@@ -367,19 +367,19 @@ class Scheduler:
         if row.destroy_requested_at is None:
             row.destroy_requested_at = self.now
             row.destroy_reason = reason
-        assert row.vast_instance_id is not None
-        if self._destroy_and_confirm(row.vast_instance_id):
+        assert row.provider_instance_id is not None
+        if self._destroy_and_confirm(row.provider_instance_id):
             row.state = ComputeInstanceState.DESTROYED
             row.destroyed_at = self.now
-            self.result.destroyed.append(row.vast_instance_id)
+            self.result.destroyed.append(row.provider_instance_id)
             _event(
                 self.session,
                 row.job,
                 "destroyed",
-                f"Destroyed instance {row.vast_instance_id}: {reason}",
+                f"Destroyed instance {row.provider_instance_id}: {reason}",
                 now=self.now,
                 instance=row,
-                vast_instance_id=row.vast_instance_id,
+                provider_instance_id=row.provider_instance_id,
                 reason=reason,
             )
             return True
@@ -387,7 +387,7 @@ class Scheduler:
             self.session,
             row.job,
             "destroy_pending",
-            f"Instance {row.vast_instance_id} is still listed after destroy; retrying next pass.",
+            f"Instance {row.provider_instance_id} is still listed after destroy; retrying next pass.",
             now=self.now,
             instance=row,
         )
@@ -396,7 +396,7 @@ class Scheduler:
     def _watch_one(self, row: ComputeInstance, seen: Instance | None) -> None:
         job = row.job
         if seen is None:
-            seen = self.client.show_instance(row.vast_instance_id)  # the list may lag; ask directly
+            seen = self.client.show_instance(row.provider_instance_id)  # the list may lag; ask directly
         if seen is None:
             row.state = ComputeInstanceState.DESTROYED
             row.destroyed_at = self.now
@@ -406,10 +406,10 @@ class Scheduler:
                     self.session,
                     job,
                     "destroyed",
-                    f"Instance {row.vast_instance_id} is gone: {row.destroy_reason or 'requested'}",
+                    f"Instance {row.provider_instance_id} is gone: {row.destroy_reason or 'requested'}",
                     now=self.now,
                     instance=row,
-                    vast_instance_id=row.vast_instance_id,
+                    provider_instance_id=row.provider_instance_id,
                 )
                 if job.state is ComputeJobState.PAUSED or row.destroy_reason == MOVED_BY_MEMBER:
                     self._requeue_moved(job)
@@ -418,7 +418,7 @@ class Scheduler:
                     self.session,
                     job,
                     "lost",
-                    f"Instance {row.vast_instance_id} disappeared from Vast.",
+                    f"Instance {row.provider_instance_id} disappeared from Vast.",
                     now=self.now,
                     instance=row,
                 )
@@ -432,11 +432,11 @@ class Scheduler:
             row.watch_resumed_at = self.now
             logger.warning(
                 "krater.compute: instance %s unwatched since %s; runner deadlines restart now",
-                row.vast_instance_id,
+                row.provider_instance_id,
                 previously_seen.isoformat(),
             )
         row.last_seen_at = self.now
-        row.last_vast_status = seen.actual_status
+        row.last_provider_status = seen.actual_status
         self._record_ssh(row, seen)
 
         if row.destroy_requested_at is not None:
@@ -655,9 +655,11 @@ class Scheduler:
         """Ask Vast to start a job's self-stopped machine. Vast never resumes a machine stopped on purpose by itself
         (unlike an outbid one), so a failed call is retried on every pass until it runs (`start_requested_at`)."""
         try:
-            self.client.start_instance(row.vast_instance_id)
+            self.client.start_instance(row.provider_instance_id)
         except ProviderError:
-            logger.warning("krater.compute: starting self-stopped instance %s failed; retrying", row.vast_instance_id)
+            logger.warning(
+                "krater.compute: starting self-stopped instance %s failed; retrying", row.provider_instance_id
+            )
             self.result.errors += 1
 
     # -- Boxes -----------------------------------------------------------------------------------------
@@ -703,7 +705,7 @@ class Scheduler:
             self._stop_box(row, job, row.stop_reason or "requested", synced=synced)
 
     def _stop_box(self, row: ComputeInstance, job: ComputeJob, reason: str, *, synced: bool = False) -> None:
-        self.client.stop_instance(row.vast_instance_id)
+        self.client.stop_instance(row.provider_instance_id)
         row.state = ComputeInstanceState.STOPPED
         row.stopped_at = self.now
         row.stop_requested_at = None
@@ -756,7 +758,7 @@ class Scheduler:
                 _event(self.session, job, "resumed", "The box is running again.", now=self.now, instance=row)
             elif self.now - row.start_requested_at >= timedelta(minutes=policy.box_resume_timeout_minutes):
                 # Vast keeps trying while the instance's intended state is running; take that back.
-                self.client.stop_instance(row.vast_instance_id)
+                self.client.stop_instance(row.provider_instance_id)
                 row.start_requested_at = None
                 synced = row.last_synced_at.strftime("%Y-%m-%d %H:%M UTC") if row.last_synced_at else "never"
                 job.state_reason = (
@@ -765,7 +767,7 @@ class Scheduler:
                 )
                 _event(self.session, job, "resume_blocked", job.state_reason, now=self.now, instance=row)
             else:
-                self.client.start_instance(row.vast_instance_id)
+                self.client.start_instance(row.provider_instance_id)
             return
         if seen.is_running and "running" in (seen.intended_status, seen.cur_state):
             # Running and meant to be, without Krater starting it: a member can start their own instance with the
@@ -775,7 +777,7 @@ class Scheduler:
             if previously_seen is not None:
                 extra = round(row.gpu_microusd * (self.now - previously_seen).total_seconds() / 3600)
                 row.accrued_microusd += extra
-            self.client.stop_instance(row.vast_instance_id)
+            self.client.stop_instance(row.provider_instance_id)
             _event(
                 self.session,
                 job,
@@ -880,7 +882,7 @@ class Scheduler:
             return
         _, found = searched
         choice = offers.choose(
-            [offer for offer in found if offer.machine_id != row.machine_id],
+            [offer for offer in found if offer.machine_id != row.provider_machine_id],
             rental_type=rental_type,
             disk_gb=job.disk_gb,
             margin_percent=policy.bid_margin_percent,
@@ -916,7 +918,7 @@ class Scheduler:
         new_bid = microusd_to_usd(new_gpu).quantize(offers.BID_QUANTUM, rounding=ROUND_FLOOR)
         if usd_to_microusd(new_bid) <= row.gpu_microusd:
             return  # rounded down to the bid it has: it is at the max already
-        self.client.change_bid(row.vast_instance_id, new_bid)
+        self.client.change_bid(row.provider_instance_id, new_bid)
         _event(
             self.session,
             job,
@@ -933,7 +935,7 @@ class Scheduler:
 
     def _start_queued(self) -> None:
         stmt = sa.select(ComputeJob).where(ComputeJob.state == ComputeJobState.QUEUED).order_by(ComputeJob.queued_at)
-        taken: set[int] = set()
+        taken: set[str] = set()
         try:
             for job in list(self.session.scalars(stmt)):
                 try:
@@ -977,7 +979,7 @@ class Scheduler:
         self.session.refresh(job, with_for_update=True)
         return job.state in states if states else job.is_active
 
-    def _start_one(self, job: ComputeJob, taken: set[int]) -> bool:
+    def _start_one(self, job: ComputeJob, taken: set[str]) -> bool:
         """Try to rent for `job`. Returns `True` when the pass should stop starting jobs (Vast unreachable)."""
         if not self._still_active(job, ComputeJobState.QUEUED):
             return False  # cancelled since this pass listed the queue
@@ -1084,7 +1086,7 @@ class Scheduler:
         )
         return sum(max(0, hold - spent) for hold, spent in rows)
 
-    def _rent(self, job: ComputeJob, choice: offers.Choice, *, hold_cents: int, taken: set[int]) -> bool:
+    def _rent(self, job: ComputeJob, choice: offers.Choice, *, hold_cents: int, taken: set[str]) -> bool:
         if job.kind is ComputeJobKind.BOX and self._account_has_ssh_keys():
             job.state_reason = (
                 "Krater doesn't start boxes while the Vast account has SSH keys: they may reach every machine. "
@@ -1100,8 +1102,8 @@ class Scheduler:
             provider=self.provider.name,
             label=label,
             state=ComputeInstanceState.CREATING,
-            offer_id=choice.offer.id,
-            machine_id=choice.offer.machine_id,
+            provider_offer_id=choice.offer.id,
+            provider_machine_id=choice.offer.machine_id,
             gpu_name=choice.offer.gpu_name,
             interruptible=choice.rental_type == "bid",
             gpu_microusd=choice.gpu_microusd,
@@ -1178,7 +1180,7 @@ class Scheduler:
                 error=exc.error,
             )
             return False
-        row.vast_instance_id = vast_id
+        row.provider_instance_id = vast_id
         row.state = ComputeInstanceState.PROVISIONING
         _event(
             self.session,
@@ -1187,7 +1189,7 @@ class Scheduler:
             f"Rented instance {vast_id}.",
             now=self.now,
             instance=row,
-            vast_instance_id=vast_id,
+            provider_instance_id=vast_id,
         )
         self.result.rented.append(label)
         return False

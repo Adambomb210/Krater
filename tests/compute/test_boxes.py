@@ -28,7 +28,7 @@ def _running_box(db_session, member, project, client, fake):  # noqa: F811
     _pass(db_session, client)
     row = _instance(db_session, job)
     fake.set_status(
-        row.vast_instance_id,
+        row.provider_instance_id,
         "running",
         public_ipaddr="198.51.100.7",
         ports={"22/tcp": [{"HostIp": "0.0.0.0", "HostPort": "41022"}]},
@@ -57,7 +57,7 @@ def test_a_box_launches_in_ssh_mode_with_its_runner_in_the_background(
 
     _pass(db_session, client)
 
-    created = fake.instances[_instance(db_session, job).vast_instance_id]
+    created = fake.instances[_instance(db_session, job).provider_instance_id]
     assert created["runtype"] == "ssh_direct"
     assert "nohup" in created["onstart"] and created["args"] is None
     assert fake.search_bodies[-1]["direct_port_count"] == {"gte": 1}
@@ -99,7 +99,7 @@ def test_an_idle_box_saves_its_workspace_then_stops(db_session, member, project,
     _pass(db_session, client, NOW + timedelta(minutes=35))
 
     assert row.state is ComputeInstanceState.STOPPED and job.state is ComputeJobState.STOPPED
-    assert fake.instances[row.vast_instance_id]["intended_status"] == "stopped"
+    assert fake.instances[row.provider_instance_id]["intended_status"] == "stopped"
     assert "saved" in job.state_reason and "not confirmed" not in job.state_reason
     del reply
 
@@ -170,7 +170,7 @@ def test_resume_when_the_gpu_is_taken_tells_the_member_and_keeps_the_disk(
     compute_jobs.stop_box(db_session, member, job=job, now=NOW + timedelta(minutes=3))
     runner_api.synced(db_session, row, now=NOW + timedelta(minutes=3, seconds=10))
     _pass(db_session, client, NOW + timedelta(minutes=4))
-    fake.gpu_taken[row.vast_instance_id] = True
+    fake.gpu_taken[row.provider_instance_id] = True
 
     compute_jobs.resume_box(db_session, member, job=job, now=NOW + timedelta(minutes=10))
     for minute in range(11, 22):
@@ -178,7 +178,7 @@ def test_resume_when_the_gpu_is_taken_tells_the_member_and_keeps_the_disk(
 
     assert job.state is ComputeJobState.STOPPED and row.state is ComputeInstanceState.STOPPED
     assert "GPU is taken" in job.state_reason and "workspace saved at" in job.state_reason
-    assert row.vast_instance_id in fake.instances  # never destroyed on its own
+    assert row.provider_instance_id in fake.instances  # never destroyed on its own
     assert "resume_blocked" in _events(db_session, job)
 
 
@@ -193,8 +193,8 @@ def test_moving_a_stopped_box_starts_it_elsewhere_resumed(db_session, member, pr
 
     assert row.state is ComputeInstanceState.DESTROYED
     new = _instance(db_session, job)
-    assert new.attempt == 2 and new.vast_instance_id in fake.instances
-    assert "KRATER_RESUMED=1" in fake.instances[new.vast_instance_id]["env"]
+    assert new.attempt == 2 and new.provider_instance_id in fake.instances
+    assert "KRATER_RESUMED=1" in fake.instances[new.provider_instance_id]["env"]
 
 
 def test_a_box_cancelled_while_moving_stays_cancelled(db_session, member, project, client, fake) -> None:  # noqa: F811
@@ -219,13 +219,13 @@ def test_a_box_started_outside_krater_is_billed_and_stopped_again(db_session, me
     runner_api.synced(db_session, row, now=NOW + timedelta(minutes=3, seconds=10))
     _pass(db_session, client, NOW + timedelta(minutes=4))
     _pass(db_session, client, NOW + timedelta(minutes=5))
-    fake.set_status(row.vast_instance_id, "running", intended_status="running")  # the member used the container key
+    fake.set_status(row.provider_instance_id, "running", intended_status="running")  # the member used the container key
     before = row.accrued_microusd
 
     _pass(db_session, client, NOW + timedelta(minutes=65))
 
     assert row.state is ComputeInstanceState.STOPPED
-    assert fake.instances[row.vast_instance_id]["intended_status"] == "stopped"
+    assert fake.instances[row.provider_instance_id]["intended_status"] == "stopped"
     assert row.accrued_microusd - before >= row.gpu_microusd  # an hour of GPU on top of the disk
     assert "unexpected_start" in _events(db_session, job)
 
@@ -254,19 +254,19 @@ def test_a_silent_runner_stops_a_box_instead_of_destroying_it(db_session, member
         _pass(db_session, client, NOW + timedelta(minutes=minute))
 
     assert row.state is ComputeInstanceState.STOPPED and job.state is ComputeJobState.STOPPED
-    assert row.vast_instance_id in fake.instances
+    assert row.provider_instance_id in fake.instances
 
 
 def test_a_box_that_stopped_itself_without_krater_shows_as_stopped(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_box(db_session, member, project, client, fake)
     _beat(db_session, row, 3, sessions=1)
-    fake.set_status(row.vast_instance_id, "stopped", intended_status="stopped")
+    fake.set_status(row.provider_instance_id, "stopped", intended_status="stopped")
 
     _pass(db_session, client, NOW + timedelta(minutes=200))
 
     assert row.state is ComputeInstanceState.STOPPED and job.state is ComputeJobState.STOPPED
     assert "Stopped itself" in job.state_reason and "resume it" in job.state_reason
-    assert row.vast_instance_id in fake.instances  # its disk is kept
+    assert row.provider_instance_id in fake.instances  # its disk is kept
     assert "self_stopped" in _events(db_session, job)
 
 
@@ -284,7 +284,7 @@ def test_max_runtime_counts_running_time_only(db_session, member, project, clien
     job = _box(db_session, member, project, max_runtime_minutes=8 * 60)
     _pass(db_session, client)
     row = _instance(db_session, job)
-    fake.set_status(row.vast_instance_id, "running")
+    fake.set_status(row.provider_instance_id, "running")
     runner_api.start(db_session, row, now=NOW + timedelta(minutes=1), settings=get_settings())
     for minute in range(2, 63):
         _beat(db_session, row, minute, sessions=1)
@@ -309,7 +309,7 @@ def test_a_box_at_its_max_runtime_is_stopped_not_destroyed(db_session, member, p
     job = _box(db_session, member, project, max_runtime_minutes=30)
     _pass(db_session, client)
     row = _instance(db_session, job)
-    fake.set_status(row.vast_instance_id, "running")
+    fake.set_status(row.provider_instance_id, "running")
     runner_api.start(db_session, row, now=NOW + timedelta(minutes=1), settings=get_settings())
     for minute in range(2, 34):
         _beat(db_session, row, minute, sessions=1)
@@ -320,7 +320,7 @@ def test_a_box_at_its_max_runtime_is_stopped_not_destroyed(db_session, member, p
 
     assert row.state is ComputeInstanceState.STOPPED and job.state is ComputeJobState.STOPPED
     assert "max runtime" in job.state_reason
-    assert row.vast_instance_id in fake.instances
+    assert row.provider_instance_id in fake.instances
 
 
 def test_vasts_lag_after_a_stop_is_not_a_member_restart(db_session, member, project, client, fake) -> None:  # noqa: F811

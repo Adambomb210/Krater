@@ -26,7 +26,7 @@ def _running(db_session, member, project, client, fake, **overrides):  # noqa: F
     job = _submit(db_session, member, project, **overrides)
     _pass(db_session, client)  # rented at NOW
     row = _instance(db_session, job)
-    fake.set_status(row.vast_instance_id, "running")
+    fake.set_status(row.provider_instance_id, "running")
     _pass(db_session, client, NOW + timedelta(minutes=4))  # pulled for 4 minutes: disk only
     _runner_starts(db_session, fake, row, NOW + timedelta(minutes=4))
     return job, row
@@ -46,7 +46,7 @@ def test_disk_bills_from_create_and_the_gpu_only_while_running(db_session, membe
 def test_paused_time_bills_disk_only(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running(db_session, member, project, client, fake)
     _pass(db_session, client, NOW + timedelta(minutes=5))
-    fake.set_status(row.vast_instance_id, "stopped")
+    fake.set_status(row.provider_instance_id, "stopped")
     _pass(db_session, client, NOW + timedelta(minutes=6))  # running until here, paused from here
     before = row.accrued_microusd
 

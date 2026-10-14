@@ -97,10 +97,18 @@ class StartInfo:
     # `runner_self_stop_minutes`), through Vast's API with the instance's own key, which Vast puts in the container.
     # -1 turns the switch off, for a provider whose machines can't stop themselves (`Capabilities.self_stop`).
     self_stop_after_seconds: int = 0
+    # Wire names the runner reads (`runner/api.go`): Vast's integer id for the machine and its API's address.
     vast_instance_id: int | None = None
     vast_api_url: str = ""
     # The project's secrets, name -> value. Never logged or shown (kept out of the repr).
     secrets: dict[str, str] = field(default_factory=dict, repr=False)
+
+
+def _vast_wire_id(instance: ComputeInstance) -> int | None:
+    pid = instance.provider_instance_id
+    if instance.provider != "vast" or pid is None or not (pid.isascii() and pid.isdigit()):
+        return None
+    return int(pid)
 
 
 def start(session: Session, instance: ComputeInstance, *, now: datetime, settings: Settings) -> StartInfo:
@@ -137,7 +145,7 @@ def start(session: Session, instance: ComputeInstance, *, now: datetime, setting
         kind=job.kind.value,
         ssh_keys=keys,
         self_stop_after_seconds=self_stop_seconds,
-        vast_instance_id=instance.vast_instance_id,
+        vast_instance_id=_vast_wire_id(instance),
         vast_api_url=settings.vast_api_url,
         secrets=secrets_env,
     )

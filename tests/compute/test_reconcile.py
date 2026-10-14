@@ -17,7 +17,7 @@ def _ran_an_hour(db_session, member, project, client, fake):  # noqa: F811
     job = _submit(db_session, member, project)
     _pass(db_session, client)
     row = _instance(db_session, job)
-    fake.set_status(row.vast_instance_id, "running")
+    fake.set_status(row.provider_instance_id, "running")
     _pass(db_session, client, NOW + timedelta(minutes=4))
     _runner_starts(db_session, fake, row, NOW + timedelta(minutes=4))
     _beat(db_session, row, NOW + timedelta(minutes=63))
@@ -32,7 +32,7 @@ def _reconcile(db_session, client, minutes=65):
 def test_vasts_charges_replace_the_estimate(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _ran_an_hour(db_session, member, project, client, fake)
     estimate = row.accrued_microusd  # about $0.0644
-    fake.add_charge(row.vast_instance_id, gpu="0.058", disk="0.009")  # 4% over the estimate
+    fake.add_charge(row.provider_instance_id, gpu="0.058", disk="0.009")  # 4% over the estimate
 
     result = _reconcile(db_session, client)
 
@@ -41,12 +41,12 @@ def test_vasts_charges_replace_the_estimate(db_session, member, project, client,
     assert row.accrued_microusd == 67_000
     check = db_session.scalars(sa.select(SpendReconciliation).where(SpendReconciliation.project_id == project.id)).one()
     assert check.estimate_microusd == estimate and check.actual_microusd == 67_000 and not check.alerted
-    assert check.details[0]["vast_instance_id"] == row.vast_instance_id
+    assert check.details[0]["provider_instance_id"] == row.provider_instance_id
 
 
 def test_a_big_difference_alerts_admins_and_raises_the_spend(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _ran_an_hour(db_session, member, project, client, fake)
-    fake.add_charge(row.vast_instance_id, gpu="0.090", disk="0.010")  # $0.10 against about $0.064
+    fake.add_charge(row.provider_instance_id, gpu="0.090", disk="0.010")  # $0.10 against about $0.064
 
     result = _reconcile(db_session, client)
 
@@ -63,7 +63,7 @@ def test_a_lower_charge_never_lowers_a_live_instances_estimate(db_session, membe
     """Charges for a running machine may lag: correcting downwards would make the budget stop late."""
     job, row = _ran_an_hour(db_session, member, project, client, fake)
     estimate = row.accrued_microusd
-    fake.add_charge(row.vast_instance_id, gpu="0.010", disk="0.001")
+    fake.add_charge(row.provider_instance_id, gpu="0.010", disk="0.001")
 
     _reconcile(db_session, client)
 
@@ -75,7 +75,7 @@ def test_a_kept_estimate_keeps_accruing_from_where_it_was(db_session, member, pr
     """The minute between the last pass and the reconcile must still be billed when the estimate stands."""
     job, row = _ran_an_hour(db_session, member, project, client, fake)
     accrued_until = row.accrued_until
-    fake.add_charge(row.vast_instance_id, gpu="0.010", disk="0.001")
+    fake.add_charge(row.provider_instance_id, gpu="0.010", disk="0.001")
 
     _reconcile(db_session, client)
 
@@ -96,7 +96,7 @@ def test_a_destroyed_instance_takes_vasts_lower_figure_and_quilt_gets_a_correcti
     _pass(db_session, client, NOW + timedelta(minutes=65))
     assert row.destroyed_at is not None
     before = budget.latest_spend_cents(db_session, project)
-    fake.add_charge(row.vast_instance_id, gpu="0.010", disk="0.001")
+    fake.add_charge(row.provider_instance_id, gpu="0.010", disk="0.001")
 
     _reconcile(db_session, client, minutes=70)
 
@@ -127,13 +127,13 @@ def test_charges_for_an_unconfirmed_create_count_against_its_job(db_session, mem
     refusing._http = httpx.Client(transport=httpx.MockTransport(handler))
     _pass(db_session, refusing)  # refused (a 4xx), but the fake did rent it
     row = _instance(db_session, job)
-    vast_id = next(iter(fake.instances))
+    vast_id = str(next(iter(fake.instances)))
     fake.add_charge(vast_id, gpu="0.002", disk="0.001")
 
     result = _reconcile(db_session, fake.client(), minutes=10)
 
     assert result.unknown_sources == []
-    assert row.vast_instance_id == vast_id and row.state.value == "create_failed"
+    assert row.provider_instance_id == vast_id and row.state.value == "create_failed"
     assert row.accrued_microusd == 3_000
     assert job.spend_cents == 1
 
@@ -183,7 +183,7 @@ def test_a_projects_spend_is_rounded_up_once_not_per_job(db_session, member, pro
                 attempt=1,
                 label=f"krater-test-short-{i}",
                 state=ComputeInstanceState.DESTROYED,
-                offer_id=1000 + i,
+                provider_offer_id=str(1000 + i),
                 gpu_name="RTX 3060",
                 interruptible=True,
                 gpu_microusd=50_000,

@@ -67,7 +67,7 @@ def _passes(db_session, client, first: int, last: int) -> None:
 
 def _token(fake, row) -> str:
     """The runner token Krater sent to the machine (it keeps only the hash)."""
-    env = fake.instances[row.vast_instance_id]["env"]
+    env = fake.instances[row.provider_instance_id]["env"]
     return env.split("KRATER_JOB_TOKEN=")[1].split("'")[0].split(" ")[0]
 
 
@@ -120,11 +120,11 @@ def test_a_job_rents_the_cheapest_offer_at_or_under_its_target(db_session, membe
     assert result.rented == [row.label]
     assert row.label == f"krater-job-{job.id.hex[:12]}-1"
     assert row.state is ComputeInstanceState.PROVISIONING
-    assert row.offer_id == 1001
+    assert row.provider_offer_id == "1001"
     assert row.interruptible is True
     assert row.gpu_microusd == 55_000  # min_bid $0.05 plus the 10% margin
     assert row.full_microusd == CHEAPEST_3060_FULL
-    created = fake.instances[row.vast_instance_id]
+    created = fake.instances[row.provider_instance_id]
     assert created["is_bid"] is True
     assert created["label"] == row.label
     # The image's ENTRYPOINT is replaced by sh (in args mode, Vast's onstart is the entrypoint override).
@@ -153,7 +153,7 @@ def test_the_job_runs_once_vast_reports_running(db_session, member, project, cli
 
     _pass(db_session, client, NOW + timedelta(minutes=1))  # still pulling
     assert job.state is ComputeJobState.STARTING
-    fake.set_status(row.vast_instance_id, "running")
+    fake.set_status(row.provider_instance_id, "running")
     _pass(db_session, client, NOW + timedelta(minutes=5))
 
     assert row.state is ComputeInstanceState.RUNNING
@@ -170,7 +170,7 @@ def test_an_on_demand_job_pays_dph_base(db_session, member, project, client, fak
     row = _instance(db_session, job)
     assert row.interruptible is False
     assert row.gpu_microusd == 60_000
-    assert fake.instances[row.vast_instance_id]["is_bid"] is False
+    assert fake.instances[row.provider_instance_id]["is_bid"] is False
 
 
 def test_two_jobs_never_rent_the_same_offer(db_session, member, project, client) -> None:  # noqa: F811
@@ -179,7 +179,10 @@ def test_two_jobs_never_rent_the_same_offer(db_session, member, project, client)
 
     _pass(db_session, client, NOW + timedelta(seconds=2))
 
-    assert {_instance(db_session, first).offer_id, _instance(db_session, second).offer_id} == {1001, 1003}
+    assert {_instance(db_session, first).provider_offer_id, _instance(db_session, second).provider_offer_id} == {
+        "1001",
+        "1003",
+    }
 
 
 # -- Budget and caps -----------------------------------------------------------------------------------
@@ -397,13 +400,13 @@ def test_a_create_whose_response_was_lost_is_found_by_its_label(db_session, memb
 
     _pass(db_session, _timing_out_client(fake))
     row = _instance(db_session, job)
-    assert row.state is ComputeInstanceState.CREATING and row.vast_instance_id is None
+    assert row.state is ComputeInstanceState.CREATING and row.provider_instance_id is None
     assert len(fake.instances) == 1  # Vast did rent it
 
     _pass(db_session, client, NOW + timedelta(minutes=1))
 
     assert row.state is ComputeInstanceState.PROVISIONING
-    assert row.vast_instance_id == next(iter(fake.instances))
+    assert row.provider_instance_id == str(next(iter(fake.instances)))
     assert len(fake.instances) == 1  # not swept, not rented twice
 
 
@@ -480,7 +483,7 @@ def test_a_create_answered_200_without_success_is_settled_by_its_label(db_sessio
     _pass(db_session, fake.client(), NOW + timedelta(minutes=1))
 
     assert row.state is ComputeInstanceState.PROVISIONING
-    assert row.vast_instance_id == next(iter(fake.instances))
+    assert row.provider_instance_id == str(next(iter(fake.instances)))
     assert len(fake.instances) == 1  # adopted: not swept, not rented again
 
 
@@ -508,7 +511,7 @@ def _running_job(db_session, member, project, client, fake, **overrides):  # noq
     job = _submit(db_session, member, project, **overrides)
     _pass(db_session, client)
     row = _instance(db_session, job)
-    fake.set_status(row.vast_instance_id, "running")
+    fake.set_status(row.provider_instance_id, "running")
     _pass(db_session, client, NOW + timedelta(minutes=5))
     _runner_starts(db_session, fake, row, NOW + timedelta(minutes=5))
     return job, row
@@ -516,7 +519,7 @@ def _running_job(db_session, member, project, client, fake, **overrides):  # noq
 
 def test_an_outbid_job_waits_raises_its_bid_then_moves(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_job(db_session, member, project, client, fake)
-    vast_id = row.vast_instance_id
+    vast_id = row.provider_instance_id
     fake.set_status(vast_id, "stopped")
 
     _pass(db_session, client, NOW + timedelta(minutes=6))
@@ -535,15 +538,15 @@ def test_an_outbid_job_waits_raises_its_bid_then_moves(db_session, member, proje
     assert "bid_raised" in _events(db_session, job)
     # Requeued, and in the same pass rented again elsewhere as attempt 2, which resumes.
     new = _instance(db_session, job)
-    assert new.attempt == 2 and new.vast_instance_id != vast_id
-    assert "KRATER_RESUMED=1" in fake.instances[new.vast_instance_id]["env"]
+    assert new.attempt == 2 and new.provider_instance_id != vast_id
+    assert "KRATER_RESUMED=1" in fake.instances[new.provider_instance_id]["env"]
 
 
 def test_a_move_whose_gone_check_was_rate_limited_still_moves(db_session, member, project, client, fake) -> None:  # noqa: F811
     """Staging, 2026-10-11: the destroy went through, the check that it was gone got a 429, and the next pass found
     the machine gone but left the job paused with nothing running."""
     job, row = _running_job(db_session, member, project, client, fake)
-    vast_id = row.vast_instance_id
+    vast_id = row.provider_instance_id
     fake.set_status(vast_id, "stopped")
     _pass(db_session, client, NOW + timedelta(minutes=6))
     deleted = []
@@ -570,7 +573,7 @@ def test_a_move_whose_gone_check_was_rate_limited_still_moves(db_session, member
 def test_an_active_job_left_without_a_machine_is_requeued(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_job(db_session, member, project, client, fake)
     row.state = ComputeInstanceState.DESTROYED  # however it happened
-    fake.instances.pop(row.vast_instance_id)
+    fake.instances.pop(row.provider_instance_id)
     db_session.commit()
 
     _pass(db_session, client, NOW + timedelta(minutes=7))
@@ -581,10 +584,10 @@ def test_an_active_job_left_without_a_machine_is_requeued(db_session, member, pr
 
 def test_a_paused_job_that_resumes_runs_again(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_job(db_session, member, project, client, fake)
-    fake.set_status(row.vast_instance_id, "stopped")
+    fake.set_status(row.provider_instance_id, "stopped")
     _pass(db_session, client, NOW + timedelta(minutes=6))
 
-    fake.set_status(row.vast_instance_id, "running")
+    fake.set_status(row.provider_instance_id, "running")
     _pass(db_session, client, NOW + timedelta(minutes=7))
 
     assert job.state is ComputeJobState.RUNNING and row.paused_since is None
@@ -604,7 +607,7 @@ def _limit_order(db_session, member, project, client, fake, limit=65_000):  # no
         on_outbid=ComputeOutbid.HOLD,
     )
     _beat(db_session, row, NOW + timedelta(minutes=6))
-    fake.set_status(row.vast_instance_id, "stopped", intended_status="stopped")
+    fake.set_status(row.provider_instance_id, "stopped", intended_status="stopped")
     _pass(db_session, client, NOW + timedelta(minutes=6))
     return job, row
 
@@ -617,12 +620,12 @@ def test_a_limit_order_holds_its_outbid_machine_while_nothing_else_is_under_its_
 
     _passes(db_session, client, 7, 90)  # well past the 30-minute "move after"
 
-    assert row.state is ComputeInstanceState.PAUSED and row.vast_instance_id in fake.instances
+    assert row.state is ComputeInstanceState.PAUSED and row.provider_instance_id in fake.instances
     assert job.attempts == 1 and "Keeping this machine" in job.state_reason
     assert row.full_microusd <= 65_000  # the bid rose to the limit, and no further
     assert 1 <= _events(db_session, job).count("bid_raised") <= 3  # not once a minute at the limit
 
-    fake.set_status(row.vast_instance_id, "running", intended_status="running")  # the market came back down
+    fake.set_status(row.provider_instance_id, "running", intended_status="running")  # the market came back down
     _pass(db_session, client, NOW + timedelta(minutes=91))
     assert job.state is ComputeJobState.RUNNING and row.state is ComputeInstanceState.RUNNING
 
@@ -631,7 +634,7 @@ def test_a_limit_order_moves_once_another_machine_is_free_under_its_limit(
     db_session, member, project, client, fake
 ) -> None:  # noqa: F811
     job, row = _limit_order(db_session, member, project, client, fake)
-    vast_id = row.vast_instance_id
+    vast_id = row.provider_instance_id
     _passes(db_session, client, 7, 40)
     assert job.attempts == 1
 
@@ -640,13 +643,13 @@ def test_a_limit_order_moves_once_another_machine_is_free_under_its_limit(
 
     assert vast_id not in fake.instances and "moving" in _events(db_session, job)
     new = _instance(db_session, job)
-    assert new.attempt == 2 and new.offer_id == 2001
-    assert "KRATER_RESUMED=1" in fake.instances[new.vast_instance_id]["env"]
+    assert new.attempt == 2 and new.provider_offer_id == "2001"
+    assert "KRATER_RESUMED=1" in fake.instances[new.provider_instance_id]["env"]
 
 
 def test_an_ordinary_job_still_moves_after_the_move_time(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_job(db_session, member, project, client, fake)
-    fake.set_status(row.vast_instance_id, "stopped", intended_status="stopped")
+    fake.set_status(row.provider_instance_id, "stopped", intended_status="stopped")
     _passes(db_session, client, 6, 37)
 
     assert row.state is ComputeInstanceState.DESTROYED and job.on_outbid is ComputeOutbid.MOVE
@@ -661,7 +664,7 @@ def test_a_limit_order_needs_an_interruptible_machine(db_session, member, projec
 
 def test_the_bid_never_goes_over_the_jobs_max(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_job(db_session, member, project, client, fake, max_microusd=70_000)
-    fake.set_status(row.vast_instance_id, "stopped")
+    fake.set_status(row.provider_instance_id, "stopped")
     for minute in range(6, 29):
         _pass(db_session, client, NOW + timedelta(minutes=minute))
 
@@ -694,7 +697,7 @@ def test_a_machine_that_never_starts_is_given_up(db_session, member, project, cl
 
 def test_a_vanished_machine_requeues_the_job(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_job(db_session, member, project, client, fake)
-    fake.instances.pop(row.vast_instance_id)
+    fake.instances.pop(row.provider_instance_id)
     fake.offers[1001]["rented"] = True  # the host is gone
 
     _pass(db_session, client, NOW + timedelta(minutes=6))
@@ -744,15 +747,15 @@ def test_a_settled_create_never_reuses_a_recorded_id(db_session, member, project
     """Seen on staging: a restarted dev worker's fake Vast handed out an id again. Settling the create by its label
     then broke the unique instance id, and every later scheduler pass failed with it."""
     job, first = _running_job(db_session, member, project, client, fake)
-    taken = first.vast_instance_id
+    taken = first.provider_instance_id
     first.state = ComputeInstanceState.DESTROYED
     second = ComputeInstance(
         job_id=job.id,
         attempt=2,
         label=first.label[:-1] + "2",
         state=ComputeInstanceState.CREATING,
-        offer_id=0,
-        machine_id=0,
+        provider_offer_id="0",
+        provider_machine_id="0",
         gpu_name="RTX 3060",
         interruptible=True,
         gpu_microusd=0,
@@ -767,7 +770,7 @@ def test_a_settled_create_never_reuses_a_recorded_id(db_session, member, project
 
     _pass(db_session, client, NOW + timedelta(minutes=6))
 
-    assert second.vast_instance_id is None
+    assert second.provider_instance_id is None
     assert second.state is ComputeInstanceState.CREATE_FAILED
 
 
@@ -839,7 +842,7 @@ def test_a_runner_that_never_starts_fails_the_job(db_session, member, project, c
     job = _submit(db_session, member, project)
     _pass(db_session, client)
     row = _instance(db_session, job)
-    fake.set_status(row.vast_instance_id, "running")
+    fake.set_status(row.provider_instance_id, "running")
     _pass(db_session, client, NOW + timedelta(minutes=5))
 
     _passes(db_session, client, 6, 14)
@@ -900,13 +903,13 @@ def test_a_machine_that_stopped_itself_is_started_again(db_session, member, proj
     job, row = _running_job(db_session, member, project, client, fake)
     _beat(db_session, row, NOW + timedelta(minutes=6))
     # Krater is down; three hours later the runner stops its machine. Vast shows that like an outbid machine.
-    fake.set_status(row.vast_instance_id, "stopped", intended_status="stopped")
+    fake.set_status(row.provider_instance_id, "stopped", intended_status="stopped")
 
     _pass(db_session, client, NOW + timedelta(minutes=250))
 
     assert job.state is ComputeJobState.PAUSED and "stopped itself" in job.state_reason
     assert "self_stopped" in _events(db_session, job)
-    assert fake.instances[row.vast_instance_id]["intended_status"] == "running"  # Krater started it
+    assert fake.instances[row.provider_instance_id]["intended_status"] == "running"  # Krater started it
     _pass(db_session, client, NOW + timedelta(minutes=251))
     assert job.state is ComputeJobState.RUNNING
     assert row.runner_starts_needed == row.runner_starts + 1  # its runner must report again
@@ -916,7 +919,7 @@ def test_a_failed_start_after_a_self_stop_is_retried(db_session, member, project
     """Vast never resumes a machine stopped on purpose, so one failed start must not leave it stopped for good."""
     job, row = _running_job(db_session, member, project, client, fake)
     _beat(db_session, row, NOW + timedelta(minutes=6))
-    fake.set_status(row.vast_instance_id, "stopped", intended_status="stopped")
+    fake.set_status(row.provider_instance_id, "stopped", intended_status="stopped")
     real_start = client.start_instance
 
     def unavailable(instance_id):
@@ -925,11 +928,11 @@ def test_a_failed_start_after_a_self_stop_is_retried(db_session, member, project
     monkeypatch.setattr(client, "start_instance", unavailable)
     _pass(db_session, client, NOW + timedelta(minutes=250))
     assert job.state is ComputeJobState.PAUSED and "self_stopped" in _events(db_session, job)
-    assert fake.instances[row.vast_instance_id]["intended_status"] == "stopped"
+    assert fake.instances[row.provider_instance_id]["intended_status"] == "stopped"
 
     monkeypatch.setattr(client, "start_instance", real_start)
     _pass(db_session, client, NOW + timedelta(minutes=251))
-    assert fake.instances[row.vast_instance_id]["intended_status"] == "running"
+    assert fake.instances[row.provider_instance_id]["intended_status"] == "running"
     _pass(db_session, client, NOW + timedelta(minutes=252))
     assert job.state is ComputeJobState.RUNNING and row.start_requested_at is None
 
@@ -937,19 +940,19 @@ def test_a_failed_start_after_a_self_stop_is_retried(db_session, member, project
 def test_an_outbid_machine_is_still_a_pause(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_job(db_session, member, project, client, fake)
     _beat(db_session, row, NOW + timedelta(minutes=6))
-    fake.set_status(row.vast_instance_id, "stopped", intended_status="stopped")
+    fake.set_status(row.provider_instance_id, "stopped", intended_status="stopped")
 
     _pass(db_session, client, NOW + timedelta(minutes=7))
 
     assert job.state is ComputeJobState.PAUSED and "Outbid" in job.state_reason
-    assert fake.instances[row.vast_instance_id]["intended_status"] == "stopped"
+    assert fake.instances[row.provider_instance_id]["intended_status"] == "stopped"
 
 
 def test_after_a_pause_the_runner_must_start_again(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_job(db_session, member, project, client, fake)
-    fake.set_status(row.vast_instance_id, "stopped")
+    fake.set_status(row.provider_instance_id, "stopped")
     _pass(db_session, client, NOW + timedelta(minutes=6))
-    fake.set_status(row.vast_instance_id, "running")
+    fake.set_status(row.provider_instance_id, "running")
     _pass(db_session, client, NOW + timedelta(minutes=7))  # resumed: Vast restarted the container
 
     _runner_starts(db_session, fake, row, NOW + timedelta(minutes=8))
@@ -967,7 +970,7 @@ def test_a_runner_that_reports_before_the_scheduler_sees_running_counts(
     job = _submit(db_session, member, project)
     _pass(db_session, client)
     row = _instance(db_session, job)
-    fake.set_status(row.vast_instance_id, "running")
+    fake.set_status(row.provider_instance_id, "running")
     _runner_starts(db_session, fake, row, NOW + timedelta(seconds=30))  # still `provisioning` in Krater
 
     for minute in range(1, 21):
@@ -980,9 +983,9 @@ def test_a_runner_that_reports_before_the_scheduler_sees_running_counts(
 
 def test_a_start_from_before_a_pause_does_not_count_after_it(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_job(db_session, member, project, client, fake)
-    fake.set_status(row.vast_instance_id, "stopped")
+    fake.set_status(row.provider_instance_id, "stopped")
     _pass(db_session, client, NOW + timedelta(minutes=6))  # paused: the runner must start again
-    fake.set_status(row.vast_instance_id, "running")
+    fake.set_status(row.provider_instance_id, "running")
     _pass(db_session, client, NOW + timedelta(minutes=8))  # resumed, but no new start
 
     _passes(db_session, client, 9, 17)
@@ -993,9 +996,9 @@ def test_a_start_from_before_a_pause_does_not_count_after_it(db_session, member,
 
 def test_a_runner_restart_reported_before_the_resume_is_seen_counts(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_job(db_session, member, project, client, fake)
-    fake.set_status(row.vast_instance_id, "stopped")
+    fake.set_status(row.provider_instance_id, "stopped")
     _pass(db_session, client, NOW + timedelta(minutes=6))
-    fake.set_status(row.vast_instance_id, "running")
+    fake.set_status(row.provider_instance_id, "running")
     _runner_starts(db_session, fake, row, NOW + timedelta(minutes=7))  # before the pass that sees the resume
 
     for minute in range(8, 25):

@@ -32,6 +32,7 @@ from krater.vast.types import (
     SearchQuota,
     microusd_to_usd,
     usd_to_microusd,
+    vast_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,7 @@ __all__ = [
     "get_vast_client",
     "microusd_to_usd",
     "usd_to_microusd",
+    "vast_id",
 ]
 
 
