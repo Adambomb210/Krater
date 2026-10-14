@@ -13,6 +13,7 @@ from krater.models.enums import (
     ComputeJobKind,
     ComputeJobState,
     ComputeOutbid,
+    GalleryMinorNames,
     ProjectStatus,
     QuiltOutboxState,
     ReviewDecision,
@@ -29,6 +30,7 @@ from krater.models.project_revision import ProjectRevision
 from krater.models.project_secret import ProjectSecret
 from krater.models.quilt_outbox import QuiltOutbox
 from krater.models.review import Review
+from krater.models.site_settings import SiteSettings
 from krater.models.slack_notification import SlackNotification
 from krater.models.spend_snapshot import SpendSnapshot
 from krater.models.ssh_key import UserSshKey
@@ -50,6 +52,7 @@ __all__ = [
     "ComputeJobKind",
     "ComputeJobState",
     "ComputeSettings",
+    "GalleryMinorNames",
     "GpuPrice",
     "GpuPriceSample",
     "Project",
@@ -65,6 +68,7 @@ __all__ = [
     "ReviewSource",
     "RevisionKind",
     "RevisionOutcome",
+    "SiteSettings",
     "SlackNotification",
     "SpendReconciliation",
     "SpendSnapshot",

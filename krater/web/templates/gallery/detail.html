@@ -51,11 +51,12 @@
         <dd>&asymp; {{ spend_cents | dollars }}</dd>
       </div>
     </dl>
-    {% if team %}
+    {% if team or unnamed %}
       <section class="card">
         <h2>Built by</h2>
         <ul class="link-list">
           {% for name in team %}<li>{{ name }}</li>{% endfor %}
+          {% if unnamed %}<li>{{ "and " if team }}{{ unnamed }} {{ "more " if team }}team member{{ "s" if unnamed != 1 }}</li>{% endif %}
         </ul>
       </section>
     {% endif %}

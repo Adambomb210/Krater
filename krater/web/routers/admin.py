@@ -1,5 +1,6 @@
 """The admin overview: `/admin`, admins only -- every project grouped by status, a read-only table of
-`ApprovalPolicy` rows, and delivery to Quilt (events Quilt refused, with Retry and Dismiss)."""
+`ApprovalPolicy` rows, how the public gallery names members under 18, and delivery to Quilt (events Quilt refused,
+with Retry and Dismiss)."""
 
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from sqlalchemy.orm import Session
 from krater.db import get_session
 from krater.models import ApprovalPolicy, Project, ProjectStatus
 from krater.services import projects as project_service
-from krater.services import quilt_events
+from krater.services import quilt_events, site_settings
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, ValidationFailed
 from krater.web.csrf import verify_csrf_token
@@ -51,8 +52,31 @@ def admin_overview(
             "policies": policies,
             "statuses": list(ProjectStatus),
             "quilt": quilt_events.delivery_overview(db_session, actor),
+            "gallery_minor_names": site_settings.current(db_session).gallery_minor_names.value,
+            "gallery_choices": [
+                (choice.value, label) for choice, label in site_settings.GALLERY_MINOR_NAMES_LABELS.items()
+            ],
         },
     )
+
+
+@router.post("/admin/gallery", dependencies=[Depends(verify_csrf_token)])
+def gallery_settings(
+    request: Request,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+    gallery_minor_names: Annotated[str, Form()] = "",
+    reason: Annotated[str, Form()] = "",
+):
+    try:
+        site_settings.set_gallery_minor_names(db_session, actor, value=gallery_minor_names, reason=reason)
+    except ValidationFailed as exc:
+        db_session.rollback()
+        flash(request, " ".join(exc.errors.values()), "error")
+        return RedirectResponse("/admin#gallery", status_code=303)
+    db_session.commit()
+    flash(request, "Gallery setting saved.", "success")
+    return RedirectResponse("/admin#gallery", status_code=303)
 
 
 def _quilt_action(db_session: Session, request: Request, action, actor: Actor, event_id: uuid.UUID, reason: str):

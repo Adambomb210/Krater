@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from krater.db import get_session
 from krater.models import Project, ProjectRevision, ProjectStatus, User
-from krater.services import budget, people, teams
+from krater.services import budget, people, site_settings, teams
 from krater.services import projects as project_service
 from krater.services.errors import NotFound
 from krater.storage import ObjectStore, get_object_store
@@ -67,8 +67,12 @@ def gallery_detail(
     # completion moves the project straight to `completed` without opening another draft.
     revision = project.current_revision
     team_ids = teams.team_user_ids(project)
-    names = people.names(weave_client, db_session.scalars(sa.select(User).where(User.id.in_(team_ids))))
-    team = [names[user_id] for user_id in team_ids if user_id in names]
+    by_id = {user.id: user for user in db_session.scalars(sa.select(User).where(User.id.in_(team_ids)))}
+    team, unnamed = people.public_names(
+        weave_client,
+        [by_id[user_id] for user_id in team_ids if user_id in by_id],
+        minors=site_settings.current(db_session).gallery_minor_names,
+    )
 
     spend_cents = budget.latest_spend_cents(db_session, project)
     screenshot_urls = _screenshot_urls(get_object_store(), revision)
@@ -79,6 +83,7 @@ def gallery_detail(
             "project": project,
             "revision": revision,
             "team": team,
+            "unnamed": unnamed,
             "spend_cents": spend_cents,
             "screenshot_urls": screenshot_urls,
         },

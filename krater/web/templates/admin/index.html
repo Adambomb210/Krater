@@ -4,9 +4,17 @@
 {% block title %}Admin{% endblock %}
 
 {% block content %}
-<section class="card">
-  <h1>All projects</h1>
-  <p><a href="/admin/compute">Compute settings</a>: defaults and per-project overrides for rented machines.</p>
+<div class="page-head">
+  <div>
+    <h1>Admin</h1>
+    <p class="page-subtitle">Every project with its budget, the approval policy, the public gallery, and the delivery of events to Quilt.</p>
+  </div>
+  <div class="page-actions">
+    <a class="button" href="/admin/compute">Compute settings</a>
+  </div>
+</div>
+
+<dl class="stats stats--compact">
   {% for status in statuses %}
     <div class="stat">
       <dt>{{ status.value.replace('_', ' ') | capitalize }}</dt>
@@ -83,6 +91,32 @@
       No custom policies configured. The default applies to every stage: 1 approval, from any reviewer.
     </p>
   {% endif %}
+</section>
+
+<section class="card form-card" id="gallery" aria-labelledby="gallery-heading">
+  <h2 id="gallery-heading">Public gallery</h2>
+  <p class="muted">
+    The gallery lists who built each completed project, by the names Weave has for them. For anyone under 18, or whose
+    age Weave doesn't say, it shows:
+  </p>
+  <form method="post" action="/admin/gallery" class="form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div class="field">
+      <span class="field-label">Members under 18</span>
+      <div class="choice-list choice-list--stacked">
+        {% for value, label in gallery_choices %}
+          <label><input type="radio" name="gallery_minor_names" value="{{ value }}" {% if value == gallery_minor_names %}checked{% endif %}> {{ label }}</label>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="field">
+      <label for="gallery-reason">Reason (required)</label>
+      <input type="text" id="gallery-reason" name="reason">
+    </div>
+    <div class="form-actions">
+      <button type="submit" class="button button--primary">Save</button>
+    </div>
+  </form>
 </section>
 
 <section class="card" id="quilt" aria-labelledby="quilt-heading">
