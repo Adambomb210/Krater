@@ -209,6 +209,28 @@ def _read_secret(name: str) -> str:
     return getpass.getpass(f"Value for {name} (not shown): ")
 
 
+# ssh's options that take a value (OpenSSH's usage line): the token after one of these is its value, not the command.
+SSH_VALUE_OPTIONS = frozenset("BbcDEeFIiJLlmOoPpQRSWw")
+
+
+def ssh_command(host: str, port: int, extra: list[str]) -> list[str]:
+    """`ssh` with the box's address, the member's options, then any remote command. ssh takes
+    `[options] destination [command]`, so the destination goes after the options and before the first other word:
+    `krater ssh box -- -i key nvidia-smi` runs `nvidia-smi` on the box."""
+    extra = extra[1:] if extra[:1] == ["--"] else list(extra)
+    i = 0
+    while i < len(extra) and extra[i].startswith("-") and extra[i] != "--":
+        flag = extra[i]
+        # `-i key` takes the next word; `-ikey` and `-oName=value` carry it already; `-vA` is only flags.
+        if len(flag) == 2 and flag[1] in SSH_VALUE_OPTIONS:
+            i += 1
+        i += 1
+    options, remote = extra[:i], extra[i:]
+    if remote[:1] == ["--"]:
+        remote = remote[1:]
+    return ["ssh", "-p", str(port), *options, f"root@{host}", *remote]
+
+
 def _connect(command: list[str]) -> int:
     """Run ssh in place of the CLI. `execvp` doesn't hand a Windows console over to the new process, so run it."""
     if _is_windows():
@@ -457,8 +479,7 @@ def run(
         if not machine.get("ssh_host"):
             say(f"{job['name']} has no SSH address yet. Try `krater show {job['id']}`.")
             return 1
-        extra = [a for a in args.ssh_args if a != "--"]
-        command = ["ssh", "-p", str(machine["ssh_port"]), *extra, f"root@{machine['ssh_host']}"]
+        command = ssh_command(machine["ssh_host"], machine["ssh_port"], args.ssh_args)
         if exec_ssh is not None:
             return exec_ssh(command) or 0
         if shutil.which("ssh") is None:
