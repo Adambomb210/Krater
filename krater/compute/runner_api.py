@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 from krater.config import Settings
 from krater.models import ComputeEvent, ComputeInstance, ComputeJob, ComputeJobKind, ComputeJobState
 from krater.models.compute_job import ACTIVE_JOB_STATES
-from krater.services import project_secrets, ssh_keys
+from krater.services import compute_settings, project_secrets, ssh_keys
 from krater.services.errors import NotAllowed, ValidationFailed
 from krater.storage import ObjectStore
 
@@ -90,6 +90,11 @@ class StartInfo:
     heartbeat_seconds: int = HEARTBEAT_SECONDS
     checkpoint_sync_seconds: int = CHECKPOINT_SYNC_SECONDS
     log_sync_seconds: int = LOG_SYNC_SECONDS
+    # With no answer from Krater for this long, the runner stops its own machine (the policy's
+    # `runner_self_stop_minutes`), through Vast's API with the instance's own key, which Vast puts in the container.
+    self_stop_after_seconds: int = 0
+    vast_instance_id: int | None = None
+    vast_api_url: str = ""
     # The project's secrets, name -> value. Never logged or shown (kept out of the repr).
     secrets: dict[str, str] = field(default_factory=dict, repr=False)
 
@@ -122,6 +127,9 @@ def start(session: Session, instance: ComputeInstance, *, now: datetime, setting
         command=job.command,
         kind=job.kind.value,
         ssh_keys=keys,
+        self_stop_after_seconds=compute_settings.effective_policy(session, job.project).runner_self_stop_minutes * 60,
+        vast_instance_id=instance.vast_instance_id,
+        vast_api_url=settings.vast_api_url,
         secrets=secrets_env,
     )
 

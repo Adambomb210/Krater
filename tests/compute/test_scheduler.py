@@ -57,6 +57,12 @@ def _pass(db_session, client, now=NOW) -> scheduler.PassResult:
     return scheduler.run_pass(db_session, client, SETTINGS, now=now, runner_sha256=RUNNER_SHA)
 
 
+def _passes(db_session, client, first: int, last: int) -> None:
+    """A pass every minute from `first` to `last` (inclusive), as the worker runs them."""
+    for minute in range(first, last + 1):
+        _pass(db_session, client, NOW + timedelta(minutes=minute))
+
+
 def _token(fake, row) -> str:
     """The runner token Krater sent to the machine (it keeps only the hash)."""
     env = fake.instances[row.vast_instance_id]["env"]
@@ -763,7 +769,7 @@ def test_a_runner_that_never_starts_fails_the_job(db_session, member, project, c
     fake.set_status(row.vast_instance_id, "running")
     _pass(db_session, client, NOW + timedelta(minutes=5))
 
-    _pass(db_session, client, NOW + timedelta(minutes=14))
+    _passes(db_session, client, 6, 14)
     assert job.state is ComputeJobState.RUNNING
     _pass(db_session, client, NOW + timedelta(minutes=15))
 
@@ -777,14 +783,71 @@ def test_a_runner_that_never_starts_fails_the_job(db_session, member, project, c
 
 def test_a_silent_runner_fails_the_job(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_job(db_session, member, project, client, fake)
+    _passes(db_session, client, 6, 19)
     _beat(db_session, row, NOW + timedelta(minutes=20))
 
-    _pass(db_session, client, NOW + timedelta(minutes=49))
+    _passes(db_session, client, 20, 49)
     assert job.state is ComputeJobState.RUNNING
     _pass(db_session, client, NOW + timedelta(minutes=50))
 
     assert job.state is ComputeJobState.FAILED
     assert "stopped reporting" in job.state_reason
+
+
+def test_krater_being_down_does_not_fail_a_runner_that_reports_again(db_session, member, project, client, fake) -> None:  # noqa: F811
+    """Krater down for over the heartbeat timeout: the runner kept trying, and must not be failed on Krater's first
+    pass back, before its next heartbeat gets through."""
+    job, row = _running_job(db_session, member, project, client, fake)
+    _beat(db_session, row, NOW + timedelta(minutes=6))
+    # Krater is down from minute 7 to minute 90.
+
+    _pass(db_session, client, NOW + timedelta(minutes=90))
+    assert job.state is ComputeJobState.RUNNING and row.watch_resumed_at == NOW + timedelta(minutes=90)
+    _beat(db_session, row, NOW + timedelta(minutes=91))
+    _passes(db_session, client, 91, 120)
+
+    assert job.state is ComputeJobState.RUNNING
+
+
+def test_a_runner_still_silent_after_krater_is_back_fails_the_job(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job, row = _running_job(db_session, member, project, client, fake)
+    _pass(db_session, client, NOW + timedelta(minutes=90))  # back after a long outage
+
+    _passes(db_session, client, 91, 119)
+    assert job.state is ComputeJobState.RUNNING
+    _pass(db_session, client, NOW + timedelta(minutes=120))  # 30 minutes of silence while Krater watched
+
+    assert job.state is ComputeJobState.FAILED and "stopped reporting" in job.state_reason
+
+
+def test_a_machine_that_stopped_itself_is_started_again(db_session, member, project, client, fake) -> None:  # noqa: F811
+    """Staging 2026-10-14: Krater went down and a machine billed on for hours. Now its runner stops it after
+    `runner_self_stop_minutes` without an answer; Krater, back, starts it again so the job carries on from the
+    checkpoints on its disk."""
+    job, row = _running_job(db_session, member, project, client, fake)
+    _beat(db_session, row, NOW + timedelta(minutes=6))
+    # Krater is down; three hours later the runner stops its machine. Vast shows that like an outbid machine.
+    fake.set_status(row.vast_instance_id, "stopped", intended_status="stopped")
+
+    _pass(db_session, client, NOW + timedelta(minutes=250))
+
+    assert job.state is ComputeJobState.PAUSED and "stopped itself" in job.state_reason
+    assert "self_stopped" in _events(db_session, job)
+    assert fake.instances[row.vast_instance_id]["intended_status"] == "running"  # Krater started it
+    _pass(db_session, client, NOW + timedelta(minutes=251))
+    assert job.state is ComputeJobState.RUNNING
+    assert row.runner_starts_needed == row.runner_starts + 1  # its runner must report again
+
+
+def test_an_outbid_machine_is_still_a_pause(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job, row = _running_job(db_session, member, project, client, fake)
+    _beat(db_session, row, NOW + timedelta(minutes=6))
+    fake.set_status(row.vast_instance_id, "stopped", intended_status="stopped")
+
+    _pass(db_session, client, NOW + timedelta(minutes=7))
+
+    assert job.state is ComputeJobState.PAUSED and "Outbid" in job.state_reason
+    assert fake.instances[row.vast_instance_id]["intended_status"] == "stopped"
 
 
 def test_after_a_pause_the_runner_must_start_again(db_session, member, project, client, fake) -> None:  # noqa: F811
@@ -827,7 +890,7 @@ def test_a_start_from_before_a_pause_does_not_count_after_it(db_session, member,
     fake.set_status(row.vast_instance_id, "running")
     _pass(db_session, client, NOW + timedelta(minutes=8))  # resumed, but no new start
 
-    _pass(db_session, client, NOW + timedelta(minutes=17))
+    _passes(db_session, client, 9, 17)
     assert job.state is ComputeJobState.RUNNING
     _pass(db_session, client, NOW + timedelta(minutes=18))
     assert job.state is ComputeJobState.FAILED and "never started" in job.state_reason

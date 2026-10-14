@@ -12,7 +12,7 @@ script as `args` (`krater/compute/launch.py`). The bootstrap:
 2. checks its sha256 (when the image has `sha256sum`) and refuses to run a mismatch;
 3. runs it;
 4. waits forever afterwards. Vast restarts a container whose main process exits and keeps billing, so only Krater
-   ends a machine, by destroying it.
+   ends a machine, by destroying it (or the runner stops it, below).
 
 Checked locally on 2026-10-11 with alpine (busybox wget), python:3.12-slim (Python only) and debian:bookworm-slim
 (none: it prints why and waits, and Krater's runner start deadline fails the job).
@@ -29,6 +29,34 @@ The runner then:
 6. saves the command's stdout and stderr, with its own lines, to the job's log (`logs/attempt-<n>.log`, up to
    16 MB; the rest still reaches Vast's container log) and uploads it every minute and at exit;
 7. reports the exit code. The scheduler destroys the machine on its next pass.
+
+## When Krater is gone: the machine stops itself
+
+Krater ends machines only while it is up. On staging (2026-10-14) Krater went down with a box running, and the box
+billed for four hours with nobody watching. So the runner keeps a dead-man switch (`runner/selfstop.go`): every
+answer from Krater, a refusal included, resets it, and a 5xx from Krater's proxy or no connection doesn't. After
+`self_stop_after_seconds` without one (the `runner_self_stop_minutes` policy, 3 hours by default, sent with `/start`;
+3 hours too when `/start` itself never got through), the runner:
+
+1. stops a job's command (SIGTERM, up to 45 s to save a checkpoint) and doesn't report its exit, which Krater would
+   take for the job's own end;
+2. stops its machine through Vast's API (`PUT /api/v0/instances/{id}/`, `{"state": "stopped"}`) with the key Vast
+   puts in every container for its own instance (`CONTAINER_API_KEY`, read from `/proc/1/environ` when the runner's
+   environment lacks it), retrying every minute until Vast takes it.
+
+It stops rather than destroys: GPU billing ends, and the disk keeps whatever the job or the member did while Krater
+was away, since nothing reaches storage without Krater. The runner stays up after `Run` returns, so the switch also
+covers a machine whose exit Krater never came to collect. Back up, Krater tells a self-stop from an outbid machine
+(Vast shows both as `intended_status: stopped`) by the silence: a self-stopped runner has been quiet for at least the
+self-stop time. It starts a job's machine again (the runner resumes with the checkpoints still on its disk; if the GPU
+is taken, the pause rules move the job as for an outbid machine) and shows a box as stopped, for its member to resume.
+
+Checked with Go tests against a fake Vast and with the scheduler's tests; **not yet on a rented machine** (it needs
+a paid check: rent a job, stop the portal past a short project override of the self-stop time, and watch Vast).
+
+The scheduler doesn't count Krater's own downtime against a runner either: a live instance it hasn't looked at for
+5 minutes or more restarts its runner deadlines (`watch_resumed_at`), so the first pass after an outage doesn't fail
+every job whose heartbeats couldn't get through.
 
 The job's team reads the log, outputs and checkpoints on the job page (Output and Files; downloads are redirects to
 URLs signed for 15 minutes) or with `krater logs` and `krater download`. Reviewers see the job but not its files.

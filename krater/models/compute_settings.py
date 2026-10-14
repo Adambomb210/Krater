@@ -45,6 +45,8 @@ class ComputeSettings(Base):
     runner_start_minutes: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     # ...and one whose runner stops sending heartbeats for this long.
     heartbeat_timeout_minutes: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    # A runner that can't reach Krater for this long stops its own machine (keeping its disk).
+    runner_self_stop_minutes: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     # Checkpoints and outputs a project's machines may keep in Krater's storage, in GB.
     storage_quota_gb: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     box_sync_deadline_minutes: Mapped[int] = mapped_column(sa.Integer, nullable=False)
@@ -76,6 +78,7 @@ class ProjectComputeSettings(Base):
     reconcile_alert_percent: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     runner_start_minutes: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     heartbeat_timeout_minutes: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    runner_self_stop_minutes: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     storage_quota_gb: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     box_sync_deadline_minutes: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     box_resume_timeout_minutes: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)

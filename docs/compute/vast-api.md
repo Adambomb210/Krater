@@ -38,7 +38,8 @@ each behavior that would cost money to get wrong, and `tests/vast/test_client.py
   sample; Vast's figure is the fallback.
 - **The instance's own key.** Vast injects `CONTAINER_API_KEY` into the container (it can start, stop or destroy that
   one instance) and returns it from create as `instance_api_key`. Never log a create response. Budget and runtime stops
-  destroy, never just stop, since a member could start a stopped instance again.
+  destroy, never just stop, since a member could start a stopped instance again. The runner uses this key for one
+  thing: stopping its own machine after hours without Krater (runner.md, "When Krater is gone").
 - **One account can't outbid itself** ("GPU conflict: requesting already rented gpus"), so a real pause is still
   untested.
 - **Open:** the bill showed $0.059/h after the bid was raised to $0.064. Is a bid charged at its own price or at a

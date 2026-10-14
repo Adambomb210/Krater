@@ -234,10 +234,24 @@ def test_a_silent_runner_stops_a_box_instead_of_destroying_it(db_session, member
     job, row = _running_box(db_session, member, project, client, fake)
     _beat(db_session, row, 3, sessions=1)
 
-    _pass(db_session, client, NOW + timedelta(minutes=34))
+    for minute in range(3, 35):
+        _pass(db_session, client, NOW + timedelta(minutes=minute))
 
     assert row.state is ComputeInstanceState.STOPPED and job.state is ComputeJobState.STOPPED
     assert row.vast_instance_id in fake.instances
+
+
+def test_a_box_that_stopped_itself_without_krater_shows_as_stopped(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job, row = _running_box(db_session, member, project, client, fake)
+    _beat(db_session, row, 3, sessions=1)
+    fake.set_status(row.vast_instance_id, "stopped", intended_status="stopped")
+
+    _pass(db_session, client, NOW + timedelta(minutes=200))
+
+    assert row.state is ComputeInstanceState.STOPPED and job.state is ComputeJobState.STOPPED
+    assert "Stopped itself" in job.state_reason and "resume it" in job.state_reason
+    assert row.vast_instance_id in fake.instances  # its disk is kept
+    assert "self_stopped" in _events(db_session, job)
 
 
 def test_only_boxes_stop_and_resume(db_session, member, project) -> None:  # noqa: F811
