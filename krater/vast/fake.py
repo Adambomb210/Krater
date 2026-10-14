@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import itertools
 import json
+import time
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
@@ -137,7 +138,9 @@ class FakeVast:
         self.gpu_taken: dict[int, bool] = {}
         #: SSH keys on the account (Krater keeps none).
         self.account_ssh_keys: list[dict[str, Any]] = []
-        self._ids = itertools.count(55_000_001)
+        # Ids from the clock, so a dev worker that restarts (and so builds a new fake) never reuses one: Krater keeps
+        # instance ids unique, as Vast's are. Tests that need fixed ids set `self._ids` themselves.
+        self._ids = itertools.count(55_000_001 + (int(time.time()) % 1_000_000) * 100)
         self._failures: list[int] = []
         #: Vast's daily search-row quota, off until `set_search_quota`: (limit, rows left, reset as a Unix time).
         self.search_quota: tuple[int, int, int] | None = None

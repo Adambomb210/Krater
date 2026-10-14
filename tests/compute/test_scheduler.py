@@ -14,6 +14,8 @@ from krater.compute import scheduler
 from krater.compute.search_pacing import SearchPacer
 from krater.config import Settings, get_settings
 from krater.models import (
+    AuditEvent,
+    BudgetEntryKind,
     ComputeEscalation,
     ComputeEvent,
     ComputeInstance,
@@ -22,7 +24,7 @@ from krater.models import (
     ComputeJobState,
     ProjectStatus,
 )
-from krater.services import compute_jobs
+from krater.services import budget, compute_jobs
 from krater.services.compute_jobs import JobSpec
 from krater.services.errors import InvalidState, NotAllowed, ValidationFailed
 from krater.vast import FakeVast, VastClient
@@ -634,6 +636,60 @@ def test_a_withdrawn_project_stops_its_running_machines(db_session, member, proj
     assert row.state is ComputeInstanceState.DESTROYED
     assert fake.instances == {}
     assert job.hold_cents == 0
+
+
+def test_a_completed_project_cancels_jobs_as_completed(db_session, member, project, client, fake) -> None:  # noqa: F811
+    """Seen on staging: completing a project reclaims its unspent budget, so its running job failed as "reached its
+    budget" and Slack got a budget-teardown alert, though nothing overspent."""
+    job, row = _running_job(db_session, member, project, client, fake)
+    project.status = ProjectStatus.COMPLETED
+    budget.add_entry(
+        db_session,
+        project=project,
+        kind=BudgetEntryKind.RECLAIM,
+        amount_cents=-budget.remaining_cents(db_session, project),
+        actor=member,
+    )
+    db_session.flush()
+
+    _pass(db_session, client, NOW + timedelta(minutes=6))
+
+    assert job.state is ComputeJobState.CANCELLED
+    assert job.state_reason == "The project is completed."
+    assert row.state is ComputeInstanceState.DESTROYED
+    assert fake.instances == {}
+    assert not db_session.scalars(sa.select(AuditEvent).where(AuditEvent.action == "budget_teardown")).all()
+
+
+def test_a_settled_create_never_reuses_a_recorded_id(db_session, member, project, client, fake) -> None:  # noqa: F811
+    """Seen on staging: a restarted dev worker's fake Vast handed out an id again. Settling the create by its label
+    then broke the unique instance id, and every later scheduler pass failed with it."""
+    job, first = _running_job(db_session, member, project, client, fake)
+    taken = first.vast_instance_id
+    first.state = ComputeInstanceState.DESTROYED
+    second = ComputeInstance(
+        job_id=job.id,
+        attempt=2,
+        label=first.label[:-1] + "2",
+        state=ComputeInstanceState.CREATING,
+        offer_id=0,
+        machine_id=0,
+        gpu_name="RTX 3060",
+        interruptible=True,
+        gpu_microusd=0,
+        disk_microusd=0,
+        runner_token_hash="x",
+        created_at=NOW,
+    )
+    db_session.add(second)
+    job.attempts, job.state = 2, ComputeJobState.STARTING
+    fake.instances[taken]["label"] = second.label  # Vast lists "the same" id under the new label
+    db_session.flush()
+
+    _pass(db_session, client, NOW + timedelta(minutes=6))
+
+    assert second.vast_instance_id is None
+    assert second.state is ComputeInstanceState.CREATE_FAILED
 
 
 def test_cancelling_destroys_the_machine_on_the_next_pass(db_session, member, project, client, fake) -> None:  # noqa: F811
