@@ -401,7 +401,8 @@ def run(
         except KeyboardInterrupt:
             return INTERRUPTED
         if not finished:
-            say(f"Gave up after {args.timeout:g} minutes; {job['name']} is still {job['state']}.")
+            minutes = f"{args.timeout:g} minute" + ("" if args.timeout == 1 else "s")
+            say(f"Gave up after {minutes}; {job['name']} is still {job['state']}.")
             return TIMED_OUT
         out(job, lambda: None)
         return follow.exit_code_for(job)
@@ -432,7 +433,8 @@ def run(
             os.replace(target + ".partial", target)
             say(f"{file['area']}/{file['name']}  ({_size(file['size_bytes'])})")
             fetched += 1
-        say(f"Saved {fetched} files, {already} already here: {_size(total)} in all, under {root}.")
+        saved = f"{fetched} file" + ("" if fetched == 1 else "s")
+        say(f"Saved {saved}, {already} already here: {_size(total)} in all, under {root}.")
     elif args.command in ("cancel", "stop", "resume", "move"):
         job = krater.post(f"/jobs/{resolve.resolve_job(krater, args.job)}/{args.command}")
         out(

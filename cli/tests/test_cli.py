@@ -665,6 +665,22 @@ def test_logs_follow_does_not_lose_bytes_that_arrive_between_its_two_requests(ht
     assert said[:3] == ["aaaa\nbbbb", "cccc\ndddd", "nb: succeeded"]
 
 
+def test_logs_follow_widens_its_window_when_the_apis_dropped_line_eats_new_bytes(http, fake, monkeypatch) -> None:
+    """A progress bar leaves the old log ending in a long partial line; the server drops that line from a window."""
+    monkeypatch.setattr(follow, "FIRST_OVERLAP", 4)
+    _login(http, [])
+    fake.log_files = {1: b"x" * 50}
+
+    def finish() -> None:
+        _append(fake, 1, b"yyy\nzzz\n")()
+        fake.details[JOB].update(state="succeeded")
+
+    _, said = _follow(http, fake, [finish])
+
+    assert said[:3] == ["x" * 50, "yyy\nzzz", "nb: succeeded"]
+    assert fake.log_calls > 3  # first tail, probe, then the new bytes asked for again with a wider window
+
+
 def test_logs_follow_says_when_it_skips_more_than_a_megabyte(http, fake) -> None:
     _login(http, [])
     fake.log_files = {1: b"start\n"}
@@ -727,7 +743,7 @@ def test_wait_gives_up_after_the_timeout_with_124(http, fake) -> None:
     code = run(argv, http=http, say=said.append, sleep=sleep, clock=lambda: now[0])
 
     assert code == 124
-    assert said == ["nb: running", "Gave up after 1 minutes; nb is still running."]
+    assert said == ["nb: running", "Gave up after 1 minute; nb is still running."]
 
 
 def test_wait_with_json_prints_only_the_finished_job(http, fake) -> None:
@@ -921,7 +937,7 @@ def test_download_skips_files_that_are_already_here_and_adds_up_sizes(http, fake
     assert "outputs/eval/score.txt  (5 B)" in said
     assert (results / "outputs" / "eval" / "score.txt").read_bytes() == b"0.93\n"
     assert [r.url.path for r in fake.requests if r.url.host == "store.test"] == ["/score"]
-    assert said[-1] == f"Saved 1 files, 1 already here: 8 B in all, under {results}."
+    assert said[-1] == f"Saved 1 file, 1 already here: 8 B in all, under {results}."
 
 
 @pytest.mark.parametrize(
