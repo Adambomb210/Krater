@@ -359,7 +359,7 @@ def test_with_the_search_quota_used_up_jobs_wait_for_the_reset(db_session, membe
 
     assert result.errors == 0
     assert job.state is ComputeJobState.QUEUED
-    assert "search quota is used up until 00:00 UTC" in job.state_reason
+    assert "Vast.ai's daily search quota is used up until 00:00 UTC" in job.state_reason  # the provider's title
     _paced_pass(db_session, client, pacer, NOW + timedelta(minutes=5))
     assert len(fake.search_bodies) == 1  # nothing more is asked of Vast until the reset
 

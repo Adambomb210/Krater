@@ -122,8 +122,10 @@ def _requeue(session: Session, job: ComputeJob, reason: str, *, now: datetime) -
     job.hold_cents = 0
 
 
-def _quota_reason(reset_at: datetime) -> str:
-    return f"Waiting: Vast's daily search quota is used up until {reset_at:%H:%M} UTC. Krater searches again then."
+def _quota_reason(reset_at: datetime, provider: str) -> str:
+    return (
+        f"Waiting: {provider}'s daily search quota is used up until {reset_at:%H:%M} UTC. Krater searches again then."
+    )
 
 
 def _finish(job: ComputeJob, state: ComputeJobState, reason: str, *, now: datetime) -> None:
@@ -289,7 +291,7 @@ class Scheduler:
                     self.session,
                     job,
                     "create_failed",
-                    "The machine never appeared on Vast.",
+                    f"The machine never appeared on {self.provider.title}.",
                     now=self.now,
                     instance=row,
                 )
@@ -419,7 +421,7 @@ class Scheduler:
                     self.session,
                     job,
                     "lost",
-                    f"Instance {row.provider_instance_id} disappeared from Vast.",
+                    f"Instance {row.provider_instance_id} disappeared from {self.provider.title}.",
                     now=self.now,
                     instance=row,
                 )
@@ -877,7 +879,7 @@ class Scheduler:
         try:
             searched = self._offers_for(job, rental_type=rental_type, limit=limit, policy=policy)
         except ProviderSearchQuotaError as exc:
-            job.state_reason = _quota_reason(exc.reset_at)
+            job.state_reason = _quota_reason(exc.reset_at, self.provider.title)
             return
         if searched is None:
             return
@@ -943,7 +945,7 @@ class Scheduler:
                     stop = self._start_one(job, taken)
                 except ProviderSearchQuotaError as exc:
                     logger.warning("krater.compute: %s; not searching until then", exc)
-                    job.state_reason = _quota_reason(exc.reset_at)
+                    job.state_reason = _quota_reason(exc.reset_at, self.provider.title)
                     stop = True
                 except ProviderError:
                     logger.exception("krater.compute: starting job %s failed", job.id)
@@ -1068,7 +1070,7 @@ class Scheduler:
         if key not in self._searches:
             quota = self.client.search_quota
             if quota is not None and quota.exhausted(self.now):
-                job.state_reason = _quota_reason(quota.reset_at)
+                job.state_reason = _quota_reason(quota.reset_at, self.provider.title)
                 return None
             if not self.pacer.due(pace_key, now=self.now, quota=quota):
                 return None
@@ -1090,7 +1092,8 @@ class Scheduler:
     def _rent(self, job: ComputeJob, choice: offers.Choice, *, hold_cents: int, taken: set[str]) -> bool:
         if job.kind is ComputeJobKind.BOX and self._account_has_ssh_keys():
             job.state_reason = (
-                "Krater doesn't start boxes while the Vast account has SSH keys: they may reach every machine. "
+                f"Krater doesn't start boxes while the {self.provider.title} account has SSH keys: they may reach "
+                "every machine. "
                 "An admin must remove them."
             )
             return False
@@ -1148,7 +1151,7 @@ class Scheduler:
                 self.session,
                 job,
                 "create_unconfirmed",
-                "Vast didn't confirm the rental; checking next pass.",
+                f"{self.provider.title} didn't confirm the rental; checking next pass.",
                 now=self.now,
                 instance=row,
             )
@@ -1161,7 +1164,7 @@ class Scheduler:
                     self.session,
                     job,
                     "create_unconfirmed",
-                    f"Vast didn't confirm the rental ({exc}); checking next pass.",
+                    f"{self.provider.title} didn't confirm the rental ({exc}); checking next pass.",
                     now=self.now,
                     instance=row,
                     error=exc.error,
@@ -1175,7 +1178,7 @@ class Scheduler:
                 self.session,
                 job,
                 "create_refused",
-                f"Vast refused the rental: {exc}",
+                f"{self.provider.title} refused the rental: {exc}",
                 now=self.now,
                 instance=row,
                 error=exc.error,
