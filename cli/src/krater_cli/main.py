@@ -40,6 +40,7 @@ from krater_cli.api import Krater, KraterError
 from krater_cli.resolve import ResolveError, short
 
 ESCALATIONS = ("keep_waiting", "raise_bid", "on_demand", "cancel")
+OUTBID = ("move", "hold")
 #: Projects that can't run anything any more; `krater projects` hides them unless asked.
 FINISHED_PROJECTS = frozenset({"withdrawn", "completed"})
 #: The web UI says "interruptible" and "on demand"; the API says `bid` and `ondemand`.
@@ -47,6 +48,20 @@ RENTAL_WORDS = {"bid": "interruptible", "ondemand": "on demand"}
 #: How long `wait --timeout` gives up with: GNU timeout(1)'s code, so it can't be mistaken for the job's own failure.
 TIMED_OUT = 124
 INTERRUPTED = 130
+
+
+def _duration(text: str) -> int:
+    """Minutes from `90m`, `12h`, `2d` or a bare number of minutes."""
+    cleaned = text.strip().lower()
+    units = {"m": 1, "h": 60, "d": 24 * 60}
+    number, unit = (cleaned[:-1], units[cleaned[-1]]) if cleaned[-1:] in units else (cleaned, 1)
+    try:
+        minutes = int(Decimal(number) * unit)
+    except InvalidOperation:
+        raise argparse.ArgumentTypeError(f"{text!r} isn't a duration such as 90m, 12h or 2d") from None
+    if minutes < 1:
+        raise argparse.ArgumentTypeError("give at least a minute")
+    return minutes
 
 
 def _price(text: str) -> str:
@@ -96,12 +111,28 @@ def _parser() -> argparse.ArgumentParser:
     submit.add_argument("--min-vram", type=int, help="or: any GPU with at least this many GB")
     submit.add_argument("--gpus", type=int, default=1)
     submit.add_argument("--disk", type=int, default=32, help="GB")
-    # Not `required=True`: without them Krater shows what an hour costs now, which is what a member needs to pick.
-    submit.add_argument("--target", type=_price, help="start at or under this, $/h")
+    # Not `required=True`: without a price Krater shows what an hour costs now, which is what a member needs to pick.
+    submit.add_argument(
+        "--limit",
+        type=_price,
+        help="a limit order, $/h: start at or under it, never pay more, and keep the machine when outbid",
+    )
+    submit.add_argument("--target", type=_price, help="or: start at or under this, $/h (with --max)")
     submit.add_argument("--max", type=_price, help="never pay more than this, $/h")
     submit.add_argument("--on-demand", action="store_true", help="rent on demand instead of bidding")
+    submit.add_argument(
+        "--expires",
+        type=_duration,
+        metavar="DURATION",
+        help="cancel it if it hasn't started within this long (90m, 12h, 2d)",
+    )
     submit.add_argument("--max-wait", type=int, default=12 * 60, help="minutes to wait for the target price")
     submit.add_argument("--on-max-wait", choices=ESCALATIONS, default="keep_waiting")
+    submit.add_argument(
+        "--on-outbid",
+        choices=OUTBID,
+        help="when outbid for a while: move to another machine, or hold this one (default: hold with --limit)",
+    )
     submit.add_argument("--max-runtime", type=int, default=8 * 60, help="minutes")
 
     job_help = "its id or the first characters of it"
@@ -260,7 +291,21 @@ def _explain_prices(krater: Krater, args: argparse.Namespace, say: Callable[[str
             ],
             say,
         )
-    say("Give --target (start at or under) and --max (never above), in USD per hour, e.g. --target 0.07 --max 0.10")
+    say(
+        "Give a limit in USD per hour, e.g. --limit 0.07: it starts at or under it, never pays more, and keeps its "
+        "machine when outbid. Or --target (start at or under) with --max (never above)."
+    )
+
+
+def _job_price(job: dict, *, long: bool = False) -> str:
+    """A job's price rule: `limit $0.0800` for a limit order, else `$0.0700/$0.1000` (target/max)."""
+    if job.get("limit_order"):
+        text = f"limit {_money(job['max_usd_per_hour'])}"
+        return f"{text}/h (a limit order: keeps its machine when outbid)" if long else text
+    if long:
+        held = "; keeps its machine when outbid" if job.get("on_outbid") == "hold" else ""
+        return f"target {_money(job['target_usd_per_hour'])}/h, max {_money(job['max_usd_per_hour'])}/h{held}"
+    return f"{_money(job['target_usd_per_hour'])}/{_money(job['max_usd_per_hour'])}"
 
 
 def _cheapest_first(price: dict) -> tuple[Decimal, str]:
@@ -326,12 +371,12 @@ def run(
         out(data, render_projects)
     elif args.command == "jobs":
         data = krater.get(f"/projects/{resolve.resolve_project(krater, args.project)}/jobs")
-        rows = [["ID", "KIND", "STATE", "TARGET/MAX", "SPENT", "NAME"]] + [
+        rows = [["ID", "KIND", "STATE", "PRICE", "SPENT", "NAME"]] + [
             [
                 short(j["id"]),
                 j["kind"],
                 j["state"],
-                f"{_money(j['target_usd_per_hour'])}/{_money(j['max_usd_per_hour'])}",
+                _job_price(j),
                 f"${j['spend_cents'] / 100:.2f}",
                 j["name"],
             ]
@@ -339,9 +384,20 @@ def run(
         ]
         out(data, lambda: _table(rows, say) if data["jobs"] else say("No jobs yet."))
     elif args.command == "submit":
-        if args.target is None or args.max is None:
+        if args.limit is not None and (args.target is not None or args.max is not None):
+            say("Give --limit, or --target with --max, not both.")
+            return 2
+        if args.limit is None and (args.target is None or args.max is None):
             _explain_prices(krater, args, say)
             return 2
+        if args.limit is not None and args.on_demand:
+            say("A limit order bids, so it can't be --on-demand. Use --target and --max for an on-demand machine.")
+            return 2
+        prices = (
+            {"limit_usd_per_hour": args.limit}
+            if args.limit is not None
+            else {"target_usd_per_hour": args.target, "max_usd_per_hour": args.max}
+        )
         body = {
             "name": args.name,
             "image": args.image,
@@ -351,13 +407,16 @@ def run(
             "min_gpu_ram_gb": args.min_vram,
             "num_gpus": args.gpus,
             "disk_gb": args.disk,
-            "target_usd_per_hour": args.target,
-            "max_usd_per_hour": args.max,
+            **prices,
             "interruptible": not args.on_demand,
             "max_wait_minutes": args.max_wait,
             "on_max_wait": args.on_max_wait,
             "max_runtime_minutes": args.max_runtime,
         }
+        if args.expires is not None:
+            body["max_wait_minutes"], body["on_max_wait"] = args.expires, "cancel"
+        if args.on_outbid is not None:
+            body["on_outbid"] = args.on_outbid
         job = krater.post(f"/projects/{resolve.resolve_project(krater, args.project)}/jobs", body)
         out(job, lambda: say(f"Queued {job['kind']} {job['id']}: {job['state_reason'] or job['state']}"))
     elif args.command == "show":
@@ -368,9 +427,7 @@ def run(
                 f"{job['name']} ({job['kind']}): {job['state']}"
                 + (f" - {job['state_reason']}" if job["state_reason"] else "")
             )
-            say(
-                f"  image {job['image']}; target {_money(job['target_usd_per_hour'])}/h, max {_money(job['max_usd_per_hour'])}/h"
-            )
+            say(f"  image {job['image']}; {_job_price(job, long=True)}")
             say(
                 f"  spent ${job['spend_cents'] / 100:.2f}"
                 + (f"; exit code {job['exit_code']}" if job["exit_code"] is not None else "")

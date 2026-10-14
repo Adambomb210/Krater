@@ -15,6 +15,7 @@ from krater.models import (
     ComputeJob,
     ComputeJobKind,
     ComputeJobState,
+    ComputeOutbid,
     GpuPriceSample,
 )
 from krater.services import compute_jobs
@@ -125,6 +126,54 @@ def test_a_bad_form_is_shown_again_with_the_errors(client: TestClient, login_as,
     assert "The target can&#39;t be above the max price." in response.text
     assert 'value="ghcr.io/alice/train:v3"' in response.text
     assert db_session.scalars(sa.select(ComputeJob)).all() == []
+
+
+def test_the_form_offers_a_limit_order_first(client: TestClient, login_as, project) -> None:
+    login_as(MEMBER_SUB)
+
+    page = client.get(f"/projects/{project.id}/compute/new")
+
+    assert 'name="order" value="limit" data-role="order-choice" checked' in page.text
+    assert "/static/js/compute-form.js" in page.text
+
+
+def test_a_member_places_a_limit_order(client: TestClient, login_as, project, db_session) -> None:
+    login_as(MEMBER_SUB)
+    page = client.get(f"/projects/{project.id}/compute/new")
+
+    response = client.post(
+        f"/projects/{project.id}/compute",
+        data={
+            **FORM,
+            "order": "limit",
+            "limit": "0.08",
+            "target": "",
+            "max": "",
+            "csrf_token": get_csrf_token(page.text),
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    job = db_session.scalars(sa.select(ComputeJob).where(ComputeJob.project_id == project.id)).one()
+    assert (job.target_microusd, job.max_microusd, job.on_outbid) == (80_000, 80_000, ComputeOutbid.HOLD)
+    assert job.is_limit_order
+    shown = client.get(response.headers["location"])
+    assert "limit order at $0.0800/h" in shown.text
+
+
+def test_a_limit_over_the_cap_is_shown_on_the_limit(client: TestClient, login_as, project, db_session) -> None:
+    login_as(MEMBER_SUB)
+    page = client.get(f"/projects/{project.id}/compute/new")
+
+    response = client.post(
+        f"/projects/{project.id}/compute",
+        data={**FORM, "order": "limit", "limit": "900", "csrf_token": get_csrf_token(page.text)},
+    )
+
+    assert response.status_code == 422
+    assert 'name="order" value="limit" data-role="order-choice" checked' in response.text
+    assert "hourly cap" in response.text.split('id="job-limit"')[1].split("</div>")[0]
 
 
 def test_submitting_needs_the_csrf_token(client: TestClient, login_as, project) -> None:

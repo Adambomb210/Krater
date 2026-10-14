@@ -18,6 +18,7 @@ from krater.models import (
     ComputeJob,
     ComputeJobKind,
     ComputeJobState,
+    ComputeOutbid,
     Project,
 )
 from krater.models.compute_job import FINISHED_JOB_STATES
@@ -54,6 +55,7 @@ class JobSpec:
     max_wait_minutes: int = 12 * 60
     on_max_wait: ComputeEscalation = ComputeEscalation.KEEP_WAITING
     max_runtime_minutes: int = 8 * 60
+    on_outbid: ComputeOutbid = ComputeOutbid.MOVE
 
 
 def _can_launch_for(actor: Actor, project: Project) -> bool:
@@ -88,6 +90,8 @@ def _validate(spec: JobSpec, *, cap_microusd: int) -> None:
         errors["max_wait_minutes"] = "Choose a max wait of 1 minute to 7 days."
     if not 1 <= spec.max_runtime_minutes <= 7 * 24 * 60:
         errors["max_runtime_minutes"] = "Choose a max runtime of 1 minute to 7 days."
+    if spec.on_outbid is ComputeOutbid.HOLD and not spec.interruptible:
+        errors["on_outbid"] = "Only interruptible machines are outbid: a limit order needs interruptible."
     if errors:
         raise ValidationFailed(errors)
 
@@ -119,6 +123,7 @@ def submit_job(
         max_wait_minutes=spec.max_wait_minutes,
         on_max_wait=spec.on_max_wait,
         max_runtime_minutes=spec.max_runtime_minutes,
+        on_outbid=spec.on_outbid,
         state=ComputeJobState.QUEUED,
         state_reason="Waiting for an offer at or under its target price.",
         queued_at=now,

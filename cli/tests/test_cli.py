@@ -835,8 +835,49 @@ def test_prices_all_and_gpu_filters(http, fake) -> None:
 
 SUBMIT = ["submit", PROJECT, "--name", "t", "--image", "img", "--gpu", "RTX 3060"]
 GIVE_PRICES = (
-    "Give --target (start at or under) and --max (never above), in USD per hour, e.g. --target 0.07 --max 0.10"
+    "Give a limit in USD per hour, e.g. --limit 0.07: it starts at or under it, never pays more, and keeps its "
+    "machine when outbid. Or --target (start at or under) with --max (never above)."
 )
+
+
+def test_submit_with_a_limit_places_a_limit_order(http, fake) -> None:
+    _login(http, [])
+    said: list[str] = []
+
+    assert run([*SUBMIT, "--limit", "$0.07", "--expires", "12h"], http=http, say=said.append) == 0
+
+    body = fake.jobs[0]["body"]
+    assert body["limit_usd_per_hour"] == "0.07" and "target_usd_per_hour" not in body
+    assert (body["max_wait_minutes"], body["on_max_wait"]) == (720, "cancel")
+    assert "on_outbid" not in body  # Krater's default for a limit order: hold
+
+
+@pytest.mark.parametrize(
+    ("extra", "complaint"),
+    [
+        (["--limit", "0.07", "--target", "0.05", "--max", "0.08"], "not both"),
+        (["--limit", "0.07", "--on-demand"], "can't be --on-demand"),
+    ],
+)
+def test_a_limit_with_other_prices_is_refused_before_asking_krater(http, fake, extra, complaint) -> None:
+    _login(http, [])
+    said: list[str] = []
+
+    assert run([*SUBMIT, *extra], http=http, say=said.append) == 2
+
+    assert fake.jobs == [] and complaint in said[-1]
+
+
+@pytest.mark.parametrize(("text", "minutes"), [("90m", 90), ("12h", 720), ("2d", 2880), ("45", 45), ("1.5h", 90)])
+def test_durations(text, minutes) -> None:
+    assert main._duration(text) == minutes
+
+
+def test_a_limit_order_shows_as_one_price(http, fake) -> None:
+    assert main._job_price({"limit_order": True, "max_usd_per_hour": "0.0800"}) == "limit $0.0800"
+    plain = {"target_usd_per_hour": "0.0700", "max_usd_per_hour": "0.1000"}
+    assert main._job_price(plain) == "$0.0700/$0.1000"  # an older Krater sends no limit_order
+    assert main._job_price({**plain, "on_outbid": "hold"}, long=True).endswith("keeps its machine when outbid")
 
 
 def test_submit_without_prices_shows_the_market_and_explains(http, fake) -> None:

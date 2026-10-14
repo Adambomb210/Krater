@@ -22,6 +22,7 @@ from krater.models import (
     ComputeInstanceState,
     ComputeJob,
     ComputeJobState,
+    ComputeOutbid,
     ProjectStatus,
 )
 from krater.services import budget, compute_jobs
@@ -588,6 +589,75 @@ def test_a_paused_job_that_resumes_runs_again(db_session, member, project, clien
     assert job.state is ComputeJobState.RUNNING and row.paused_since is None
 
 
+def _limit_order(db_session, member, project, client, fake, limit=65_000):  # noqa: F811
+    """A limit order: one price, and it holds its machine when outbid. Rented on 1001 ($0.0638/h); the other 3060s
+    can't be had under $0.0666/h (1003's min bid plus disk) and $0.0801/h, over the limit."""
+    job, row = _running_job(
+        db_session,
+        member,
+        project,
+        client,
+        fake,
+        target_microusd=limit,
+        max_microusd=limit,
+        on_outbid=ComputeOutbid.HOLD,
+    )
+    _beat(db_session, row, NOW + timedelta(minutes=6))
+    fake.set_status(row.vast_instance_id, "stopped", intended_status="stopped")
+    _pass(db_session, client, NOW + timedelta(minutes=6))
+    return job, row
+
+
+def test_a_limit_order_holds_its_outbid_machine_while_nothing_else_is_under_its_limit(
+    db_session, member, project, client, fake
+) -> None:  # noqa: F811
+    job, row = _limit_order(db_session, member, project, client, fake)
+    assert job.state is ComputeJobState.PAUSED and "keeps the machine" in job.state_reason
+
+    _passes(db_session, client, 7, 90)  # well past the 30-minute "move after"
+
+    assert row.state is ComputeInstanceState.PAUSED and row.vast_instance_id in fake.instances
+    assert job.attempts == 1 and "Keeping this machine" in job.state_reason
+    assert row.full_microusd <= 65_000  # the bid rose to the limit, and no further
+    assert 1 <= _events(db_session, job).count("bid_raised") <= 3  # not once a minute at the limit
+
+    fake.set_status(row.vast_instance_id, "running", intended_status="running")  # the market came back down
+    _pass(db_session, client, NOW + timedelta(minutes=91))
+    assert job.state is ComputeJobState.RUNNING and row.state is ComputeInstanceState.RUNNING
+
+
+def test_a_limit_order_moves_once_another_machine_is_free_under_its_limit(
+    db_session, member, project, client, fake
+) -> None:  # noqa: F811
+    job, row = _limit_order(db_session, member, project, client, fake)
+    vast_id = row.vast_instance_id
+    _passes(db_session, client, 7, 40)
+    assert job.attempts == 1
+
+    fake.add_offer(2001, 2001, "RTX 3060", dph_base=0.08, min_bid=0.040, storage_cost=0.10, gpu_ram_mb=12288)
+    _pass(db_session, client, NOW + timedelta(minutes=41))
+
+    assert vast_id not in fake.instances and "moving" in _events(db_session, job)
+    new = _instance(db_session, job)
+    assert new.attempt == 2 and new.offer_id == 2001
+    assert "KRATER_RESUMED=1" in fake.instances[new.vast_instance_id]["env"]
+
+
+def test_an_ordinary_job_still_moves_after_the_move_time(db_session, member, project, client, fake) -> None:  # noqa: F811
+    job, row = _running_job(db_session, member, project, client, fake)
+    fake.set_status(row.vast_instance_id, "stopped", intended_status="stopped")
+    _passes(db_session, client, 6, 37)
+
+    assert row.state is ComputeInstanceState.DESTROYED and job.on_outbid is ComputeOutbid.MOVE
+
+
+def test_a_limit_order_needs_an_interruptible_machine(db_session, member, project) -> None:  # noqa: F811
+    with pytest.raises(ValidationFailed) as caught:
+        _submit(db_session, member, project, interruptible=False, on_outbid=ComputeOutbid.HOLD)
+
+    assert "on_outbid" in caught.value.errors
+
+
 def test_the_bid_never_goes_over_the_jobs_max(db_session, member, project, client, fake) -> None:  # noqa: F811
     job, row = _running_job(db_session, member, project, client, fake, max_microusd=70_000)
     fake.set_status(row.vast_instance_id, "stopped")
@@ -595,6 +665,8 @@ def test_the_bid_never_goes_over_the_jobs_max(db_session, member, project, clien
         _pass(db_session, client, NOW + timedelta(minutes=minute))
 
     assert row.full_microusd <= 70_000
+    # At the max it stays put: no change-bid call, and no event, every minute (it did both).
+    assert _events(db_session, job).count("bid_raised") <= 3
 
 
 def test_max_runtime_destroys_the_machine_and_fails_the_job(db_session, member, project, client, fake) -> None:  # noqa: F811

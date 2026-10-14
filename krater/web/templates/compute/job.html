@@ -23,9 +23,14 @@
     </dd>
     <dt>Price</dt>
     <dd>
-      starts at or under {{ job.target_microusd | rate }}, never above {{ job.max_microusd | rate }}
-      ({{ "interruptible" if job.interruptible else "on demand" }}); after {{ job.max_wait_minutes }} minutes:
-      {{ escalations[job.on_max_wait] | lower }}
+      {% if job.is_limit_order %}
+        limit order at {{ job.max_microusd | rate }} (interruptible): starts at or under it, never pays more, and keeps
+        its machine when outbid
+      {% else %}
+        starts at or under {{ job.target_microusd | rate }}, never above {{ job.max_microusd | rate }}
+        ({{ "interruptible" if job.interruptible else "on demand" }}){% if job.on_outbid.value == "hold" %}, keeps its
+        machine when outbid{% endif %}
+      {% endif %}; after {{ job.max_wait_minutes }} minutes waiting to start: {{ escalations[job.on_max_wait] | lower }}
     </dd>
     <dt>Spent</dt><dd>{{ job.spend_cents | dollars }}{% if job.exit_code is not none %}; exit code {{ job.exit_code }}{% endif %}</dd>
   </dl>
