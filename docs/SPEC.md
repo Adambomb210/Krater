@@ -265,6 +265,9 @@ the same channel, under the `completion` stage policy.
 
 **Public gallery** (no auth). Each entry shows the write-up, screenshots, demo link, repo link, the team,
 compute spent (latest reconciled estimate, labelled as an estimate), and tags for browsing.
+The team is named as Weave names them, except members under 18: an admin setting on `/admin` (audited) shows their
+full name, their first name only (the default), or no name ("and 1 more team member"). A member whose age Weave
+doesn't say counts as under 18 here.
 
 **Screenshot storage:** S3-compatible object storage, as a placeholder until a provider is chosen (see Open questions).
 Uploads use presigned URLs, and only objects from approved completion revisions are served publicly.

@@ -160,3 +160,45 @@ def test_quilt_actions_need_a_csrf_token(client: TestClient, login_as, submitted
     response = client.post(f"/admin/quilt/{row.id}/retry", data={"reason": "x"})
 
     assert response.status_code == 403
+
+
+# --------------------------------------------------------------------------------------------------
+# Public gallery
+# --------------------------------------------------------------------------------------------------
+
+
+def test_admin_chooses_how_the_gallery_names_minors(client: TestClient, login_as, db_session) -> None:
+    from krater.models import AuditEvent, GalleryMinorNames
+    from krater.services import site_settings
+
+    login_as(ADMIN_SUB)
+    page = client.get("/admin").text
+    assert 'value="first" checked' in page  # the default
+
+    response = client.post(
+        "/admin/gallery",
+        data={"csrf_token": get_csrf_token(page), "gallery_minor_names": "hidden", "reason": "Parents asked."},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert site_settings.current(db_session).gallery_minor_names is GalleryMinorNames.HIDDEN
+    event = db_session.scalars(sa.select(AuditEvent).where(AuditEvent.action == site_settings.AUDIT_UPDATE)).one()
+    assert event.reason == "Parents asked."
+    assert event.payload["changed"]["gallery_minor_names"] == {"old": "first", "new": "hidden"}
+
+
+def test_the_gallery_setting_needs_a_reason_and_an_admin(client: TestClient, login_as, db_session) -> None:
+    from krater.models import GalleryMinorNames
+    from krater.services import site_settings
+
+    login_as(ADMIN_SUB)
+    csrf = get_csrf_token(client.get("/admin").text)
+    client.post("/admin/gallery", data={"csrf_token": csrf, "gallery_minor_names": "full", "reason": " "})
+    assert site_settings.current(db_session).gallery_minor_names is GalleryMinorNames.FIRST
+
+    login_as(REVIEWER_SUB)
+    csrf = get_csrf_token(client.get("/projects/new").text)
+    response = client.post("/admin/gallery", data={"csrf_token": csrf, "gallery_minor_names": "full", "reason": "x"})
+    assert response.status_code == 403
+    assert site_settings.current(db_session).gallery_minor_names is GalleryMinorNames.FIRST

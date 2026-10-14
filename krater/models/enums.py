@@ -140,3 +140,11 @@ class ComputeInstanceState(enum.StrEnum):
     STOPPED = "stopped"  # stopped by Krater (a box): the GPU is free, the disk still bills
     DESTROYED = "destroyed"  # destroyed and confirmed gone (or never existed)
     CREATE_FAILED = "create_failed"  # Vast refused the create, or it never appeared
+
+
+class GalleryMinorNames(enum.StrEnum):
+    """How the public gallery names a team member who is under 18, or whose age Weave doesn't say."""
+
+    FULL = "full"  # their name as Weave has it
+    FIRST = "first"  # the first word of it
+    HIDDEN = "hidden"  # not named: "and 1 more team member"
