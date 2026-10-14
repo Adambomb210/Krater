@@ -27,7 +27,7 @@ krater wait <job>                      # block until it's finished; handy in scr
 krater cancel <job>
 krater submit <project> --name notebook --image ubuntu:24.04 --box --gpu "RTX 3060" --limit 0.08
 krater ssh <job> -- -L 8888:localhost:8888
-krater download <job> --to results/    # outputs, checkpoints and logs, under results/<kind>/
+krater download <job> results/         # outputs, checkpoints and logs, under results/<kind>/
 krater open <job|project>              # the web page, in your browser
 krater secrets set <project> HF_TOKEN
 ```
@@ -46,10 +46,12 @@ command takes one:
 
 - a `<project>` is its full id, the first characters of it (4 or more), or any part of its title in any case
   (`krater jobs vision`; an exact title wins over longer titles that contain it);
-- a `<job>` is its full id or the first 4 or more characters of it.
+- a `<job>` is its full id, the first 4 or more characters of it, or its name in any case (`krater logs
+  train-v3`). Names can repeat, so a name means the job of that name that is still queued, running, paused or
+  stopped; if none is, and several have ended, the CLI lists them.
 
-If that fits more than one, the CLI lists the candidates (short id and name) and stops. A short id or a title is
-looked up in the projects you're on (`GET /projects`, then each project's `/jobs`), all in the CLI. A **full** id
+If that fits more than one, the CLI lists the candidates (short id and name) and stops. A short id, a name or a
+title is looked up in the projects you're on (`GET /projects`, then each project's `/jobs`), all in the CLI. A **full** id
 goes straight to the API without listing anything, so an admin can act on a job of a project they aren't on. For
 the full ids, use `--json`.
 

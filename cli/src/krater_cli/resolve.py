@@ -1,7 +1,8 @@
 """Short ids and project names, so nobody has to type a UUID.
 
 A `<project>` is a full UUID, a unique prefix of one (4 hex characters or more), or a unique piece of the project's
-title (any case). A `<job>` is a full UUID or a unique prefix. Prefixes and titles are looked up client-side in the
+title (any case). A `<job>` is a full UUID, a unique prefix, or its name (any case; when several jobs share it, the
+one still queued or running). Prefixes, titles and names are looked up client-side in the
 projects the member is on (`GET /projects`, then `GET /projects/{id}/jobs` for each), so the API needs nothing new.
 A full UUID goes straight to the API and nothing is listed: that is how an admin acts on a job of a project they
 aren't on.
@@ -15,6 +16,8 @@ import uuid
 from krater_cli.api import Krater, KraterError
 
 MIN_PREFIX = 4
+#: States in which a job is still the one a member means by its name.
+ACTIVE_STATES = frozenset({"queued", "starting", "running", "paused", "stopped"})
 _HEX_PREFIX = re.compile(r"^[0-9a-f-]+$")
 
 
@@ -91,24 +94,31 @@ def _describe_job(job: dict) -> str:
     return f"{job['name']} ({job['project_title']}, {job['state']})"
 
 
-def _job_prefix(text: str) -> str:
+def _by_name(jobs: list[dict], text: str) -> list[dict]:
+    """Jobs called `text`. Names repeat (a job run again keeps its name), so the active ones win."""
+    needle = text.strip().lower()
+    named = [job for job in jobs if needle and job["name"].lower() == needle]
+    active = [job for job in named if job["state"] in ACTIVE_STATES]
+    return active or named
+
+
+def _find_jobs(jobs: list[dict], text: str) -> list[dict]:
     wanted = _prefix(text)
-    if wanted is None:
-        raise ResolveError(f"No job matching '{text}'.")
-    if len(wanted) < MIN_PREFIX:
-        raise ResolveError(
-            f"Give at least {MIN_PREFIX} characters of the job's id (`krater jobs <project>` lists them)."
-        )
-    return wanted
+    matches = _by_prefix(jobs, wanted) if wanted and len(wanted) >= MIN_PREFIX else []
+    return matches or _by_name(jobs, text)
 
 
 def resolve_job(krater: Krater, text: str) -> str:
     uuid_text = full_uuid(text)
     if uuid_text:
         return uuid_text
-    wanted = _job_prefix(text)
-    jobs = _by_prefix(_jobs(krater, _projects(krater)), wanted)
-    return _choose(text, "job", jobs, _describe_job)["id"]
+    matches = _find_jobs(_jobs(krater, _projects(krater)), text)
+    if not matches:
+        raise ResolveError(
+            f"No job matching '{text}': give its name or at least {MIN_PREFIX} characters of its id "
+            "(`krater jobs <project>` lists them)."
+        )
+    return _choose(text, "job", matches, _describe_job)["id"]
 
 
 def resolve_job_or_project(krater: Krater, text: str) -> tuple[str, dict]:
@@ -124,9 +134,12 @@ def resolve_job_or_project(krater: Krater, text: str) -> tuple[str, dict]:
     projects = _projects(krater)
     wanted = _prefix(text)
     found: list[tuple[str, dict]] = []
+    jobs = _jobs(krater, projects)
     if wanted and len(wanted) >= MIN_PREFIX:
         found += [("project", p) for p in _by_prefix(projects, wanted)]
-        found += [("job", j) for j in _by_prefix(_jobs(krater, projects), wanted)]
+        found += [("job", j) for j in _by_prefix(jobs, wanted)]
+    if not found:
+        found = [("job", j) for j in _by_name(jobs, text)]
     if not found:
         needle = text.strip().lower()
         found = [("project", p) for p in projects if needle and needle in _title(p).lower()]
