@@ -62,8 +62,18 @@ A `self_stop_after_seconds` of -1 turns the switch off, for a provider whose mac
 Checked with Go tests against a fake Vast, the scheduler's tests, and a rehearsal on staging (2026-10-14): the real
 runner in a local container, a 30-minute project override, the portal stopped. It fired after 31 minutes, stopped
 the command, sent one stop to a fake Vast with the container key, and reported no exit; Krater, shown the machine
-stopped, paused the job and started the machine again. **Not yet on a rented machine**: Vast's container key has not
-been tried against the real API (a paid check: rent a job, stop the portal past a short override, and watch Vast).
+stopped, paused the job and started the machine again.
+
+**Checked on a rented machine** (staging, 2026-10-14, an on-demand RTX 3060, $0.04 for the whole test): with a
+30-minute override and the portal and worker stopped right after a heartbeat, the runner fired at 31 minutes, stopped
+the command, and Vast took the stop from the container key (`intended_status: stopped`, the instance kept, not
+destroyed). Krater, back, recorded `self_stopped`, paused the job, started the machine again (Vast answered 200), and
+the runner was reporting again within seconds. Two earlier tries on interruptible machines were taken back by Vast
+within minutes of renting, before the switch could fire; Krater read both as outbid, correctly, since their runners
+had reported moments before.
+
+One gap remains: a runner whose machine restarts while Krater is still down (an outbid machine Vast resumes) can't
+fetch `/start`, so it runs on the 3-hour default rather than the project's setting until Krater answers.
 
 The scheduler doesn't count Krater's own downtime against a runner either: a live instance it hasn't looked at for
 5 minutes or more restarts its runner deadlines (`watch_resumed_at`), so the first pass after an outage doesn't fail
