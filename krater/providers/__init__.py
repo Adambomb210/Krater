@@ -134,6 +134,11 @@ class ProviderInfo:
     #: on every pass, so a rotated credential takes effect without a restart; cache inside if building is costly.
     client: Callable[[Settings], ComputeProvider | None]
 
+    def __post_init__(self) -> None:
+        # A runner told to self-stop with no method would fall back to Vast's API, the wrong call anywhere else.
+        if self.capabilities.self_stop != (self.self_stop_method is not None):
+            raise ValueError(f"{self.name}: self_stop_method must be set exactly when capabilities.self_stop is on")
+
 
 _REGISTRY: dict[str, ProviderInfo] = {}
 
