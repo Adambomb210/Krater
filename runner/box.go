@@ -85,6 +85,18 @@ func hexPort(s string) int {
 	return v
 }
 
+// boxSaveWindow bounds one round of retries at saving /workspace. It must stay well under Krater's box sync
+// deadline (minutes), and heartbeats pause while it runs.
+var boxSaveWindow = 60 * time.Second
+
+// saveWorkspace pushes /workspace, retrying a transient storage error for a bounded time.
+func saveWorkspace(ctx context.Context, workspace *Syncer) error {
+	return retry(ctx, boxSaveWindow, func() error {
+		_, err := workspace.Push(ctx)
+		return err
+	})
+}
+
 // runBox keeps a box going: it reports sessions and GPU use, saves /workspace on a timer and whenever Krater is
 // about to stop the machine, and never returns on its own (Krater stops or destroys the machine).
 func runBox(ctx context.Context, api *API, info *StartInfo, workspace *Syncer, gpu func() (float64, bool), procNet string) {
@@ -110,10 +122,12 @@ func runBox(ctx context.Context, api *API, info *StartInfo, workspace *Syncer, g
 		case err != nil:
 			logf("heartbeat failed: %v", err)
 		case reply.Sync:
-			if _, err := workspace.Push(ctx); err != nil {
-				logf("saving /workspace failed: %v", err)
-			}
-			if err := api.Synced(ctx); err != nil {
+			// Confirm only a save that happened: Krater takes the confirmation for "/workspace is safe" and stops
+			// the box. On failure say nothing: Krater keeps asking on every heartbeat until its sync deadline,
+			// when it records the box as not saved.
+			if err := saveWorkspace(ctx, workspace); err != nil {
+				logf("saving /workspace failed, NOT confirming the save to Krater: %v", err)
+			} else if err := api.Synced(ctx); err != nil {
 				logf("could not confirm the save: %v", err)
 			} else {
 				logf("saved /workspace; Krater stops the box next")

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -87,16 +88,20 @@ func (a *API) post(ctx context.Context, path string, body any, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 500 {
-		a.Contact.Touch(time.Now()) // Krater itself answered (a 5xx may be its proxy saying it's down)
-	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-	if resp.StatusCode == http.StatusForbidden {
-		var e struct {
-			Error string `json:"error"`
+	var answer map[string]any
+	isJSON := json.Unmarshal(data, &answer) == nil && answer != nil
+	// Only Krater's own answers count as contact: a success, or a refusal in its JSON shape. A proxy in front of it
+	// (a WAF challenge, Funnel) answers 403/429/5xx with an HTML page, which must neither end the job nor keep the
+	// dead-man switch from firing.
+	fromKrater := resp.StatusCode/100 == 2 || (resp.StatusCode/100 == 4 && isJSON)
+	if fromKrater {
+		a.Contact.Touch(time.Now())
+	}
+	if resp.StatusCode == http.StatusForbidden && fromKrater {
+		if msg, ok := answer["error"].(string); ok {
+			return &ErrDenied{Message: msg}
 		}
-		_ = json.Unmarshal(data, &e)
-		return &ErrDenied{Message: e.Error}
 	}
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("krater answered %d to %s: %s", resp.StatusCode, path, truncate(string(data), 300))
@@ -170,16 +175,20 @@ func (a *API) CompleteUpload(ctx context.Context, area, name, uploadID string, e
 	return a.post(ctx, "/files/"+area+"/complete", body, nil)
 }
 
+// retryFirstWait is the pause after the first failure; it doubles up to 30 s. A variable so tests needn't wait.
+var retryFirstWait = 2 * time.Second
+
 // retry calls fn until it succeeds, Krater refuses the token, or the deadline passes.
 func retry(ctx context.Context, deadline time.Duration, fn func() error) error {
 	end := time.Now().Add(deadline)
-	wait := 2 * time.Second
+	wait := retryFirstWait
 	for {
 		err := fn()
 		if err == nil {
 			return nil
 		}
-		if _, denied := err.(*ErrDenied); denied || time.Now().After(end) {
+		var denied *ErrDenied
+		if errors.As(err, &denied) || time.Now().After(end) {
 			return err
 		}
 		logf("%v; retrying in %s", err, wait)

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -35,6 +37,8 @@ type fakeKrater struct {
 	secrets   map[string]string
 	refuse    string
 	synced    int
+	// Storage answers 503 to this many PUTs before working, to stand in for a transient storage outage.
+	storageFails int
 
 	mu         sync.Mutex
 	objects    map[string][]byte // "area/name" -> content
@@ -175,6 +179,11 @@ func (f *fakeKrater) storage(w http.ResponseWriter, r *http.Request, key string)
 		_, _ = w.Write(data)
 	case http.MethodPut:
 		data, _ := io.ReadAll(r.Body)
+		if f.storageFails > 0 {
+			f.storageFails--
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		if strings.HasPrefix(key, "part/") {
 			bits := strings.Split(key, "/")
 			var n int
@@ -471,5 +480,142 @@ func TestTheSavedOutputStopsAtItsCap(t *testing.T) {
 	saved, _ := os.ReadFile(filepath.Join(dir, "attempt-2.log"))
 	if !strings.HasPrefix(string(saved), "1234567890\n[krater: the output passed") || strings.Contains(string(saved), "more") {
 		t.Errorf("saved %q", saved)
+	}
+}
+
+// quickRetries makes the runner's retry windows short enough for a test.
+func quickRetries(t *testing.T, window time.Duration) {
+	oldFirst, oldBox, oldFinal := retryFirstWait, boxSaveWindow, finalPushWindow
+	retryFirstWait, boxSaveWindow, finalPushWindow = 5*time.Millisecond, window, window
+	t.Cleanup(func() { retryFirstWait, boxSaveWindow, finalPushWindow = oldFirst, oldBox, oldFinal })
+}
+
+// runSyncingBox runs a box that is asked to sync on its second heartbeat, with `fails` storage outages first.
+func runSyncingBox(t *testing.T, f *fakeKrater, fails int) {
+	f.kind = "box"
+	f.syncAt = 2
+	f.storageFails = fails
+	cfg := f.cfg(t)
+	cfg.Home, cfg.WorkspaceDir, cfg.ProcNet = t.TempDir(), t.TempDir(), t.TempDir()
+	os.WriteFile(filepath.Join(cfg.WorkspaceDir, "notes.txt"), []byte("notes"), 0o644)
+	ctx, cancel := context.WithTimeout(context.Background(), 3500*time.Millisecond)
+	defer cancel()
+	if _, err := Run(ctx, cfg, http.DefaultClient, http.DefaultClient, noGPU); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestABoxDoesNotConfirmASaveThatFailed(t *testing.T) {
+	quickRetries(t, 50*time.Millisecond)
+	f := newFakeKrater(t)
+
+	runSyncingBox(t, f, 1000)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.synced != 0 || len(f.objects) != 0 {
+		t.Errorf("synced %d, objects %v: Krater must not be told /workspace was saved", f.synced, keys(f.objects))
+	}
+}
+
+func TestABoxRetriesATransientSaveFailureBeforeConfirming(t *testing.T) {
+	quickRetries(t, 5*time.Second)
+	f := newFakeKrater(t)
+
+	runSyncingBox(t, f, 2)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.synced != 1 || string(f.objects["workspace/notes.txt"]) != "notes" {
+		t.Errorf("synced %d, objects %v", f.synced, keys(f.objects))
+	}
+}
+
+func runFinishingJob(t *testing.T, f *fakeKrater, fails int) (int, error, string) {
+	f.command = `echo 0.93 > "$KRATER_OUTPUT_DIR/score.txt"`
+	f.storageFails = fails
+	var logged bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	defer log.SetOutput(previous)
+	code, err := Run(context.Background(), f.cfg(t), http.DefaultClient, http.DefaultClient, noGPU)
+	return code, err, logged.String()
+}
+
+func TestTheFinalUploadRetriesATransientStorageError(t *testing.T) {
+	quickRetries(t, 5*time.Second)
+	f := newFakeKrater(t)
+
+	code, err, logged := runFinishingJob(t, f, 2)
+
+	if err != nil || code != 0 || fmt.Sprint(f.exitCodes) != "[0]" {
+		t.Fatalf("Run = %d, %v; exits %v", code, err, f.exitCodes)
+	}
+	if string(f.objects["outputs/score.txt"]) != "0.93\n" {
+		t.Errorf("objects: %v", keys(f.objects))
+	}
+	if strings.Contains(logged, "NOT fully saved") {
+		t.Errorf("warned although the upload worked:\n%s", logged)
+	}
+}
+
+func TestAFinalUploadThatKeepsFailingStillReportsTheExitButSaysSo(t *testing.T) {
+	quickRetries(t, 100*time.Millisecond)
+	f := newFakeKrater(t)
+
+	code, err, logged := runFinishingJob(t, f, 100000)
+
+	if err != nil || code != 0 || fmt.Sprint(f.exitCodes) != "[0]" {
+		t.Fatalf("Run = %d, %v; exits %v: the exit must still be reported", code, err, f.exitCodes)
+	}
+	if !strings.Contains(logged, "outputs FAILED") || !strings.Contains(logged, "NOT fully saved") {
+		t.Errorf("the lost outputs weren't logged:\n%s", logged)
+	}
+}
+
+// A proxy in front of Krater (a WAF challenge, Funnel) can answer with a status Krater uses itself.
+func TestOnlyKratersOwnAnswersCountAsContactOrRefusal(t *testing.T) {
+	const html = "<html><body>Just a moment...</body></html>"
+	cases := []struct {
+		name    string
+		status  int
+		body    string
+		touched bool
+		denied  bool
+		ok      bool
+	}{
+		{"success", 200, `{"ok": true}`, true, false, true},
+		{"refusal", 403, `{"error": "gone"}`, true, true, false},
+		{"JSON 4xx without a refusal", 422, `{"error": "size must be an integer"}`, true, false, false},
+		{"403 challenge page", 403, html, false, false, false},
+		{"429 challenge page", 429, html, false, false, false},
+		{"403 with a JSON array", 403, `["no"]`, false, false, false},
+		{"403 with JSON but no error", 403, `{"detail": "x"}`, true, false, false},
+		{"gateway error", 502, html, false, false, false},
+		{"JSON 5xx", 503, `{"error": "down"}`, false, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(c.status)
+				io.WriteString(w, c.body)
+			}))
+			defer server.Close()
+			start := time.Now().Add(-time.Hour)
+			api := &API{BaseURL: server.URL, Token: "t", HTTP: http.DefaultClient, Contact: NewContact(start)}
+
+			err := api.post(context.Background(), "/synced", nil, nil)
+
+			var denied *ErrDenied
+			if got := errors.As(err, &denied); got != c.denied {
+				t.Errorf("denied = %v, want %v (err %v)", got, c.denied, err)
+			}
+			if (err == nil) != c.ok {
+				t.Errorf("err = %v", err)
+			}
+			if touched := api.Contact.Last().After(start); touched != c.touched {
+				t.Errorf("touched = %v, want %v", touched, c.touched)
+			}
+		})
 	}
 }

@@ -25,16 +25,21 @@ The runner then:
 4. sends a heartbeat every minute, with the mean GPU use from `nvidia-smi` sampled every 15 s, and stops the
    command (SIGTERM, then SIGKILL after 30 s) when Krater answers `stop`;
 5. uploads changed checkpoints every 10 minutes, and checkpoints and outputs (`$KRATER_OUTPUT_DIR`, default
-   `/krater/outputs`) when the command exits;
+   `/krater/outputs`) when the command exits, retrying a storage error for up to 5 minutes;
 6. saves the command's stdout and stderr, with its own lines, to the job's log (`logs/attempt-<n>.log`, up to
    16 MB; the rest still reaches Vast's container log) and uploads it every minute and at exit;
-7. reports the exit code. The scheduler destroys the machine on its next pass.
+7. reports the exit code. The scheduler destroys the machine on its next pass. If the final upload still failed
+   after its retries, the exit is reported anyway (the machine mustn't bill forever) and the runner logs which of
+   checkpoints and outputs were not saved, before the final log upload so the line reaches the job's log. `/exit`
+   carries only the code, so the job still shows as finished.
 
 ## When Krater is gone: the machine stops itself
 
 Krater ends machines only while it is up. On staging (2026-10-14) Krater went down with a box running, and the box
 billed for four hours with nobody watching. So the runner keeps a dead-man switch (`runner/selfstop.go`): every
-answer from Krater, a refusal included, resets it, and a 5xx from Krater's proxy or no connection doesn't. After
+answer from Krater, a refusal included, resets it. Only Krater's own answers count: a 2xx, or a 4xx whose body is
+a JSON object. A 5xx, an HTML page from a proxy in front of it (a WAF challenge on 403 or 429, Funnel) or no
+connection doesn't, and only a 403 with a JSON `error` is taken for Krater refusing the token. After
 `self_stop_after_seconds` without one (the `runner_self_stop_minutes` policy, 3 hours by default, sent with `/start`;
 3 hours too when `/start` itself never got through), the runner:
 
@@ -77,7 +82,9 @@ bootstrap runs as its startup script, starting the runner in the background. The
 3. sends a heartbeat every minute with GPU use and the number of established connections to port 22, read from
    `/proc/net/tcp` and `tcp6`;
 4. saves `/workspace` every 10 minutes, and when a heartbeat reply says `sync` (Krater is about to stop the box),
-   then confirms with `POST /runner/v1/synced`.
+   then confirms with `POST /runner/v1/synced`, but only once the save succeeded (retried for up to a minute).
+   After a failed save it stays silent: Krater keeps asking on each heartbeat until its sync deadline, and records
+   the box as not saved.
 
 Checked on staging (2026-10-11), plain `ubuntu:24.04` in SSH mode: Vast installs and runs sshd itself, runs the
 startup script, and the runner starts within a minute of the rental. `authorized_keys` held only the member's key
