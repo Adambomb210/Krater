@@ -13,7 +13,7 @@ behaviours that cost money to get wrong. Only the worker builds a client. See [v
 
 **Providers** (`krater/providers/`). The seam a second provider plugs into: capabilities Krater branches on, the
 protocol the scheduler calls, neutral errors, and `KRATER_COMPUTE_MODE` naming the provider. Vast is the only one.
-[providers.md](providers.md) says how to add one, maps AWS and GCP onto it, and reports on integrating the OSPool.
+[providers.md](providers.md) says how to add one, maps AWS and GCP onto it, and summarises the OSPool; [ospool.md](ospool.md) is the full integration report.
 
 **Settings** (`/admin/compute`). Every policy number is a global default with per-project overrides, changed with a
 reason and an audit event: reliability floor, bid margin, pause grace, move after, box idle, destroy after, reconcile
