@@ -94,10 +94,13 @@ One round on local staging, 2026-10-11, approved by Adam (scripts: `staging/comp
 - **Not covered:** checkpoint and output uploads from a Vast host (staging's storage isn't public; checked locally
   against SeaweedFS), and idle detection (the box was stopped by hand).
 
+Later rounds on staging (2026-10-14): uploads from a Vast host through the storage Funnel (a checkpoint and an output,
+byte-exact, $0.065 with an SSH box), and the runner's self-stop on a rented machine ($0.040; [runner.md](runner.md)).
+
 ## Deploying
 
-Production stays `KRATER_COMPUTE_MODE=off` until Adam turns it on: the staging round passed, and what it couldn't
-cover (uploads from a Vast host, the Cloudflare checks below) is still open. Turning it on needs, in infra: the Vast key mounted
+Production stays `KRATER_COMPUTE_MODE=off` until Adam turns it on: the staging rounds passed, and what they couldn't
+cover (the Cloudflare checks below) is still open. Turning it on needs, in infra: the Vast key mounted
 into the worker only (`KRATER_VAST_API_KEY_FILE`), `KRATER_VAST_MODE=live`, a production `KRATER_COMPUTE_LABEL_PREFIX`,
 `KRATER_COMPUTE_MODE=vast`, the `krater-compute` bucket (created by the deploy's `ensure_bucket`), and for project
 secrets a Fernet key file mounted into the portal only (`KRATER_PROJECT_SECRETS_KEY_FILE`, an agenix secret).
