@@ -961,7 +961,7 @@ class Scheduler:
             _finish(
                 job,
                 ComputeJobState.CANCELLED,
-                f"No offer met the target within {job.max_wait_minutes} minutes.",
+                f"No offer met the {'limit' if job.is_limit_order else 'target'} within {_span(job.max_wait_minutes)}.",
                 now=self.now,
             )
             _event(self.session, job, "cancelled", "Cancelled after its max wait, as chosen.", now=self.now)

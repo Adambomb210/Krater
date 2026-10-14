@@ -988,3 +988,23 @@ def test_no_runner_binary_means_nothing_is_rented(db_session, member, project, c
 
     assert job.state is ComputeJobState.QUEUED
     assert fake.instances == {}
+
+
+def test_a_limit_order_speaks_of_its_limit(db_session, member, project, client) -> None:  # noqa: F811
+    job = _submit(
+        db_session,
+        member,
+        project,
+        target_microusd=10_000,
+        max_microusd=10_000,
+        on_outbid=ComputeOutbid.HOLD,
+        max_wait_minutes=120,
+        on_max_wait=ComputeEscalation.CANCEL,
+    )
+    assert job.state_reason == "Waiting for an offer at or under its limit."
+
+    _pass(db_session, client, NOW + timedelta(hours=2))
+
+    db_session.refresh(job)
+    assert job.state is ComputeJobState.CANCELLED
+    assert job.state_reason == "No offer met the limit within 2 hours."
