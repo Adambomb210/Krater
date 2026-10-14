@@ -34,9 +34,11 @@ type StartInfo struct {
 	CheckpointSyncSeconds int      `json:"checkpoint_sync_seconds"`
 	LogSyncSeconds        int      `json:"log_sync_seconds"`
 	// With no answer from Krater for this long, stop this machine (selfstop.go).
-	SelfStopAfterSeconds int    `json:"self_stop_after_seconds"`
-	VastInstanceID       int64  `json:"vast_instance_id"`
-	VastAPIURL           string `json:"vast_api_url"`
+	SelfStopAfterSeconds int `json:"self_stop_after_seconds"`
+	// How to stop it, whatever the provider (nil from an older Krater, which sends only the two Vast fields below).
+	SelfStop       *SelfStopDescriptor `json:"self_stop"`
+	VastInstanceID int64               `json:"vast_instance_id"`
+	VastAPIURL     string              `json:"vast_api_url"`
 	// The project's secrets, name -> value. Never logged.
 	Secrets map[string]string `json:"secrets"`
 }

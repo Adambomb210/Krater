@@ -97,7 +97,11 @@ class StartInfo:
     # `runner_self_stop_minutes`), through Vast's API with the instance's own key, which Vast puts in the container.
     # -1 turns the switch off, for a provider whose machines can't stop themselves (`Capabilities.self_stop`).
     self_stop_after_seconds: int = 0
-    # Wire names the runner reads (`runner/api.go`): Vast's integer id for the machine and its API's address.
+    # How the runner stops its machine: `{"method": "vast_api", "url", "instance_id"}`, `{"method": "shutdown"}`, or
+    # None when the provider has no self-stop. Built from the provider's `self_stop_method`, never from its name.
+    self_stop: dict[str, str] | None = None
+    # Legacy wire names, still sent for runners already on machines, which know only Vast's integer id for the
+    # machine and its API's address (`runner/api.go` ignores them when `self_stop` is present).
     vast_instance_id: int | None = None
     vast_api_url: str = ""
     # The project's secrets, name -> value. Never logged or shown (kept out of the repr).
@@ -109,6 +113,15 @@ def _vast_wire_id(instance: ComputeInstance) -> int | None:
     if instance.provider != "vast" or pid is None or not (pid.isascii() and pid.isdigit()):
         return None
     return int(pid)
+
+
+def _self_stop_descriptor(method: str | None, instance: ComputeInstance, settings: Settings) -> dict[str, str] | None:
+    if method == "vast_api":
+        # The id is a string for every provider (AWS ids aren't integers); the runner parses what its method needs.
+        return {"method": method, "url": settings.vast_api_url, "instance_id": instance.provider_instance_id or ""}
+    if method == "shutdown":
+        return {"method": method}
+    return None
 
 
 def start(session: Session, instance: ComputeInstance, *, now: datetime, settings: Settings) -> StartInfo:
@@ -137,6 +150,7 @@ def start(session: Session, instance: ComputeInstance, *, now: datetime, setting
         self_stop_seconds = compute_settings.effective_policy(session, job.project).runner_self_stop_minutes * 60
     else:
         self_stop_seconds = -1
+    self_stop = _self_stop_descriptor(provider.self_stop_method, instance, settings) if provider else None
     return StartInfo(
         job_id=str(job.id),
         attempt=instance.attempt,
@@ -145,6 +159,7 @@ def start(session: Session, instance: ComputeInstance, *, now: datetime, setting
         kind=job.kind.value,
         ssh_keys=keys,
         self_stop_after_seconds=self_stop_seconds,
+        self_stop=self_stop,
         vast_instance_id=_vast_wire_id(instance),
         vast_api_url=settings.vast_api_url,
         secrets=secrets_env,
