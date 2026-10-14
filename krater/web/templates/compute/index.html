@@ -30,7 +30,7 @@
           <tr>
             <th scope="col">Name</th>
             <th scope="col">State</th>
-            <th scope="col" class="num">Target / max</th>
+            <th scope="col" class="num">Price</th>
             <th scope="col" class="num">Spent</th>
           </tr>
         </thead>
@@ -45,7 +45,9 @@
                 <span class="badge badge--compute-{{ job.state.value }}">{{ job.state.value }}</span>
                 {% if job.state_reason %}<span class="cell-sub">{{ job.state_reason }}</span>{% endif %}
               </td>
-              <td class="num">{{ job.target_microusd | rate }} / {{ job.max_microusd | rate }}</td>
+              <td class="num">
+                {% if job.is_limit_order %}limit {{ job.max_microusd | rate }}{% else %}{{ job.target_microusd | rate }} / {{ job.max_microusd | rate }}{% endif %}
+              </td>
               <td class="num">{{ job.spend_cents | dollars }}</td>
             </tr>
           {% endfor %}

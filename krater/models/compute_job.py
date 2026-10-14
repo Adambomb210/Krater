@@ -24,6 +24,7 @@ from krater.models.enums import (
     ComputeInstanceState,
     ComputeJobKind,
     ComputeJobState,
+    ComputeOutbid,
     pg_enum,
 )
 from krater.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
@@ -63,6 +64,10 @@ class ComputeJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     on_max_wait: Mapped[ComputeEscalation] = mapped_column(
         pg_enum(ComputeEscalation, name="compute_escalation"), nullable=False
     )
+    # Outbid past the "move after" time: move elsewhere, or hold the paused machine (a limit order).
+    on_outbid: Mapped[ComputeOutbid] = mapped_column(
+        pg_enum(ComputeOutbid, name="compute_outbid"), nullable=False, default=ComputeOutbid.MOVE
+    )
     max_runtime_minutes: Mapped[int] = mapped_column(sa.Integer, nullable=False)
 
     state: Mapped[ComputeJobState] = mapped_column(pg_enum(ComputeJobState, name="compute_job_state"), nullable=False)
@@ -86,8 +91,14 @@ class ComputeJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     def is_active(self) -> bool:
         return self.state in ACTIVE_JOB_STATES
 
+    @property
+    def is_limit_order(self) -> bool:
+        """One price (target = max) that holds its machine when outbid: what the forms and the CLI call a limit
+        order."""
+        return self.on_outbid is ComputeOutbid.HOLD and self.target_microusd == self.max_microusd
+
     def __repr__(self) -> str:
-        return f"<ComputeJob {self.id} {self.state.value} {self.image!r}>"
+        return f"<ComputeJob{self.id} {self.state.value} {self.image!r}>"
 
 
 #: States in which a job holds budget and may have a live instance.

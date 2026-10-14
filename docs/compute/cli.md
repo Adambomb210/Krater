@@ -18,14 +18,14 @@ Sign in, then work:
 krater login --url https://krater.patchworklabs.org
 krater projects                        # your projects (--all adds withdrawn and completed ones)
 krater prices --gpu 4090               # what an hour costs now (--all adds models nobody offers)
-krater submit <project> --name train --image ghcr.io/me/train:v3 --command "python train.py" --gpu "RTX 4090" --target 0.30 --max 0.45 --max-runtime 240
+krater submit <project> --name train --image ghcr.io/me/train:v3 --command "python train.py" --gpu "RTX 4090" --limit 0.35 --max-runtime 240
 krater jobs <project>
 krater show <job>
 krater logs <job>                      # what the command printed (the end of it)
 krater logs <job> -f                   # keep printing until the job is finished (--interval 5)
 krater wait <job>                      # block until it's finished; handy in scripts
 krater cancel <job>
-krater submit <project> --name notebook --image ubuntu:24.04 --box --gpu "RTX 3060" --target 0.07 --max 0.10
+krater submit <project> --name notebook --image ubuntu:24.04 --box --gpu "RTX 3060" --limit 0.08
 krater ssh <job> -- -L 8888:localhost:8888
 krater download <job> --to results/    # outputs, checkpoints and logs, under results/<kind>/
 krater open <job|project>              # the web page, in your browser
@@ -55,11 +55,22 @@ the full ids, use `--json`.
 
 ### Prices
 
-`--target` is the price at or under which the job may start and `--max` the most it may ever cost, both in dollars
-per hour including the disk; a leading `$` is fine (`--target '$0.07'`). Leave either out and `krater submit` shows
-the cheapest and median price now for the GPU models you named (every model with offers if you named none; on
-demand with `--on-demand`, otherwise interruptible), explains the two options, and exits with 2 without queueing
-anything. `krater prices` is the whole list, cheapest first, with only the models that have offers now unless
+Prices are dollars per hour including the disk; a leading `$` is fine (`--limit '$0.07'`). There are two ways to
+price a job:
+
+- **A limit order**, `--limit 0.07`: it starts once a machine can be had at or under the limit, never pays more, and
+  when it's outbid it keeps its machine (and what's on its disk) while Krater raises the bid up to the limit, moving
+  to another machine only once one is free under the limit. Interruptible machines pay their bid, so Krater bids
+  just enough to win, not the limit itself. It waits to start for as long as it takes, or `--expires 12h` cancels it
+  if it hasn't started by then.
+- **A target and a max**, `--target 0.07 --max 0.10`: it starts at or under the target; outbid, the bid rises up to
+  the max, and after a while (the project's "move after", 30 minutes by default) it moves elsewhere and resumes from
+  its last stored checkpoint. `--max-wait` and `--on-max-wait` say what happens if nothing is free at the target.
+  `--on-outbid hold` keeps the machine instead, as a limit order does. On demand (`--on-demand`) needs this form.
+
+Leave the price out and `krater submit` shows the cheapest and median price now for the GPU models you named (every
+model with offers if you named none; on demand with `--on-demand`, otherwise interruptible), explains the options,
+and exits with 2 without queueing anything. `krater prices` is the whole list, cheapest first, with only the models that have offers now unless
 you pass `--all`, and `--gpu 4090` narrows it to names containing that.
 
 ### Following and waiting

@@ -45,6 +45,7 @@ from krater.models import (
     ComputeJob,
     ComputeJobKind,
     ComputeJobState,
+    ComputeOutbid,
     Project,
 )
 from krater.models.compute_job import ACTIVE_JOB_STATES, FINISHED_JOB_STATES
@@ -156,6 +157,8 @@ class Scheduler:
         self.pacer = pacer if pacer is not None else SearchPacer()
         self._searched: set[str] = set()
         self._rented_from: set[str] = set()
+        # One search per query per pass, shared by held jobs looking for a way out and queued jobs starting.
+        self._searches: dict[str, list[Offer]] = {}
 
     # -- Entry point -----------------------------------------------------------------------------------
 
@@ -517,7 +520,12 @@ class Scheduler:
             # A pause kills the container's processes and Vast restarts it on resume: the runner must start again.
             row.runner_starts_needed = row.runner_starts + 1
             job.state = ComputeJobState.PAUSED
-            job.state_reason = "Outbid: the machine is paused."
+            job.state_reason = "Outbid: the machine is paused." + (
+                f" Krater raises the bid up to {_dollars(job.max_microusd)} and keeps the machine, with the job's "
+                "state on its disk, until it runs again."
+                if job.on_outbid is ComputeOutbid.HOLD
+                else ""
+            )
             _event(
                 self.session,
                 job,
@@ -530,6 +538,12 @@ class Scheduler:
             return
         if row.state is ComputeInstanceState.PAUSED and row.paused_since is not None:
             paused_for = self.now - row.paused_since
+            if job.on_outbid is ComputeOutbid.HOLD:
+                if paused_for >= timedelta(minutes=policy.pause_grace_minutes) and row.interruptible:
+                    self._raise_bid(row, job, policy)
+                if paused_for >= timedelta(minutes=policy.move_after_minutes):
+                    self._move_if_free_elsewhere(row, job, policy)
+                return
             if paused_for >= timedelta(minutes=policy.move_after_minutes):
                 if self._destroy(row, f"paused for {policy.move_after_minutes} minutes"):
                     self._requeue_moved(job)
@@ -817,6 +831,50 @@ class Scheduler:
             now=self.now,
         )
 
+    def _move_if_free_elsewhere(self, row: ComputeInstance, job: ComputeJob, policy: ComputePolicy) -> None:
+        """A held job (a limit order) stays on its paused machine, which keeps the job's state on its disk, until
+        either Vast resumes it or another machine is free at or under the job's target (its limit, for a limit order),
+        which is what a requeued job starts at: only then does it move. Moving with nothing to move to would throw that
+        disk away and leave the job waiting in the queue anyway."""
+        rental_type: RentalType = "bid" if job.interruptible else "ondemand"
+        cap = hourly_cap_cents(job.project, self.settings) * MICROUSD_PER_CENT
+        limit = min(job.target_microusd, cap)
+        try:
+            searched = self._offers_for(job, rental_type=rental_type, limit=limit, policy=policy)
+        except VastSearchQuotaError as exc:
+            job.state_reason = _quota_reason(exc.reset_at)
+            return
+        if searched is None:
+            return
+        _, found = searched
+        choice = offers.choose(
+            [offer for offer in found if offer.machine_id != row.machine_id],
+            rental_type=rental_type,
+            disk_gb=job.disk_gb,
+            margin_percent=policy.bid_margin_percent,
+            limit_microusd=limit,
+            max_microusd=limit,
+            several_models=len(job.gpu_names) != 1,
+        )
+        paused_minutes = int((self.now - row.paused_since).total_seconds() // 60)
+        if choice is None:
+            job.state_reason = (
+                f"Outbid: paused for {paused_minutes} minutes. Keeping this machine, with the job's state on its disk, "
+                f"until its bid of up to {_dollars(job.max_microusd)} wins again or another machine is free at or "
+                f"under {_dollars(limit)}."
+            )
+            return
+        _event(
+            self.session,
+            job,
+            "moving",
+            f"Moving: a machine is free at {_dollars(choice.full_microusd)} after {paused_minutes} minutes outbid.",
+            now=self.now,
+            instance=row,
+        )
+        if self._destroy(row, f"outbid for {paused_minutes} minutes; a machine is free elsewhere"):
+            self._requeue_moved(job)
+
     def _raise_bid(self, row: ComputeInstance, job: ComputeJob, policy: ComputePolicy) -> None:
         max_gpu = job.max_microusd - row.disk_microusd
         if row.gpu_microusd >= max_gpu:
@@ -824,6 +882,8 @@ class Scheduler:
         step = max(1, row.gpu_microusd * max(policy.bid_margin_percent, 1) // 100)
         new_gpu = min(row.gpu_microusd + step, max_gpu)
         new_bid = microusd_to_usd(new_gpu).quantize(offers.BID_QUANTUM, rounding=ROUND_FLOOR)
+        if usd_to_microusd(new_bid) <= row.gpu_microusd:
+            return  # rounded down to the bid it has: it is at the max already
         self.client.change_bid(row.vast_instance_id, new_bid)
         _event(
             self.session,
@@ -841,12 +901,11 @@ class Scheduler:
 
     def _start_queued(self) -> None:
         stmt = sa.select(ComputeJob).where(ComputeJob.state == ComputeJobState.QUEUED).order_by(ComputeJob.queued_at)
-        searches: dict[tuple, list[Offer]] = {}
         taken: set[int] = set()
         try:
             for job in list(self.session.scalars(stmt)):
                 try:
-                    stop = self._start_one(job, searches, taken)
+                    stop = self._start_one(job, taken)
                 except VastSearchQuotaError as exc:
                     logger.warning("krater.compute: %s; not searching until then", exc)
                     job.state_reason = _quota_reason(exc.reset_at)
@@ -879,7 +938,7 @@ class Scheduler:
                     pass
         return rental_type, limit
 
-    def _start_one(self, job: ComputeJob, searches: dict, taken: set[int]) -> bool:
+    def _start_one(self, job: ComputeJob, taken: set[int]) -> bool:
         """Try to rent for `job`. Returns `True` when the pass should stop starting jobs (Vast unreachable)."""
         project = job.project
         if project.status not in LAUNCHABLE_STATUSES:
@@ -901,30 +960,10 @@ class Scheduler:
         limit = min(limit, cap_microusd)
         policy = self._policy(project)
 
-        query = OfferQuery(
-            rental_type=rental_type,
-            gpu_names=tuple(job.gpu_names),
-            min_gpu_ram_gb=job.min_gpu_ram_gb,
-            num_gpus=job.num_gpus,
-            disk_gb=job.disk_gb,
-            min_reliability=policy.reliability_floor,
-            min_direct_ports=1 if job.kind is ComputeJobKind.BOX else 0,
-            limit=SEARCH_LIMIT,
-            max_price_microusd=limit,
-        )
-        key = json.dumps(query.to_body(), sort_keys=True)
-        # The price is part of what's paced: an escalated job (a higher limit) searches at once.
-        pace_key = f"{key}|{rental_type}|{limit}"
-        if key not in searches:
-            quota = self.client.search_quota
-            if quota is not None and quota.exhausted(self.now):
-                job.state_reason = _quota_reason(quota.reset_at)
-                return False
-            if not self.pacer.due(pace_key, now=self.now, quota=quota):
-                return False  # it keeps the reason from its last search
-            searches[key] = self.client.search_offers(query)
-        self._searched.add(pace_key)
-        found = searches[key]
+        searched = self._offers_for(job, rental_type=rental_type, limit=limit, policy=policy)
+        if searched is None:
+            return False  # paced, or out of quota: it keeps its reason
+        pace_key, found = searched
         choice = offers.choose(
             found,
             rental_type=rental_type,
@@ -961,6 +1000,37 @@ class Scheduler:
         run_cents = math.ceil(choice.full_microusd * job.max_runtime_minutes / 60 / MICROUSD_PER_CENT)
         self._rented_from.add(pace_key)
         return self._rent(job, choice, hold_cents=min(run_cents, available), taken=taken)
+
+    def _offers_for(
+        self, job: ComputeJob, *, rental_type: RentalType, limit: int, policy: ComputePolicy
+    ) -> tuple[str, list[Offer]] | None:
+        """Vast's offers for `job`'s shape under `limit`, and the key its searches are paced by. Each query is sent at
+        most once a pass, and only when the pacer says it's due; `None` when it wasn't searched (paced, or Vast's
+        daily search quota is used up, which the job's reason then says)."""
+        query = OfferQuery(
+            rental_type=rental_type,
+            gpu_names=tuple(job.gpu_names),
+            min_gpu_ram_gb=job.min_gpu_ram_gb,
+            num_gpus=job.num_gpus,
+            disk_gb=job.disk_gb,
+            min_reliability=policy.reliability_floor,
+            min_direct_ports=1 if job.kind is ComputeJobKind.BOX else 0,
+            limit=SEARCH_LIMIT,
+            max_price_microusd=limit,
+        )
+        key = json.dumps(query.to_body(), sort_keys=True)
+        # The price is part of what's paced: an escalated job (a higher limit) searches at once.
+        pace_key = f"{key}|{rental_type}|{limit}"
+        if key not in self._searches:
+            quota = self.client.search_quota
+            if quota is not None and quota.exhausted(self.now):
+                job.state_reason = _quota_reason(quota.reset_at)
+                return None
+            if not self.pacer.due(pace_key, now=self.now, quota=quota):
+                return None
+            self._searches[key] = self.client.search_offers(query)
+        self._searched.add(pace_key)
+        return pace_key, self._searches[key]
 
     def _held_cents(self, project: Project, *, exclude: ComputeJob) -> int:
         """Budget other active jobs of `project` still expect to spend."""

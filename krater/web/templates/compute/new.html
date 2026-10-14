@@ -80,7 +80,22 @@
 
     <fieldset class="form-fieldset">
       <legend>Price</legend>
-      <div class="form-grid">
+      {% set limit_order = posted.order == "limit" or not posted %}
+      <div class="field">
+        <span class="field-label">Order</span>
+        <div class="choice-list choice-list--stacked">
+          <label><input type="radio" name="order" value="limit" data-role="order-choice" {% if limit_order %}checked{% endif %}> Limit order: one price. It starts at or under it, never pays more, and if it's outbid it keeps its machine (and what's on its disk) until it wins again, moving only when another machine is free under the limit.</label>
+          <label><input type="radio" name="order" value="range" data-role="order-choice" {% if not limit_order %}checked{% endif %}> Target and max: it starts at or under the target; if it's outbid, Krater raises the bid up to the max, then moves it elsewhere after a while.</label>
+        </div>
+        {% if errors.on_outbid %}<p class="field-error">{{ errors.on_outbid }}</p>{% endif %}
+      </div>
+      <div class="field" data-order="limit">
+        <label for="job-limit">Limit (USD per hour)</label>
+        <input type="text" inputmode="decimal" id="job-limit" name="limit" placeholder="0.12" value="{{ posted.limit or '' }}">
+        <p class="field-hint">Interruptible machines pay their bid: Krater bids just enough to win, up to your limit.</p>
+        {% if errors.limit %}<p class="field-error">{{ errors.limit }}</p>{% endif %}
+      </div>
+      <div class="form-grid" data-order="range">
         <div class="field">
           <label for="job-target">Start at or under (USD per hour)</label>
           <input type="text" inputmode="decimal" id="job-target" name="target" placeholder="0.12" value="{{ posted.target or '' }}">
@@ -119,7 +134,7 @@
 
     <div class="form-actions">
       <button type="submit" class="button button--primary">Queue it</button>
-      <p class="muted">It starts when an offer at or under your target appears.</p>
+      <p class="muted">It starts when an offer at or under your price appears.</p>
     </div>
   </form>
 </section>
@@ -162,4 +177,8 @@
     <p class="muted">No prices sampled yet.</p>
   {% endif %}
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/compute-form.js"></script>
 {% endblock %}

@@ -19,6 +19,11 @@ alert, runner start deadline, heartbeat timeout, storage quota, box sync deadlin
 and median full hourly cost of 1-GPU offers with 32 GB of disk. Members pick targets from the chart. A run stops when less than
 half of Vast's daily search quota is left (`vast-api.md`).
 
+**Limit orders.** A member gives one price: the job starts at or under it, never pays more, and when outbid keeps
+its machine and disk until it wins again or another machine is free under the limit (`on_outbid = hold`). The form
+offers it first; target and max stay for on-demand machines and members who want a move after an outbid. See
+[scheduler.md](scheduler.md#limit-orders) and [cli.md](cli.md#prices).
+
 **Scheduler** (`krater/compute/scheduler.py`, every minute under a lock). Waits for an offer at or under a job's target,
 bids min_bid plus the margin, holds budget under the project's row lock, survives a create whose response is lost (row
 and label committed first), destroys Krater-labelled machines it doesn't know, handles pauses (grace, raise the bid,

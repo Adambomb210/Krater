@@ -18,7 +18,15 @@ from sqlalchemy.orm import Session
 
 from krater.config import get_settings
 from krater.db import get_session
-from krater.models import ComputeEscalation, ComputeEvent, ComputeJob, ComputeJobKind, ComputeJobState, Project
+from krater.models import (
+    ComputeEscalation,
+    ComputeEvent,
+    ComputeJob,
+    ComputeJobKind,
+    ComputeJobState,
+    ComputeOutbid,
+    Project,
+)
 from krater.models.compute_job import ACTIVE_JOB_STATES
 from krater.services import compute_files, compute_jobs, price_history, project_secrets, teams
 from krater.services import projects as project_service
@@ -212,6 +220,12 @@ async def submit_job(
     try:
         kind = ComputeJobKind.BOX if posted.get("kind") == "box" else ComputeJobKind.JOB
         min_vram = posted.get("min_vram", "").strip()
+        if posted.get("order") == "limit":
+            target = high = _rate(posted.get("limit", ""), "limit")
+            on_outbid = ComputeOutbid.HOLD
+        else:
+            target, high = _rate(posted.get("target", ""), "target"), _rate(posted.get("max", ""), "max")
+            on_outbid = ComputeOutbid.MOVE
         spec = JobSpec(
             name=posted.get("name", ""),
             image=posted.get("image", "").strip(),
@@ -221,12 +235,13 @@ async def submit_job(
             min_gpu_ram_gb=_int(min_vram, "min_gpu_ram_gb", "GPU memory") if min_vram else None,
             num_gpus=_int(posted.get("num_gpus", "1"), "num_gpus", "GPUs"),
             disk_gb=_int(posted.get("disk_gb", "32"), "disk_gb", "disk"),
-            target_microusd=_rate(posted.get("target", ""), "target"),
-            max_microusd=_rate(posted.get("max", ""), "max"),
+            target_microusd=target,
+            max_microusd=high,
             interruptible=posted.get("interruptible") == "on",
             max_wait_minutes=_int(posted.get("max_wait_minutes", "720"), "max_wait_minutes", "max wait"),
             on_max_wait=ComputeEscalation(posted.get("on_max_wait", "keep_waiting")),
             max_runtime_minutes=_int(posted.get("max_runtime_minutes", "480"), "max_runtime_minutes", "max runtime"),
+            on_outbid=on_outbid,
         )
         job = compute_jobs.submit_job(
             db_session,
@@ -241,13 +256,18 @@ async def submit_job(
         errors = (
             exc.errors if isinstance(exc, ValidationFailed) else {"on_max_wait": "Choose what happens after the wait."}
         )
+        if posted.get("order") == "limit":
+            # A limit order's one price is both the target and the max: show their errors on it.
+            for field in ("target", "max"):
+                if field in errors:
+                    errors.setdefault("limit", errors.pop(field))
         return _form_page(request, db_session, project, errors=errors, posted=posted, status_code=422)
     except InvalidState as exc:
         db_session.rollback()
         flash(request, str(exc), "error")
         return RedirectResponse(f"/projects/{project.id}/compute", status_code=303)
     db_session.commit()
-    flash(request, "Queued. It starts when an offer at or under your target appears.", "success")
+    flash(request, "Queued. It starts when an offer at or under your price appears.", "success")
     return RedirectResponse(f"/projects/{project.id}/compute/{job.id}", status_code=303)
 
 

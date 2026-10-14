@@ -17,7 +17,9 @@ minute (`compute_schedule`), under a procrastinate lock so passes never overlap,
    - pulling → `running` once Vast says so (the GPU bills from then);
    - running → `paused` when it stops without Krater stopping it (outbid);
    - paused past the pause grace → the bid rises by the bid margin each pass, up to the job's max price;
-   - paused past "move after" → destroyed, and the job requeued (attempt + 1, `KRATER_RESUMED=1`);
+   - paused past "move after" → destroyed, and the job requeued (attempt + 1, `KRATER_RESUMED=1`); a job that
+     holds when outbid (`on_outbid = hold`, which limit orders use) instead keeps the paused machine, with its disk,
+     and moves only once a search finds another machine free at or under its target (paced like any search);
    - running past the job's max runtime → job failed, machine destroyed;
    - never running within 30 minutes → job failed (check the image), machine destroyed;
    - stopped by its own runner after `runner_self_stop_minutes` without Krater (see [runner.md](runner.md)) → a
@@ -35,6 +37,15 @@ minute (`compute_schedule`), under a procrastinate lock so passes never overlap,
    ([vast-api.md](vast-api.md)): 64 rows each, and a search that keeps finding nothing runs 1, 1, 2, 4, 8, then
    every 15 minutes (an escalation is a new search, so it runs at once). Under a quarter of the quota left, every
    15 minutes; with none left, none until the reset at 00:00 UTC, and the job's reason says so.
+
+### Limit orders
+
+A limit order is a job with one price (target = max) that holds when outbid. Vast bills an
+interruptible machine its bid (the staging charges of 2026-10-14 show the GPU billed at exactly the bid), so Krater
+still bids an offer's minimum plus the margin, not the limit: the limit caps the bid and every raise. Krater keeps
+the order itself until a machine fits, rather than leaving a low bid waiting on Vast: that works the same with any
+provider, and Vast's behaviour for a create below `min_bid` is unknown. Holding keeps what the job wrote to its disk
+while outbid; moving with nothing free to move to would throw that away and leave the job queued anyway.
 
 Every price limit is also capped by the project's hourly cap. A rental needs budget for at least one hour, under
 the project's row lock; it then holds the cost of its max runtime (or whatever is left), so two jobs can't spend

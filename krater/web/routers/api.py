@@ -11,6 +11,7 @@ app configured; otherwise every route is a 404.
 
 from __future__ import annotations
 
+import enum
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -23,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from krater.config import get_settings
 from krater.db import get_session
-from krater.models import ComputeEscalation, ComputeEvent, ComputeJob, ComputeJobKind, Project, User
+from krater.models import ComputeEscalation, ComputeEvent, ComputeJob, ComputeJobKind, ComputeOutbid, Project, User
 from krater.services import compute_files, compute_jobs, price_history, project_secrets, teams
 from krater.services import projects as project_service
 from krater.services import users as user_service
@@ -139,6 +140,8 @@ def _job_json(job: ComputeJob, *, detail: bool = False, session: Session | None 
         "disk_gb": job.disk_gb,
         "target_usd_per_hour": _rate(job.target_microusd),
         "max_usd_per_hour": _rate(job.max_microusd),
+        "limit_order": job.is_limit_order,
+        "on_outbid": job.on_outbid.value,
         "interruptible": job.interruptible,
         "spend_cents": job.spend_cents,
         "exit_code": job.exit_code,
@@ -233,6 +236,14 @@ def _price(body: dict, field: str) -> int:
     return usd_to_microusd(value)
 
 
+def _choice[E: enum.StrEnum](body: dict, field: str, kind: type[E], default: str) -> E:
+    try:
+        return kind(body.get(field, default))
+    except ValueError:
+        choices = ", ".join(member.value for member in kind)
+        raise ValidationFailed({field: f"Choose one of: {choices}."}) from None
+
+
 def _int(body: dict, field: str, default: int | None) -> int | None:
     value = body.get(field, default)
     if value is None:
@@ -255,6 +266,16 @@ async def submit(project_id: uuid.UUID, request: Request, actor: Me, db_session:
         gpus = body.get("gpu_names", [])
         if not isinstance(gpus, list) or not all(isinstance(g, str) for g in gpus):
             raise ValidationFailed({"gpu_names": "Give a list of GPU model names."})
+        if "limit_usd_per_hour" in body:
+            # A limit order: one price it starts at or under and never pays more than, and it holds its machine
+            # when outbid rather than starting over elsewhere.
+            if "target_usd_per_hour" in body or "max_usd_per_hour" in body:
+                raise ValidationFailed({"limit_usd_per_hour": "Give a limit, or a target and a max, not both."})
+            target = high = _price(body, "limit_usd_per_hour")
+            outbid_default = ComputeOutbid.HOLD.value
+        else:
+            target, high = _price(body, "target_usd_per_hour"), _price(body, "max_usd_per_hour")
+            outbid_default = ComputeOutbid.MOVE.value
         spec = JobSpec(
             name=str(body.get("name", "")),
             image=str(body.get("image", "")).strip(),
@@ -264,12 +285,13 @@ async def submit(project_id: uuid.UUID, request: Request, actor: Me, db_session:
             min_gpu_ram_gb=_int(body, "min_gpu_ram_gb", None),
             num_gpus=_int(body, "num_gpus", 1),
             disk_gb=_int(body, "disk_gb", 32),
-            target_microusd=_price(body, "target_usd_per_hour"),
-            max_microusd=_price(body, "max_usd_per_hour"),
+            target_microusd=target,
+            max_microusd=high,
             interruptible=bool(body.get("interruptible", True)),
             max_wait_minutes=_int(body, "max_wait_minutes", 12 * 60),
-            on_max_wait=ComputeEscalation(body.get("on_max_wait", "keep_waiting")),
+            on_max_wait=_choice(body, "on_max_wait", ComputeEscalation, "keep_waiting"),
             max_runtime_minutes=_int(body, "max_runtime_minutes", 8 * 60),
+            on_outbid=_choice(body, "on_outbid", ComputeOutbid, outbid_default),
         )
         job = compute_jobs.submit_job(
             db_session,
@@ -282,9 +304,6 @@ async def submit(project_id: uuid.UUID, request: Request, actor: Me, db_session:
     except ValidationFailed as exc:
         db_session.rollback()
         return _error(422, "Check the job's fields.", fields=exc.errors)
-    except ValueError:
-        db_session.rollback()
-        return _error(422, "Check the job's fields.", fields={"on_max_wait": "Unknown choice."})
     except NotAllowed as exc:
         db_session.rollback()
         return _error(403, str(exc))

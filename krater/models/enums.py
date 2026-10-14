@@ -121,6 +121,15 @@ class ComputeEscalation(enum.StrEnum):
     CANCEL = "cancel"
 
 
+class ComputeOutbid(enum.StrEnum):
+    """What an interruptible job does when it stays outbid (paused) past the policy's "move after" time."""
+
+    MOVE = "move"  # destroy the machine and start again elsewhere, from the last stored checkpoint
+    # Keep the paused machine, its disk and the job's state on it, and let Vast resume it when the price comes back
+    # under the job's max; move only once a machine at or under the max is free. A limit order does this.
+    HOLD = "hold"
+
+
 class ComputeInstanceState(enum.StrEnum):
     """One rented Vast instance. A job has one per attempt."""
 

@@ -8,7 +8,7 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from krater.config import get_settings
-from krater.models import ComputeJob, ComputeJobState
+from krater.models import ComputeJob, ComputeJobState, ComputeOutbid
 from krater.services import project_secrets
 from krater.weave import StubWeaveClient
 from tests.conftest import ADMIN_SUB, MEMBER_SUB, OTHER_MEMBER_SUB, REVIEWER_SUB
@@ -100,6 +100,34 @@ def test_a_bad_job_gets_field_errors(client: TestClient, project) -> None:
     )
 
     assert response.status_code == 422 and response.json()["fields"]
+
+
+def test_a_member_places_a_limit_order(client: TestClient, project, db_session) -> None:
+    order = {k: v for k, v in JOB.items() if not k.endswith("_usd_per_hour")} | {"limit_usd_per_hour": "0.08"}
+
+    response = client.post(f"/api/v1/projects/{project.id}/jobs", json=order, headers=_as(MEMBER_SUB))
+
+    assert response.status_code == 201, response.text
+    assert response.json()["limit_order"] is True and response.json()["on_outbid"] == "hold"
+    job = db_session.scalars(sa.select(ComputeJob)).one()
+    assert (job.target_microusd, job.max_microusd, job.on_outbid) == (80_000, 80_000, ComputeOutbid.HOLD)
+
+
+def test_a_limit_and_a_target_together_are_refused(client: TestClient, project) -> None:
+    response = client.post(
+        f"/api/v1/projects/{project.id}/jobs", json={**JOB, "limit_usd_per_hour": "0.08"}, headers=_as(MEMBER_SUB)
+    )
+
+    assert response.status_code == 422 and "limit_usd_per_hour" in response.json()["fields"]
+
+
+def test_an_unknown_choice_names_its_field(client: TestClient, project) -> None:
+    response = client.post(
+        f"/api/v1/projects/{project.id}/jobs", json={**JOB, "on_outbid": "panic"}, headers=_as(MEMBER_SUB)
+    )
+
+    assert response.status_code == 422
+    assert response.json()["fields"] == {"on_outbid": "Choose one of: move, hold."}
 
 
 def test_a_member_cancels_their_job(client: TestClient, project) -> None:
