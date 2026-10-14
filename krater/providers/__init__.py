@@ -12,8 +12,9 @@ needs). It holds:
 - The registry: `KRATER_COMPUTE_MODE` names the provider in use (`off` for none). Like the Vast key, a provider's
   credentials are read only by the worker.
 
-The shapes the calls take and return (`Offer`, `Instance`, `CreateInstance`, `Charge`) started as Vast's, and live in
-`krater.vast.types` until a second provider needs them neutral; docs/compute/providers.md lists what changes then.
+Neutral already: instance ids (strings), the instance's `Phase`, the `Launch` each provider turns into its own create
+request, and the runner's self-stop method. The shapes the calls return (`Offer`, `Instance`, `Charge`) still carry
+Vast's fields in `krater.vast.types`; docs/compute/providers.md lists what changes with a second provider.
 """
 
 from __future__ import annotations

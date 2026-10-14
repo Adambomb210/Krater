@@ -59,40 +59,42 @@ Vast behaves exactly as before: the full suite passes unchanged apart from the w
 3. **A client implementing `ComputeProvider`.** It needs:
    - instances labelled at create, and listable by label prefix (the lost-create settle and the sweep depend on it);
    - `show_instance` answering `None` once an instance is gone;
-   - the instance's state readable as Vast's `is_running` / `intended_status` (see "Still Vast-shaped" below).
-4. **Register it** (`providers.register(ProviderInfo(...))`) with honest capabilities. Add its name to
-   `Settings.compute_mode`.
+   - each instance's neutral `phase` (`krater.providers.Phase`: provisioning, running, interrupted, stopped, gone),
+     plus `stopping` for a machine still running after a stop, and its raw `status` for display. Map only what the
+     provider can tell apart: Vast shows an outbid machine and a self-stopped one alike, so both are `stopped`.
+4. **Register it** (`providers.register(ProviderInfo(...))`) with honest capabilities, its `title` (members read it
+   in reasons and events), a `create_request` that turns Krater's neutral `Launch` (image, disk, label, bootstrap
+   script, box or job, bid, environment) into its own create (EC2 user data, a GCE startup script, an HTCondor submit
+   file), and a `self_stop_method` (`vast_api`, `shutdown`, or `None` with `capabilities.self_stop` off). Add its name
+   to `Settings.compute_mode`.
 5. **Run the scheduler suite against its fake.** Then do a paid round on staging as [README.md](README.md#paid-checks)
    describes before production.
 
+### Done on `claude/provider-neutral` (2026-10-14)
+
+- **Instance ids are strings:** `provider_instance_id`, `provider_offer_id`, `provider_machine_id` and
+  `last_provider_status` (migration `c8f2a4d6e1b3`; its downgrade refuses while any id isn't an integer).
+  `krater.vast` turns them back into integers only at its own paths (`vast_id`).
+- **A neutral phase** replaces the scheduler's reads of `is_running`, `intended_status` and `cur_state`.
+- **Launch is split:** `krater.compute.launch` builds the neutral `Launch`; Vast's args and SSH modes live in
+  `krater.vast.launch`.
+- **The runner's self-stop is a descriptor** in `/start`: `{"method": "vast_api", "url", "instance_id"}`,
+  `{"method": "shutdown"}`, or none, from `ProviderInfo.self_stop_method`. The old `vast_instance_id` and
+  `vast_api_url` fields are still sent for runners already on machines (docs/compute/runner.md).
+- **Members' reasons and events** name the provider from `ProviderInfo.title`.
+
 ### Still Vast-shaped (to change with the second provider)
 
-These were left alone on purpose: each touches stored data or the runner protocol, and no second provider exists yet
-to shape the change.
-
-- **Instance ids.** The column `vast_instance_id` (BigInteger) is unique per provider. Rename it to
-  `provider_instance_id` as a string: AWS ids (`i-0abc…`) and HTCondor ids (`1234.0`) aren't integers. The same goes
-  for `offer_id` and `machine_id`.
-- **The shapes in `krater.vast.types`.** `Offer`, `Instance`, `CreateInstance` and `Charge` carry Vast's fields and
-  `from_json`. Move the neutral parts (GPU model and count, GPU memory, prices, disk, reliability, location, label, a
-  neutral state) to `krater.providers`, and keep the parsing in each provider's package.
-- **The instance's state.** The scheduler reads `is_running` and Vast's `intended_status` / `cur_state` (three places:
-  outbid vs. self-stop, a member restarting their own box, resume). Replace these with a neutral phase on `Instance`:
-  - provisioning
-  - running
-  - interrupted (paused)
-  - stopped
-  - gone
-- **Launch** (`krater/compute/launch.py`). It builds Vast's `CreateInstance` (args/SSH modes, `onstart`). The neutral
-  part is the bootstrap script and the environment; each provider turns those into its own create (EC2 user data, a GCE
-  startup script, an HTCondor submit file).
-- **The runner's self-stop.** `StartInfo.vast_instance_id` and `vast_api_url` tell the runner how to stop its machine
-  through Vast's API. Make it a descriptor: `{"method": "vast_api", "url", "instance_id"}`, `{"method": "shutdown"}`
-  (a cloud VM stops itself with `shutdown -h now`), or nothing.
-- **Search quota and price history.** The table is `vast_search_quota`, and `/pricing/history` samples Vast's market.
-  The public catalog behind the budget estimator is SkyPilot's Vast CSV.
-- **Words members read.** Some templates and reasons say "Vast" ("Vast didn't confirm the rental"). Take these from
-  `ProviderInfo.title`.
+- **The shapes in `krater.vast.types`.** `Offer`, `Instance` and `Charge` still carry Vast's fields (`dph_base`,
+  `min_bid`, `storage_cost`, `actual_status` ...), and the scheduler and offer ranking read some of them. Move the
+  neutral parts (GPU model and count, GPU memory, prices, disk, reliability, location, label, phase, SSH endpoint) to
+  `krater.providers`, and keep the parsing in each provider's package.
+- **One provider at a time.** `KRATER_COMPUTE_MODE` names one provider. Running two at once needs a `provider` column
+  on jobs (backfilled `vast`), validation against the job's provider, a scheduler pass per active provider, and
+  `KRATER_COMPUTE_MODE` taking a list. Rentals already record their provider.
+- **Search quota and price history.** The table is `vast_search_quota`, `/pricing/history` samples Vast's market,
+  and the public catalog behind the budget estimator is SkyPilot's Vast CSV. The admin compute page and the pricing
+  pages say "Vast" for these.
 
 ## Generic clouds: AWS and GCP
 
