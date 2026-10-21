@@ -100,6 +100,19 @@ channel.
   guests: invites use Slack's `force` flag, and anyone Slack refuses (a guest, a deactivated or stale id) is skipped and
   logged, so one person's Slack account never stops the channel, the rest of the team's invites or the review message.
 
+**Demographics gate.** Funders need demographic answers from the members they fund. Weave keeps the answers sealed
+and never sends them to Krater. Weave's directory record says `demographics_answered: true` once the member saved an
+answer.
+
+- On submit of a proposal or an amendment, Krater asks the directory fresh about the member who submits. The
+  submission goes through only when `demographics_answered` is true.
+- If not, the project page says why and links to Weave's form with `return_to` set to the project page. Weave sends
+  the member back after they save. The draft stays as it was, and they submit again.
+- A 404 from the directory blocks, the same as the guardian gate. If Weave can't be reached, the submission fails
+  with "try again".
+- A record without the field does not block. Krater logs a warning, the same choice as a record without `minor`.
+- Saving a draft and submitting a completion are not gated. Details: [weave-integration.md](weave-integration.md#demographics-gate).
+
 ## Data model
 
 Postgres. All money is stored as **integer cents** (`*_cents`). Names are suggestions; refine during implementation.
@@ -179,7 +192,7 @@ amendment or a reopened draft starts with every answer of the revision it follow
 ## Proposal & review workflow
 
 1. **Draft.** The team fills in the application (see "The application"). They can save and come back later.
-2. **Submit.** Krater runs the Slack membership check, freezes the draft into revision N, sets `pending_review`, creates
+2. **Submit.** Krater runs the Slack membership check and the demographics gate, freezes the draft into revision N, sets `pending_review`, creates
    the project's private Slack channel if it doesn't exist yet, invites the submitter and all current reviewers
    (every active user Weave's directory lists with the `reviewer` role), posts the review message with Approve/Reject
    buttons, and posts a line in the master feed channel.

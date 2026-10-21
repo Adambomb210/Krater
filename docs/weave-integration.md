@@ -16,7 +16,9 @@ Krater depends on this Weave work. All of it is merged on Weave `main`:
 - the directory API: [patchworklabsorg/weave#166](https://github.com/patchworklabsorg/weave/pull/166).
 
 The guardian gate also reads the directory fields `minor` and `guardian_verified`. Weave adds them now. Krater works
-with a Weave that doesn't send them yet (see "Guardian verification" below).
+with a Weave that doesn't send them yet (see "Guardian verification" below). The demographics gate reads the field
+`demographics_answered` and links to Weave's page `/profile/demographics`. Krater also works with a Weave that
+doesn't send that field yet (see "Demographics gate" below).
 
 A Weave superadmin must create the roles `member`, `reviewer` and `admin` on the Krater app page. An admin must add `directory` to the Krater app's scopes.
 
@@ -30,7 +32,8 @@ A Weave superadmin must create the roles `member`, `reviewer` and `admin` on the
 | Claim `groups` (scope `groups`) | Group slugs linked to the Krater app; the fallback when `roles` is absent |
 | Claims `slack_id`, `slack_member` (scope `slack`) | Mapping Slack clicks to users, and the Slack membership gate |
 | The client_credentials grant, scope `directory` | Krater's own token for the directory API |
-| `GET /api/v1/directory/users/{sub}` | The fresh role check before every action, the guardian gate before every budget grant, and names and emails when a page needs them |
+| `GET /api/v1/directory/users/{sub}` | The fresh role check before every action, the guardian gate before every budget grant, the demographics gate before every grant application, and names and emails when a page needs them |
+| The page `/profile/demographics?return_to=<url>` | Where a member answers the demographics form. Weave sends them back to `return_to` after they save |
 | `GET /api/v1/directory/users?role=<key>` | "Everyone with role X", e.g. reviewers to invite to Slack channels, or finding a member by email |
 | A second, public app for the `krater` CLI; `GET /oauth/token/info` and `GET /oauth/userinfo` with a member's CLI token | Checking the CLI's tokens (docs/compute/cli.md) |
 
@@ -102,10 +105,10 @@ Krater calls the directory with an access token of its own OAuth app:
 Endpoints:
 
 - `GET /api/v1/directory/users/{sub}` answers
-  `{sub, name, email, email_verified, slack_id, slack_member, groups, roles, active, minor, guardian_verified}`. A 404
-  means the user is unknown or may not use Krater: Krater treats them as not a member. Only `active: true` counts as
-  active. `minor` and `guardian_verified` are booleans that older Weave versions leave out. Krater reads a value
-  that isn't a boolean as missing.
+  `{sub, name, email, email_verified, slack_id, slack_member, groups, roles, active, minor, guardian_verified,
+  demographics_answered}`. A 404 means the user is unknown or may not use Krater: Krater treats them as not a member.
+  Only `active: true` counts as active. `minor`, `guardian_verified` and `demographics_answered` are booleans that
+  older Weave versions leave out. Krater reads a value that isn't a boolean as missing.
 - `GET /api/v1/directory/users?role=<key>` (or `?group=<slug>`, which Krater doesn't use) answers
   `{"users": [...]}`, sorted by `sub`. Send exactly one parameter. A role or group that isn't linked to Krater answers
   404: Krater treats it as an empty list and logs a warning.
@@ -128,7 +131,7 @@ class WeaveClient(Protocol):
 
 `WeaveIdentity` (from the id_token) and `WeaveUser` (from the directory) carry `sub`, `name`, `email`,
 `email_verified`, `slack_id`, `slack_member` (`None` when Weave didn't say) and `roles` (Krater names). `WeaveUser` also
-carries `active`, `minor` and `guardian_verified` (each `None` when Weave didn't say). `exchange_code` verifies the id_token against Weave's JWKS (signature, `iss`, `aud`, `exp`, `nonce`).
+carries `active`, `minor`, `guardian_verified` and `demographics_answered` (each `None` when Weave didn't say). `exchange_code` verifies the id_token against Weave's JWKS (signature, `iss`, `aud`, `exp`, `nonce`).
 
 ### Sign-in (`krater.services.users.sign_in`)
 
@@ -197,6 +200,35 @@ sequenceDiagram
 The project page uses the same lookup (from the short cache) to show which members block a grant, and why. If
 Weave can't answer, the page says so and still loads.
 
+### Demographics gate
+
+Funders need demographic answers from the members they fund. Weave owns the form and keeps the answers sealed. The
+directory never sends the answers. It sends only `demographics_answered: true` once the member saved an answer.
+Krater stores no copy.
+
+When a member submits a proposal or an amendment, `krater.services.demographics.require_answered` asks the directory
+by the submitter's `sub`, with `fresh=True`. It runs after every other submit check:
+
+| Directory record | Krater's answer |
+| --- | --- |
+| `demographics_answered: true` | The submission goes through |
+| `demographics_answered: false` | Refused. The page links to Weave's form |
+| No record (404) | Refused, the same as the guardian gate |
+| A record without `demographics_answered` | The submission goes through, with a warning in the log |
+| Weave can't be reached | Refused ("try again") |
+
+A record without the field does not block. This is the same choice as a record without `minor`: Weave ships the
+field first, so Krater doesn't block every submission during the rollout. When every Weave sends it, the warning in
+the log should stop.
+
+When the gate refuses, Krater undoes the submit, so the saved draft stays as it was. The project page shows the
+message and a link to `{KRATER_WEAVE_ISSUER}/profile/demographics?return_to=<project page>`. The project page URL is
+built from `KRATER_BASE_URL`. Weave sends the member back to `return_to` after they save, because Krater's origin is
+a registered redirect URI origin of its OAuth app. The member then submits again. In stub mode there is no issuer,
+so the page names the form but has no link.
+
+Only the submission is gated. Saving a draft is not. A completion asks for no budget, so it is not gated.
+
 ### Disabling someone
 
 Do it in Weave: remove their Krater roles or their access to the Krater app, and revoke their tokens. The next action
@@ -208,11 +240,13 @@ admin can cancel them from the project's Compute page.
 
 `KRATER_WEAVE_MODE=stub` (refused in production) replaces Weave with `krater/weave/stub_users.json`. Each fixture
 user has the fields a real Weave sends: `sub`, `name`, `email`, `email_verified`, `slack_id`, optional
-`slack_member`, `groups` (slugs), `roles` (keys) and optional `minor` and `guardian_verified`. One user
+`slack_member`, `groups` (slugs), `roles` (keys) and optional `minor`, `guardian_verified` and
+`demographics_answered`. No fixture user has `demographics_answered`, so the gate lets them all submit and logs a
+warning. One user
 (`PWLREVIEWERTWO`) has no `roles` field, to exercise the group fallback. `PWLMINORONE` is a minor without a verified
 guardian, `PWLMINORVERIFIED` is a minor with one, and `PWLMEMBERTWO` has no `minor` field. The stub client answers the
 directory lookups from the same fixture with the same `RoleMapping`.
 
 Tests change what Weave says mid-test with `StubWeaveClient.set_roles`, `set_active`, `set_minor`,
-`set_guardian_verified`, `remove_user` and `put_user`. The
+`set_guardian_verified`, `set_demographics_answered`, `remove_user` and `put_user`. The
 `weave_stub` fixture in `tests/conftest.py` is the stub the test app uses.
