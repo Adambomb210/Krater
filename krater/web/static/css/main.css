@@ -712,6 +712,7 @@ a.stat .stat__value {
 .compute-hint,
 .budget-banner,
 .guardian-banner,
+.demographics-banner,
 .notice {
   margin: 0 0 var(--space-4);
   padding: var(--space-3) var(--space-4);
@@ -748,8 +749,10 @@ a.stat .stat__value {
   background: var(--warn-soft);
 }
 
-/* A team member under 18 needs a guardian verification before Krater grants budget. */
-.guardian-banner {
+/* A team member under 18 needs a guardian verification before Krater grants budget. The submitter must answer
+   Weave's demographics form before Krater submits a grant application. */
+.guardian-banner,
+.demographics-banner {
   border-color: var(--warn-soft);
   border-left-color: var(--warn);
   background: var(--warn-soft);

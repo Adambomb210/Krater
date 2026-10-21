@@ -25,6 +25,18 @@
   <div class="stat{% if summary.remaining_cents < 0 %} stat--bad{% endif %}"><dt>Remaining</dt><dd>{{ summary.remaining_cents | dollars }}</dd></div>
 </dl>
 
+{% if demographics_error %}
+  <div class="demographics-banner" role="alert">
+    <p><strong>{{ demographics_error }}</strong></p>
+    {% if demographics_url %}
+      <p><a class="button button--primary" href="{{ demographics_url }}">Answer the form in Weave</a></p>
+      <p>Weave brings you back to this page after you save. Then submit again.</p>
+    {% else %}
+      <p>Open your Weave profile and answer the demographics form. Then submit again.</p>
+    {% endif %}
+  </div>
+{% endif %}
+
 {% if budget_flag == "teardown" %}
   <p class="budget-banner" role="status">
     Budget reached: this project's machines have been torn down. New launches are blocked until the ceiling is

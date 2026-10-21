@@ -127,3 +127,13 @@ def test_set_minor_and_set_guardian_verified_change_the_record(stub_client: Stub
     assert record is not None
     assert record.minor is True
     assert record.guardian_verified is True
+
+
+def test_set_demographics_answered_changes_the_record(stub_client: StubWeaveClient) -> None:
+    assert stub_client.get_user("PWLMEMBERONE").demographics_answered is None
+
+    stub_client.set_demographics_answered("PWLMEMBERONE", False)
+
+    record = stub_client.get_user("PWLMEMBERONE")
+    assert record is not None
+    assert record.demographics_answered is False

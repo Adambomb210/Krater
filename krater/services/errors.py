@@ -66,3 +66,25 @@ class GuardianCheckUnavailable(InvalidState):
             "Krater couldn't reach Weave to check the team members' ages, so it granted no budget. "
             "Try again in a minute."
         )
+
+
+class DemographicsRequired(InvalidState):
+    """The member who submits a grant application hasn't answered Weave's demographics form yet, or Weave's directory
+    doesn't return them (docs/weave-integration.md "Demographics gate")."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Answer the demographics form in Weave before you submit. Funders need these answers. "
+            "Krater never sees them. Your draft is saved."
+        )
+
+
+class DemographicsCheckUnavailable(InvalidState):
+    """Krater couldn't ask Weave whether the member answered the demographics form, so it doesn't submit (fail
+    closed)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Krater couldn't reach Weave to check your demographics answers, so it didn't submit. "
+            "Your draft is saved. Try again in a minute."
+        )

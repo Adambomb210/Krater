@@ -6,11 +6,11 @@ picker page; `exchange_code` treats the authorization code as the chosen user's 
 
 Each fixture user has the same fields a real Weave sends: `sub`, `name`, `email`, `email_verified`,
 `slack_id`, optional `slack_member`, `groups` (group slugs), `roles` (Weave role keys; leave it out
-to exercise the group-slug fallback), and optional `minor` and `guardian_verified` (leave them out
-for "Weave didn't say").
+to exercise the group-slug fallback), and optional `minor`, `guardian_verified` and
+`demographics_answered` (leave them out for "Weave didn't say").
 Sign-in and the directory lookups translate them with the same `RoleMapping` the live client uses.
-Tests change a user mid-test with `set_roles`, `set_active`, `set_minor`, `set_guardian_verified`
-or `remove_user`. The app
+Tests change a user mid-test with `set_roles`, `set_active`, `set_minor`, `set_guardian_verified`,
+`set_demographics_answered` or `remove_user`. The app
 refuses stub mode in production.
 """
 
@@ -51,6 +51,7 @@ class StubUser:
     active: bool
     minor: bool | None = None  # None: Weave sends no `minor` field
     guardian_verified: bool | None = None  # None: Weave sends no `guardian_verified` field
+    demographics_answered: bool | None = None  # None: Weave sends no `demographics_answered` field
 
 
 class StubWeaveClient:
@@ -80,6 +81,7 @@ class StubWeaveClient:
                 active=entry.get("active", True),
                 minor=entry.get("minor"),
                 guardian_verified=entry.get("guardian_verified"),
+                demographics_answered=entry.get("demographics_answered"),
             )
             self._users_by_sub[user.sub] = user
 
@@ -154,9 +156,11 @@ class StubWeaveClient:
         active: bool = True,
         minor: bool | None = None,
         guardian_verified: bool | None = None,
+        demographics_answered: bool | None = None,
     ) -> None:
         """Add or replace a user. `roles` are Weave role keys (`None` for no `roles` field at all),
-        `groups` are group slugs, and `minor` or `guardian_verified` is `None` when Weave sends no such field."""
+        `groups` are group slugs, and `minor`, `guardian_verified` or `demographics_answered` is `None` when
+        Weave sends no such field."""
         self._users_by_sub[sub] = StubUser(
             sub=sub,
             name=name,
@@ -169,6 +173,7 @@ class StubWeaveClient:
             active=active,
             minor=minor,
             guardian_verified=guardian_verified,
+            demographics_answered=demographics_answered,
         )
 
     def set_roles(self, sub: str, roles: Iterable[str] | None, *, groups: Iterable[str] | None = None) -> None:
@@ -192,6 +197,10 @@ class StubWeaveClient:
         """Change whether Weave says a Weave admin verified `sub`'s guardian (`None`: no field)."""
         self._users_by_sub[sub] = dataclasses.replace(self._users_by_sub[sub], guardian_verified=verified)
 
+    def set_demographics_answered(self, sub: str, answered: bool | None) -> None:
+        """Change whether Weave says `sub` saved an answer to the demographics form (`None`: no field)."""
+        self._users_by_sub[sub] = dataclasses.replace(self._users_by_sub[sub], demographics_answered=answered)
+
     def remove_user(self, sub: str) -> None:
         """Make the directory answer 404 for `sub`, as Weave does for a user Krater may not see."""
         self._users_by_sub.pop(sub, None)
@@ -208,6 +217,7 @@ class StubWeaveClient:
             active=user.active,
             minor=user.minor,
             guardian_verified=user.guardian_verified,
+            demographics_answered=user.demographics_answered,
         )
 
 

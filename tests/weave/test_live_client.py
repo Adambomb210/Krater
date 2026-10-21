@@ -364,6 +364,31 @@ def test_non_boolean_age_fields_count_as_missing(fake_weave: FakeWeave, live_cli
     assert user.guardian_verified is None
 
 
+def test_get_user_reads_the_demographics_answered_field(fake_weave: FakeWeave, live_client: LiveWeaveClient) -> None:
+    fake_weave.directory_users["PWLDIR0001"] = {**DIRECTORY_USER, "demographics_answered": True}
+
+    user = live_client.get_user("PWLDIR0001")
+
+    assert user is not None
+    assert user.demographics_answered is True
+
+
+@pytest.mark.parametrize("raw", [None, "yes", 1], ids=["missing", "string", "number"])
+def test_a_missing_or_non_boolean_demographics_answered_is_none(
+    fake_weave: FakeWeave, live_client: LiveWeaveClient, raw: object
+) -> None:
+    # Older Weave versions leave the field out.
+    record = dict(DIRECTORY_USER)
+    if raw is not None:
+        record["demographics_answered"] = raw
+    fake_weave.directory_users["PWLDIR0001"] = record
+
+    user = live_client.get_user("PWLDIR0001")
+
+    assert user is not None
+    assert user.demographics_answered is None
+
+
 def test_get_user_answers_none_on_404(live_client: LiveWeaveClient) -> None:
     assert live_client.get_user("PWLNOBODY") is None
 

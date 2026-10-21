@@ -30,16 +30,24 @@ from krater.models import (
     User,
 )
 from krater.services import budget as budget_service
-from krater.services import guardian, people, slack_membership, teams
+from krater.services import demographics, guardian, people, slack_membership, teams
 from krater.services import projects as project_service
 from krater.services import screenshots as screenshot_service
 from krater.services.actor import Actor
 from krater.services.budget_alerts import current_budget_flag
-from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
+from krater.services.errors import (
+    DemographicsCheckUnavailable,
+    DemographicsRequired,
+    InvalidState,
+    NotAllowed,
+    NotFound,
+    ValidationFailed,
+)
 from krater.services.launch_rules import LAUNCHABLE_STATUSES, hourly_cap_cents
 from krater.slack import get_slack_client
 from krater.storage import ObjectStore, get_object_store
 from krater.weave import WeaveClient, WeaveUnavailableError, get_weave_client
+from krater.weave.links import demographics_form_url
 from krater.web import application_form, estimator_form
 from krater.web.csrf import verify_csrf_token
 from krater.web.deps import fresh_actor
@@ -435,6 +443,7 @@ def _build_detail_context(
     errors: dict[str, str] | None = None,
     error_form: str | None = None,
     posted: dict[str, str] | None = None,
+    demographics_error: str | None = None,
 ) -> dict:
     summary = project_service.project_summary(session, project=project)
     revisions = sorted(project.revisions, key=lambda revision: revision.number, reverse=True)
@@ -556,6 +565,11 @@ def _build_detail_context(
         "errors": errors or {},
         "error_form": error_form,
         "posted": posted or {},
+        # Set only when the demographics gate refused a submission (`submit_project`).
+        "demographics_error": demographics_error,
+        "demographics_url": demographics_form_url(f"{get_settings().base_url}/projects/{project.id}")
+        if demographics_error
+        else None,
     }
 
 
@@ -604,6 +618,17 @@ def submit_project(
         )
         return templates.TemplateResponse(request, "projects/edit.html", context, status_code=422)
     except InvalidState as exc:
+        return _invalid_state_redirect(db_session, request, project_id, exc)
+
+    # The demographics gate runs last, so a member fixes missing answers first. The rollback undoes the submit and
+    # leaves the saved draft as it was. The page links to Weave's form, which sends the member back here.
+    try:
+        demographics.require_answered(weave_client, actor.user)
+    except DemographicsRequired as exc:
+        db_session.rollback()
+        context = _build_detail_context(db_session, weave_client, project, actor, demographics_error=str(exc))
+        return templates.TemplateResponse(request, "projects/detail.html", context, status_code=409)
+    except DemographicsCheckUnavailable as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
 
     revision_id = project.current_revision_id
