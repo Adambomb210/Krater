@@ -9,10 +9,6 @@ members' hosts and ignored the hourly cap). The integration details are in
 [weave-integration.md](weave-integration.md), [compute/](compute/README.md) and
 [quilt-integration.md](quilt-integration.md).
 
-**Compute (Oct 11, 2026):** SkyPilot was dropped. This release runs with compute off: it approves and tracks budgets
-but launches no machines. Krater Compute, Krater's own Vast.ai layer, follows in its own release and adds launching,
-spend tracking and the budget hard stop.
-
 ## What changed from the Sep 24 draft
 
 | Area | Sep 24 draft | This revision | Why |
@@ -195,8 +191,9 @@ amendment or a reopened draft starts with every answer of the revision it follow
    - records the Review against the current revision;
    - asks `ApprovalPolicyService` whether the policy is now satisfied.
 4. **Approve.** When the policy is satisfied, Krater runs the guardian gate (see "Guardian verification"). If the gate
-   passes, the revision is approved, a `BudgetEntry(initial_approval)` is written, and the project moves to
-   `approved`. If it fails, nothing is recorded and the reviewer sees which members need a verified guardian.
+   passes, the revision is approved, a `BudgetEntry(initial_approval)` is written, the project moves to `approved`, and
+   its team can run compute. If it fails, nothing is recorded and the reviewer sees which members need a verified
+   guardian.
 5. **Reject.** A reason is required. The project moves to `changes_requested`, and the submitter edits and resubmits
    (step 2, same project, new revision).
 6. **Amend.** An `approved` project can have its scope or budget amended. This creates an `amendment` revision reviewed
@@ -300,7 +297,8 @@ lives in Weave, so every Patchwork Labs app can use it. Krater stores none of it
 **The rule.** Krater grants no budget to a project while a team member is a minor without a verified guardian,
 or while Weave's directory doesn't return a team member.
 
-- **The team** is the submitter plus the credited builders on the revision that is decided.
+- **The team** is the project's lead plus its accepted members, as the team stands when the grant is decided. Someone
+  who joins a project that already has budget is checked when they accept the invitation.
 - **The data** comes from Weave's directory record: `minor` (true when the member is under 18) and
   `guardian_verified` (true when a Weave admin recorded the form and the call). A member blocks the grant when
   `minor` is true and `guardian_verified` is not true.

@@ -6,7 +6,9 @@ short call or video check with the guardian. Weave's directory then says `guardi
 stores none of this. It reads the directory and grants no budget to a project while a team member is a minor
 without a verified guardian.
 
-- **The team** is the project's submitter plus the credited builders on the revision being decided.
+- **The team** is the project's lead plus its accepted members (`krater.services.teams`), as it is at the moment
+  of the grant. Someone who joins an already-funded project is checked when they accept the invitation
+  (`require_member_cleared`), so a team never holds an uncleared minor while it has budget.
 - **The rule.** A member blocks the grant when Weave says `minor: true` and `guardian_verified` is not
   `true` (false or missing). The directory is asked fresh at decision time, the same way role checks are.
 - **No directory record.** Weave's directory answers 404 for anyone the Krater app may not serve. That includes
@@ -32,7 +34,8 @@ from dataclasses import dataclass
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from krater.models import Project, ProjectRevision, User
+from krater.models import Project, User
+from krater.services import teams
 from krater.services.errors import GuardianCheckUnavailable, GuardianVerificationRequired
 from krater.weave import WeaveClient, WeaveUnavailableError
 
@@ -60,26 +63,15 @@ class PendingMember:
         return f"{self.name} ({sub})" if self.name and self.name != sub else sub
 
 
-def team_users(session: Session, project: Project, *, revision: ProjectRevision | None = None) -> list[User]:
-    """The project's team: its submitter, then the credited builders on `revision` (the current revision by
-    default). In a stable order, without duplicates."""
-    revision = revision if revision is not None else project.current_revision
-    users = [project.submitter]
-    builder_ids = [
-        uid for uid in (revision.credited_builder_ids if revision is not None else []) if uid != project.submitter_id
-    ]
-    if builder_ids:
-        users.extend(session.scalars(sa.select(User).where(User.id.in_(builder_ids)).order_by(User.weave_sub)))
-    return users
+def team_users(session: Session, project: Project) -> list[User]:
+    """The project's team as it is now: the lead, then accepted members in the order they were invited."""
+    ids = teams.team_user_ids(project)
+    by_id = {user.id: user for user in session.scalars(sa.select(User).where(User.id.in_(ids)))}
+    return [by_id[uid] for uid in dict.fromkeys(ids) if uid in by_id]
 
 
 def members_needing_verification(
-    session: Session,
-    weave_client: WeaveClient,
-    project: Project,
-    *,
-    revision: ProjectRevision | None = None,
-    fresh: bool = True,
+    session: Session, weave_client: WeaveClient, project: Project, *, fresh: bool = True
 ) -> list[PendingMember]:
     """Every team member who blocks a grant: Weave lists them as `minor: true` without `guardian_verified: true`,
     or Weave's directory has no record of them (404). A record without `minor` doesn't block; it is logged.
@@ -87,38 +79,54 @@ def members_needing_verification(
     `fresh` (the default) skips the directory client's cache, as every decision must; only a page view may
     pass `fresh=False`. Raises `WeaveUnavailableError` if Weave can't be reached.
     """
-    pending: list[PendingMember] = []
-    for user in team_users(session, project, revision=revision):
-        record = weave_client.get_user(user.weave_sub, fresh=fresh)
-        if record is None:
-            # Weave hides anyone Krater may not serve, a minor without guardian consent included.
-            pending.append(PendingMember(user=user, name="", reason=REASON_NOT_IN_WEAVE))
-            continue
-        if record.minor is None:
-            logger.warning(
-                "Weave didn't say whether team member %s of project %s is a minor (no minor field); treating them "
-                "as not known to be a minor",
-                user.weave_sub,
-                project.id,
-            )
-            continue
-        if record.minor and record.guardian_verified is not True:
-            pending.append(PendingMember(user=user, name=record.name))
-    return pending
+    return [
+        member
+        for user in team_users(session, project)
+        if (member := _blocking(weave_client, user, project, fresh=fresh)) is not None
+    ]
 
 
-def require_team_cleared(
-    session: Session, weave_client: WeaveClient, project: Project, *, revision: ProjectRevision | None = None
-) -> None:
+def _blocking(weave_client: WeaveClient, user: User, project: Project, *, fresh: bool) -> PendingMember | None:
+    """`user` as a `PendingMember` if Weave's directory says they block a grant to `project`, else `None`."""
+    record = weave_client.get_user(user.weave_sub, fresh=fresh)
+    if record is None:
+        # Weave hides anyone Krater may not serve, a minor without guardian consent included.
+        return PendingMember(user=user, name="", reason=REASON_NOT_IN_WEAVE)
+    if record.minor is None:
+        logger.warning(
+            "Weave didn't say whether team member %s of project %s is a minor (no minor field); treating them "
+            "as not known to be a minor",
+            user.weave_sub,
+            project.id,
+        )
+        return None
+    if record.minor and record.guardian_verified is not True:
+        return PendingMember(user=user, name=record.name)
+    return None
+
+
+def require_team_cleared(session: Session, weave_client: WeaveClient, project: Project) -> None:
     """The gate before any budget grant. Raises `GuardianVerificationRequired` (listing the members) if a team
     member is a minor without a verified guardian in Weave, and `GuardianCheckUnavailable` if Weave can't be
     reached. Both are `InvalidState`, so the web and Slack paths show the message and roll back."""
     try:
-        pending = members_needing_verification(session, weave_client, project, revision=revision, fresh=True)
+        pending = members_needing_verification(session, weave_client, project, fresh=True)
     except WeaveUnavailableError as exc:
         raise GuardianCheckUnavailable() from exc
     if pending:
         raise GuardianVerificationRequired([(member.label, member.reason) for member in pending])
+
+
+def require_member_cleared(weave_client: WeaveClient, user: User, project: Project) -> None:
+    """The same gate for one person joining `project`'s team after it was funded: without it, a minor without a
+    verified guardian could accept an invitation and use budget that was granted before they joined. Same errors
+    as `require_team_cleared`."""
+    try:
+        member = _blocking(weave_client, user, project, fresh=True)
+    except WeaveUnavailableError as exc:
+        raise GuardianCheckUnavailable() from exc
+    if member is not None:
+        raise GuardianVerificationRequired([(member.label, member.reason)])
 
 
 def pending_for_display(session: Session, weave_client: WeaveClient, project: Project) -> list[PendingMember] | None:
@@ -137,6 +145,7 @@ __all__ = [
     "PendingMember",
     "members_needing_verification",
     "pending_for_display",
+    "require_member_cleared",
     "require_team_cleared",
     "team_users",
 ]

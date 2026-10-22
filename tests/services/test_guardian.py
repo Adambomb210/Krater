@@ -13,6 +13,8 @@ from krater.services import budget, guardian, projects
 from krater.services.actor import GROUP_MEMBER, Actor
 from krater.services.errors import GuardianCheckUnavailable, GuardianVerificationRequired
 from krater.weave import StubWeaveClient, WeaveUnavailableError
+from tests.factories import new_project
+from tests.services.conftest import add_to_team
 
 
 class _DownWeave:
@@ -52,13 +54,11 @@ def minor(make_actor, weave: StubWeaveClient) -> Actor:
 
 
 def _submitted(db_session: Session, submitter: Actor, *, budget_cents: int = 10_000, builders=()):
-    project = projects.create_project(
+    project = new_project(
         db_session, submitter, title="Rover", write_up="A rover.", budget_requested_cents=budget_cents
     )
-    if builders:
-        projects.update_draft(
-            db_session, submitter, project=project, credited_builder_ids=[b.user.id for b in builders]
-        )
+    for builder in builders:
+        add_to_team(db_session, project, builder)
     return projects.submit(db_session, submitter, project=project)
 
 
@@ -153,7 +153,7 @@ def test_a_team_member_weave_does_not_return_blocks_the_grant(
     assert project.status is ProjectStatus.PENDING_REVIEW
 
 
-def test_a_credited_builder_weave_does_not_return_blocks_the_grant(
+def test_a_teammate_weave_does_not_return_blocks_the_grant(
     db_session: Session, member: Actor, minor: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
     # A minor whose guardian consent was revoked: Weave hides them, so the 404 must not let the grant through.
@@ -181,7 +181,7 @@ def test_both_reasons_are_listed_together(
     ]
 
 
-def test_a_minor_credited_builder_blocks_the_approval(
+def test_a_minor_teammate_blocks_the_approval(
     db_session: Session, member: Actor, minor: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
     project = _submitted(db_session, member, builders=[minor])

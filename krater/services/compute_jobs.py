@@ -122,7 +122,7 @@ def _check_provider(spec: JobSpec, errors: dict[str, str]) -> None:
 def submit_job(
     session: Session, actor: Actor, *, project: Project, spec: JobSpec, cap_cents: int, now: datetime
 ) -> ComputeJob:
-    """Queue `spec` for `project`. Only the project's submitter and credited builders may, and only while the project
+    """Queue `spec` for `project`. Only the project's team (lead and accepted members) may, and only while the project
     can launch. `cap_cents` is the project's hourly cap (`launch_rules.hourly_cap_cents`)."""
     if not _can_launch_for(actor, project):
         raise NotAllowed("Only the project's team can run jobs on its budget.")
@@ -163,6 +163,12 @@ def submit_job(
     return job
 
 
+def _who(actor: Actor, job: ComputeJob) -> str:
+    """How a job's history names who acted. Not their name: Krater stores none (docs/weave-integration.md).
+    The event payload keeps the actor's user id."""
+    return "a team member" if _can_launch_for(actor, job.project) else "an admin"
+
+
 def cancel_job(session: Session, actor: Actor, *, job: ComputeJob, now: datetime) -> ComputeJob:
     """Cancel `job`, by its team or an admin. Its machine, if any, is destroyed on the scheduler's next pass."""
     if not (actor.is_admin or _can_launch_for(actor, job.project)):
@@ -170,7 +176,7 @@ def cancel_job(session: Session, actor: Actor, *, job: ComputeJob, now: datetime
     if job.state in FINISHED_JOB_STATES:
         raise InvalidState(f"The job is already {job.state.value}.")
     job.state = ComputeJobState.CANCELLED
-    job.state_reason = f"Cancelled by {actor.user.display_name}."
+    job.state_reason = f"Cancelled by {_who(actor, job)}."
     job.ended_at = now
     job.hold_cents = 0
     session.add(
@@ -205,10 +211,15 @@ def stop_box(session: Session, actor: Actor, *, job: ComputeJob, now: datetime) 
         raise InvalidState("Only a running box can be stopped.")
     if row.stop_requested_at is None:
         row.stop_requested_at = now
-        row.stop_reason = f"{MEMBER_STOP_PREFIX}{actor.user.display_name}"
+        row.stop_reason = f"{MEMBER_STOP_PREFIX}{_who(actor, job)}"
         session.add(
             ComputeEvent(
-                job_id=job.id, instance_id=row.id, kind="stop_requested", message=row.stop_reason, payload={}, at=now
+                job_id=job.id,
+                instance_id=row.id,
+                kind="stop_requested",
+                message=row.stop_reason,
+                payload={"by": str(actor.user.id)},
+                at=now,
             )
         )
     session.flush()

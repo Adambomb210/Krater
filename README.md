@@ -11,6 +11,7 @@ gallery of completed projects.
 - [Krater Compute](docs/compute/README.md): renting Vast machines for members' jobs and boxes, spend and budgets
 - [Handoff](docs/HANDOFF.md): start here if you are picking this project up (setup, state, decisions, next steps)
 - [Future work](docs/FUTURE.md): what comes after v1, loose ends, and parked ideas
+- [Run only when compute is cheap](docs/guides/run-when-cheap.md): member guide to interruptible machines
 
 ## Development
 

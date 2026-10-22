@@ -7,6 +7,7 @@ CSRF, and how domain errors map to responses.
 from __future__ import annotations
 
 import uuid
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session

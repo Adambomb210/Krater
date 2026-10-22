@@ -11,7 +11,7 @@ staging run first ([staging.md](staging.md)); this page assumes everything there
 - **On any other Docker host: this Compose file**, with the opt-in `proxy` (Caddy, automatic TLS) and `backup`
   profiles. Sections 2 to 5 describe that path.
 
-Section 1 (DNS, Weave, Slack) applies to both. The image builds for arm64, which alastor is, as well as amd64
+Section 1 (DNS, Weave, Slack, Vast) applies to both. The image builds for arm64, which alastor is, as well as amd64
 (checked under emulation; not yet run on arm64 hardware).
 
 ### 0.1 On alastor (NixOS)

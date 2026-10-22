@@ -65,7 +65,10 @@ def test_submitter_cannot_review_their_own_submission(db_session: Session, make_
         )
 
 
-def test_credited_builder_cannot_review(db_session: Session, member: Actor, make_actor, weave) -> None:
+@pytest.mark.parametrize("accepted", [True, False], ids=["on-the-team", "invited"])
+def test_a_teammate_or_invitee_cannot_review(
+    db_session: Session, member: Actor, make_actor, weave, accepted: bool
+) -> None:
     builder = make_actor(groups=frozenset({"ganymede:member", "ganymede:reviewer"}))
     project = _submitted_project(db_session, member)
     add_to_team(db_session, project, builder, accepted=accepted)
@@ -271,7 +274,7 @@ def test_cannot_review_a_non_current_revision(db_session: Session, member: Actor
 
 
 def test_cannot_review_a_draft_revision(db_session: Session, member: Actor, reviewer: Actor, weave) -> None:
-    project = projects.create_project(db_session, member, title="T", write_up="W", budget_requested_cents=1_000)
+    project = new_project(db_session, member, title="T", write_up="W", budget_requested_cents=1_000)
 
     with pytest.raises(InvalidState):
         projects.record_review(

@@ -29,7 +29,8 @@ from krater.models import (
     RevisionOutcome,
     User,
 )
-from krater.services import guardian, people, pricing, slack_membership
+from krater.services import budget as budget_service
+from krater.services import guardian, people, slack_membership, teams
 from krater.services import projects as project_service
 from krater.services import screenshots as screenshot_service
 from krater.services.actor import Actor
@@ -488,9 +489,10 @@ def _build_detail_context(
         guardian.pending_for_display(session, weave_client, project) if project.status not in _TERMINAL_STATUSES else []
     )
 
-    # For each revision that used the budget estimator (`budget_estimate` set), whether its actually
-    # -requested budget has drifted far enough from that stored estimate to flag for reviewers -- e.g.
-    # the submitter estimated one thing, then hand-edited the requested amount well past it.
+    # For each revision with an estimate, whether the amount it asks for has drifted far enough from that estimate to
+    # flag for reviewers -- e.g. the team estimated one thing, then typed a requested amount well past it. An
+    # amendment's estimate is the extra compute, so it's compared with what the amendment adds to the ceiling; that's
+    # only known while it's undecided, so a decided amendment isn't flagged.
     threshold_percent = get_settings().budget_estimate_flag_threshold_percent
     estimate_mismatch_by_revision: dict[uuid.UUID, bool] = {}
     amendment_adds_cents = None
@@ -754,9 +756,10 @@ def accept_team_invitation(
     member_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
 ):
     try:
-        teams.accept(db_session, actor, member_id=member_id)
+        teams.accept(db_session, actor, weave_client, member_id=member_id)
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
     return _success_redirect(

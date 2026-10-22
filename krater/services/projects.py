@@ -42,7 +42,7 @@ from krater.models import (
     RevisionKind,
     RevisionOutcome,
 )
-from krater.services import approval_policy, audit, budget, guardian, quilt_events
+from krater.services import approval_policy, audit, budget, guardian, quilt_events, teams
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
 from krater.weave import WeaveClient
@@ -664,7 +664,7 @@ def _apply_approve(session: Session, actor: Actor, revision: ProjectRevision, *,
             revision.budget_requested_cents > budget.ceiling_cents(session, project)
         )
         if grants:
-            guardian.require_team_cleared(session, weave_client, project, revision=revision)
+            guardian.require_team_cleared(session, weave_client, project)
 
     revision.outcome = RevisionOutcome.APPROVED
 

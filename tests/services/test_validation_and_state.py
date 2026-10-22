@@ -84,7 +84,7 @@ def test_a_contest_or_professor_needs_naming(db_session: Session, member: Actor)
 
 
 def test_an_amendment_starts_with_every_answer_of_the_approved_revision(
-    db_session: Session, member: Actor, reviewer: Actor
+    db_session: Session, member: Actor, reviewer: Actor, weave
 ) -> None:
     project = new_project(db_session, member, title="T", write_up="W", budget_requested_cents=100)
     project = projects.submit(db_session, member, project=project)
@@ -94,6 +94,7 @@ def test_an_amendment_starts_with_every_answer_of_the_approved_revision(
         revision=project.current_revision,
         decision=ReviewDecision.APPROVE,
         source=ReviewSource.WEB,
+        weave_client=weave,
     )
 
     draft = projects.start_amendment(db_session, member, project=project)
@@ -169,7 +170,7 @@ def test_start_amendment_fails_with_a_draft_already_in_progress(
 
 
 def test_submit_completion_requires_a_completion_draft(db_session: Session, member: Actor, admin: Actor, weave) -> None:
-    project = projects.create_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
+    project = new_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
     project = projects.submit(db_session, member, project=project)
     projects.admin_decide(
         db_session,
@@ -213,7 +214,7 @@ def test_review_queue_requires_reviewer(db_session: Session, member: Actor) -> N
         projects.review_queue(db_session, member)
 
 
-def test_review_queue_excludes_own_projects_credited_builders_and_already_reviewed(
+def test_review_queue_excludes_own_projects_team_projects_and_already_reviewed(
     db_session: Session, member: Actor, reviewer: Actor, make_actor, weave
 ) -> None:
     other_member = make_actor(groups=frozenset({"ganymede:member"}))

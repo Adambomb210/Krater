@@ -23,7 +23,7 @@ from krater.db import get_sessionmaker
 from krater.models import Project, ProjectRevision
 from krater.pricing.catalog import CatalogError, get_price_catalog
 from krater.quilt import sender as quilt_sender
-from krater.services import price_history, slack_notify, slack_reviews
+from krater.services import people, price_history, slack_notify, slack_reviews
 from krater.services.pricing import refresh_prices
 from krater.slack import SlackError, get_slack_client
 from krater.storage import StorageError, get_compute_store

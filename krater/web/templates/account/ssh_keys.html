@@ -3,46 +3,57 @@
 {% block title %}SSH keys{% endblock %}
 
 {% block content %}
-<section class="card">
-  <h1>SSH keys</h1>
-  <p class="muted">
-    Krater puts these public keys into your own interactive boxes, and nowhere else, when a box starts. Up to
-    {{ max_keys }} keys.
-  </p>
+<div class="page-head">
+  <div>
+    <h1>SSH keys</h1>
+    <p class="page-subtitle">
+      Krater puts these public keys into your own interactive boxes, and nowhere else, when a box starts. Up to
+      {{ max_keys }} keys.
+    </p>
+  </div>
+</div>
+
+<section aria-labelledby="your-keys">
+  <div class="section-head">
+    <h2 id="your-keys">Your keys</h2>
+  </div>
   {% if keys %}
-    <table class="table">
-      <thead>
-        <tr>
-          <th scope="col">Name</th>
-          <th scope="col">Type</th>
-          <th scope="col">Fingerprint</th>
-          <th scope="col">Added</th>
-          <th scope="col"><span class="visually-hidden">Remove</span></th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for key in keys %}
+    <div class="table-scroll">
+      <table class="table">
+        <thead>
           <tr>
-            <td>{{ key.name }}</td>
-            <td><code>{{ key.key_type }}</code></td>
-            <td><code>{{ key.fingerprint }}</code></td>
-            <td>{{ key.created_at.strftime("%Y-%m-%d") }}</td>
-            <td>
-              <form method="post" action="/account/ssh-keys/{{ key.id }}/delete">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <button type="submit" class="button">Remove</button>
-              </form>
-            </td>
+            <th scope="col">Name</th>
+            <th scope="col">Fingerprint</th>
+            <th scope="col">Added</th>
+            <th scope="col"><span class="visually-hidden">Remove</span></th>
           </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {% for key in keys %}
+            <tr>
+              <td class="cell-title">{{ key.name }}<span class="cell-sub"><code>{{ key.key_type }}</code></span></td>
+              <td><code>{{ key.fingerprint }}</code></td>
+              <td class="nowrap">{{ key.created_at.strftime("%Y-%m-%d") }}</td>
+              <td class="num">
+                <form method="post" action="/account/ssh-keys/{{ key.id }}/delete">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                  <button type="submit" class="button button--small">Remove</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   {% else %}
-    <p class="muted">No keys yet.</p>
+    <div class="empty-state">
+      <p class="empty-state__title">No keys yet.</p>
+      <p>Add one below to SSH into your boxes.</p>
+    </div>
   {% endif %}
 </section>
 
-<section class="card">
+<section class="card form-card">
   <h2>Add a key</h2>
   <form method="post" action="/account/ssh-keys" class="form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

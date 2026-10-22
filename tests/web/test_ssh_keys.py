@@ -81,6 +81,14 @@ def test_add_list_remove_and_authorized_keys(login_as, db_session) -> None:
     assert ssh_keys.list_keys(db_session, member) == []
 
 
+def test_an_email_comment_never_becomes_the_keys_name(login_as, db_session) -> None:
+    actor = actor_for(login_as(MEMBER_SUB))
+
+    key = ssh_keys.add_key(db_session, actor, name="", text=_ed25519() + " ada@laptop.example.com")
+
+    assert key.name == "ssh-ed25519"
+
+
 def test_keys_per_member_are_limited(login_as, db_session) -> None:
     actor = actor_for(login_as(MEMBER_SUB))
     for n in range(ssh_keys.MAX_KEYS_PER_USER):

@@ -91,8 +91,9 @@ def test_an_admin_cannot_decide_their_own_project(
     assert project.current_revision.outcome is RevisionOutcome.PENDING
 
 
-def test_an_admin_cannot_decide_a_project_that_credits_them(
-    db_session: Session, member: Actor, admin: Actor, weave
+@pytest.mark.parametrize("accepted", [True, False], ids=["on-the-team", "invited"])
+def test_an_admin_cannot_decide_a_project_whose_team_they_are_on(
+    db_session: Session, member: Actor, admin: Actor, weave, accepted: bool
 ) -> None:
     project = _submitted_project(db_session, member)
     add_to_team(db_session, project, admin, accepted=accepted)

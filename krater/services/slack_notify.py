@@ -42,11 +42,6 @@ from krater.slack.client import SlackClient
 from krater.slack.errors import SlackError, SlackRequestFailedError
 from krater.weave.client import WeaveClient
 
-#: The audit events a compute layer writes when a project nears or reaches its ceiling. Nothing writes them while
-#: compute is off; Krater Compute does (`krater.services.budget_alerts`).
-AUDIT_BUDGET_WARNING = "budget_warning"
-AUDIT_BUDGET_TEARDOWN = "budget_teardown"
-
 logger = logging.getLogger(__name__)
 
 #: Slack channel names: lowercase letters, numbers and hyphens, 80 characters max.
@@ -425,7 +420,8 @@ def _box_message(session: Session, slack_client: SlackClient, event: AuditEvent,
     payload = event.payload or {}
     owner = session.get(User, uuid.UUID(payload["owner_id"])) if payload.get("owner_id") else None
     slack_id = slack_id_for(session, slack_client, owner) if owner is not None else None
-    who = f"<@{slack_id}>" if slack_id else _escape_mrkdwn(owner.display_name if owner else "Someone")
+    # Without a Slack id there is no name to fall back on: Krater stores none (docs/weave-integration.md).
+    who = f"<@{slack_id}>" if slack_id else "Box owner"
     name = _escape_mrkdwn(payload.get("job_name", "a box"))
     link = f"{get_settings().base_url.rstrip('/')}/projects/{project.id}/compute/{payload.get('job_id', '')}"
     hours = payload.get("destroy_after_hours")

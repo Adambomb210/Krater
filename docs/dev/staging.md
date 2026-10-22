@@ -56,7 +56,7 @@ bin/rails runner 'User.find_for_any_email("you@example.com").update_columns(slac
 Krater also checks Slack membership before a submission. A local Weave has no Slack integration either, so set
 `slack_id` and `slack_membership: "member"` the same way for anyone who submits.
 
-## 3. The env file
+## 3. A separate, small-credit Vast.ai account
 
 **Use a throwaway or clearly separate Vast account, never the production one.** Add a few dollars of credit and create
 an API key under Account > API Keys. Save it in a file outside the repo (never print it):

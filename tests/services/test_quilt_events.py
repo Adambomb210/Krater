@@ -353,9 +353,9 @@ def test_spend_is_sent_as_the_cumulative_total_only_when_it_changes(
 
 
 def test_a_lower_total_is_sent_as_a_correction_with_a_reason(
-    db_session: Session, member: Actor, reviewer: Actor
+    db_session: Session, member: Actor, reviewer: Actor, weave
 ) -> None:
-    project = _approved(db_session, member, reviewer)
+    project = _approved(db_session, member, reviewer, weave)
     _spend(db_session, project, 2_500)
     _spend(db_session, project, 1_800)
     _spend(db_session, project, 1_800)
@@ -371,15 +371,17 @@ def test_a_lower_total_is_sent_as_a_correction_with_a_reason(
 
 
 def test_a_correction_takes_off_the_overspend_first_as_quilt_does(
-    db_session: Session, member: Actor, reviewer: Actor, admin: Actor
+    db_session: Session, member: Actor, reviewer: Actor, admin: Actor, weave
 ) -> None:
     """Quilt's own example (docs/patch-api.md, `spend.corrected`): commitment 10000, spend 12000, corrected to 9000:
     the overspend goes to 0 and 1000 of drawdown comes back, so 1000 stays committed."""
-    project = _approved(db_session, member, reviewer, budget_cents=10_000)
+    project = _approved(db_session, member, reviewer, weave, budget_cents=10_000)
     _spend(db_session, project, 12_000)
     _spend(db_session, project, 9_000)
     # Releasing more than Quilt's remaining 1000 is capped at 1000.
-    projects.admin_adjust_budget(db_session, admin, project=project, amount_cents=-5_000, reason="Cut.")
+    projects.admin_adjust_budget(
+        db_session, admin, project=project, amount_cents=-5_000, reason="Cut.", weave_client=weave
+    )
 
     last = _rows(db_session, project)[-1]
     assert (last.type, last.payload["amount_cents"]) == (BUDGET_RELEASED, 1_000)
@@ -486,7 +488,7 @@ def test_sync_is_idempotent(db_session: Session, member: Actor, reviewer: Actor,
 def test_backfill_enqueues_existing_projects_once(
     db_session: Session, member: Actor, reviewer: Actor, admin: Actor, weave
 ) -> None:
-    draft = projects.create_project(db_session, member, title="Draft", write_up="x", budget_requested_cents=5)
+    draft = new_project(db_session, member, title="Draft", write_up="x", budget_requested_cents=5)
     completed = _approved(db_session, member, reviewer, budget_cents=100_000, weave=weave)
     _spend(db_session, completed, 40_000)
     projects.start_completion(db_session, member, project=completed)

@@ -64,6 +64,12 @@ def list_keys(session: Session, user: User) -> list[UserSshKey]:
     )
 
 
+def _default_name(parsed: ParsedKey) -> str:
+    """A name for a key added without one: its comment, unless that is an email (`ssh-keygen` writes `user@host`),
+    since Krater stores no member emails (docs/weave-integration.md)."""
+    return parsed.comment if parsed.comment and "@" not in parsed.comment else parsed.key_type
+
+
 def add_key(session: Session, actor: Actor, *, name: str, text: str) -> UserSshKey:
     """Add a key to the actor's own account."""
     if not actor.is_member:
@@ -76,7 +82,7 @@ def add_key(session: Session, actor: Actor, *, name: str, text: str) -> UserSshK
         raise ValidationFailed({"key": "That key is already on your account."})
     key = UserSshKey(
         user_id=actor.user.id,
-        name=(name.strip() or parsed.comment or parsed.key_type)[:100],
+        name=(name.strip() or _default_name(parsed))[:100],
         key_type=parsed.key_type,
         key_base64=parsed.key_base64,
         fingerprint=parsed.fingerprint,
