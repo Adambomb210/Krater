@@ -136,6 +136,8 @@ itself starts at boot. `migrate` runs once per `up` and is safe to re-run.
 - `ls "$KRATER_BACKUP_DIR"` shows a `krater-*.dump` from the first run of `db-backup`.
 - `curl -s https://<KRATER_DOMAIN>/healthz/worker` answers `{"status": "ok", ...}` within a minute of the worker
   starting.
+- Refresh the price catalog once by hand (`docker compose exec worker python -m krater.pricing.refresh_once`): the
+  daily refresh runs at 07:00 UTC, and until there are prices the admin alerts report them stale.
 
 ### Alerts
 
