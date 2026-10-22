@@ -30,16 +30,24 @@ from krater.models import (
     User,
 )
 from krater.services import budget as budget_service
-from krater.services import guardian, people, slack_membership, teams
+from krater.services import demographics, guardian, people, residency, slack_membership, teams
 from krater.services import projects as project_service
 from krater.services import screenshots as screenshot_service
 from krater.services.actor import Actor
 from krater.services.budget_alerts import current_budget_flag
-from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
+from krater.services.errors import (
+    DemographicsCheckUnavailable,
+    DemographicsRequired,
+    InvalidState,
+    NotAllowed,
+    NotFound,
+    ValidationFailed,
+)
 from krater.services.launch_rules import LAUNCHABLE_STATUSES, hourly_cap_cents
 from krater.slack import get_slack_client
 from krater.storage import ObjectStore, get_object_store
 from krater.weave import WeaveClient, WeaveUnavailableError, get_weave_client
+from krater.weave.links import demographics_form_url
 from krater.web import application_form, estimator_form
 from krater.web.csrf import verify_csrf_token
 from krater.web.deps import fresh_actor
@@ -435,6 +443,7 @@ def _build_detail_context(
     errors: dict[str, str] | None = None,
     error_form: str | None = None,
     posted: dict[str, str] | None = None,
+    demographics_error: str | None = None,
 ) -> dict:
     summary = project_service.project_summary(session, project=project)
     revisions = sorted(project.revisions, key=lambda revision: revision.number, reverse=True)
@@ -489,6 +498,14 @@ def _build_detail_context(
         guardian.pending_for_display(session, weave_client, project) if project.status not in _TERMINAL_STATUSES else []
     )
 
+    # Only verified US residents may use OSPool capacity (`krater.services.residency`). Reviewers and admins see
+    # it, to pick the projects to send to OSPool. `None` means Weave couldn't say right now.
+    team_residency = (
+        residency.team_status_for_display(session, weave_client, project)
+        if actor.is_reviewer or actor.is_admin
+        else None
+    )
+
     # For each revision with an estimate, whether the amount it asks for has drifted far enough from that estimate to
     # flag for reviewers -- e.g. the team estimated one thing, then typed a requested amount well past it. An
     # amendment's estimate is the extra compute, so it's compared with what the amendment adds to the ceiling; that's
@@ -518,6 +535,8 @@ def _build_detail_context(
         "budget_flag": budget_flag,
         "screenshots": screenshots,
         "guardian_pending": guardian_pending,
+        "team_residency": team_residency,
+        "show_residency": actor.is_reviewer or actor.is_admin,
         "revisions": revisions,
         "estimate_mismatch_by_revision": estimate_mismatch_by_revision,
         "amendment_adds_cents": amendment_adds_cents,
@@ -556,6 +575,11 @@ def _build_detail_context(
         "errors": errors or {},
         "error_form": error_form,
         "posted": posted or {},
+        # Set only when the demographics gate refused a submission (`submit_project`).
+        "demographics_error": demographics_error,
+        "demographics_url": demographics_form_url(f"{get_settings().base_url}/projects/{project.id}")
+        if demographics_error
+        else None,
     }
 
 
@@ -594,6 +618,14 @@ def submit_project(
         flash(request, membership_error, "error")
         return _redirect_to_project(project_id)
 
+    # Ask Weave about the demographics answers now, before `submit` locks the project row, so a slow Weave never holds
+    # the lock. The answer is used after the other checks (below), so a member fixes missing answers first.
+    demographics_error: DemographicsRequired | DemographicsCheckUnavailable | None = None
+    try:
+        demographics.require_answered(weave_client, actor.user)
+    except (DemographicsRequired, DemographicsCheckUnavailable) as exc:
+        demographics_error = exc
+
     try:
         project_service.submit(db_session, actor, project=project)
     except ValidationFailed as exc:
@@ -605,6 +637,17 @@ def submit_project(
         return templates.TemplateResponse(request, "projects/edit.html", context, status_code=422)
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
+
+    # The demographics gate runs last, so a member fixes missing answers first. The rollback undoes the submit and
+    # leaves the saved draft as it was. The page links to Weave's form, which sends the member back here.
+    if isinstance(demographics_error, DemographicsRequired):
+        db_session.rollback()
+        context = _build_detail_context(
+            db_session, weave_client, project, actor, demographics_error=str(demographics_error)
+        )
+        return templates.TemplateResponse(request, "projects/detail.html", context, status_code=409)
+    if isinstance(demographics_error, DemographicsCheckUnavailable):
+        return _invalid_state_redirect(db_session, request, project_id, demographics_error)
 
     revision_id = project.current_revision_id
 

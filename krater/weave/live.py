@@ -338,6 +338,8 @@ class LiveWeaveClient:
             # Only a real boolean counts; a missing or malformed value is "Weave didn't say".
             minor=_optional_bool(data.get("minor")),
             guardian_verified=_optional_bool(data.get("guardian_verified")),
+            demographics_answered=_optional_bool(data.get("demographics_answered")),
+            us_resident=_optional_bool(data.get("us_resident")),
         )
 
 

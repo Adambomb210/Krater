@@ -364,6 +364,31 @@ def test_non_boolean_age_fields_count_as_missing(fake_weave: FakeWeave, live_cli
     assert user.guardian_verified is None
 
 
+def test_get_user_reads_the_demographics_answered_field(fake_weave: FakeWeave, live_client: LiveWeaveClient) -> None:
+    fake_weave.directory_users["PWLDIR0001"] = {**DIRECTORY_USER, "demographics_answered": True}
+
+    user = live_client.get_user("PWLDIR0001")
+
+    assert user is not None
+    assert user.demographics_answered is True
+
+
+@pytest.mark.parametrize("raw", [None, "yes", 1], ids=["missing", "string", "number"])
+def test_a_missing_or_non_boolean_demographics_answered_is_none(
+    fake_weave: FakeWeave, live_client: LiveWeaveClient, raw: object
+) -> None:
+    # Older Weave versions leave the field out.
+    record = dict(DIRECTORY_USER)
+    if raw is not None:
+        record["demographics_answered"] = raw
+    fake_weave.directory_users["PWLDIR0001"] = record
+
+    user = live_client.get_user("PWLDIR0001")
+
+    assert user is not None
+    assert user.demographics_answered is None
+
+
 def test_get_user_answers_none_on_404(live_client: LiveWeaveClient) -> None:
     assert live_client.get_user("PWLNOBODY") is None
 
@@ -615,3 +640,16 @@ def test_an_expired_or_revoked_token_or_a_user_who_lost_access_is_refused() -> N
 def test_weave_failing_is_unavailable_not_refused() -> None:
     with pytest.raises(WeaveUnavailableError):
         _cli_weave(info_status=502).cli_token_sub("member-token")
+
+
+@pytest.mark.parametrize(("raw", "expected"), [(True, True), (False, False), (None, None), ("yes", None)])
+def test_get_user_reads_the_us_resident_field(
+    fake_weave: FakeWeave, live_client: LiveWeaveClient, raw: object, expected: bool | None
+) -> None:
+    # Weave sends null when the member has no standing residency result; older Weave versions leave it out.
+    fake_weave.directory_users["PWLDIR0001"] = {**DIRECTORY_USER, "us_resident": raw}
+
+    user = live_client.get_user("PWLDIR0001")
+
+    assert user is not None
+    assert user.us_resident is expected

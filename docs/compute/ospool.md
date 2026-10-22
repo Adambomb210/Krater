@@ -55,6 +55,14 @@ An Access Point (AP) is the HTCondor host jobs are submitted from. Krater's work
 
 Routes A and C look the same to Krater: a schedd of our own, reached with a token. Build for that.
 
+## US residents only
+
+OSPool told Patchwork (call on 2026-10-16) that only US residents may use its capacity, and that it approves each
+user and project after Patchwork's review. Weave records a US residency result at identity verification, and Krater
+reads `us_resident` from the directory (`krater.services.residency`, docs/weave-integration.md "US residency"). The
+OSPool job type must call `require_us_residents(session, weave_client, project)` before each submit: every team
+member must be a verified US resident.
+
 ## Identity, accounting and minors
 
 - **ProjectName is public.** Every job needs a registered `+ProjectName` (format `Institution_PIName`). OSG's

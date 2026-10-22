@@ -35,7 +35,15 @@ class WeaveUser:
     `minor` is true when Weave knows the member is under 18, false when Weave knows they are not, and
     `None` when Weave didn't say. `guardian_verified` is true when a Weave admin recorded a signed
     guardian form plus a call or video check, and `None` when Weave didn't say. Older Weave versions
-    leave both fields out. Krater's guardian gate (`krater.services.guardian`) reads them."""
+    leave both fields out. Krater's guardian gate (`krater.services.guardian`) reads them.
+
+    `demographics_answered` is true when the member has saved an answer to Weave's demographics form, and
+    `None` when Weave didn't say (older Weave versions). Weave never sends the answers. Krater's
+    demographics gate (`krater.services.demographics`) reads it.
+
+    `us_resident` is Weave's US residency result: true or false while a result stands, `None` when Weave has no
+    standing result or didn't say. It is residency, not citizenship, and Weave never sends the state. The OSPool
+    rule (`krater.services.residency`) reads it."""
 
     sub: str
     name: str
@@ -47,3 +55,5 @@ class WeaveUser:
     active: bool
     minor: bool | None = None
     guardian_verified: bool | None = None
+    demographics_answered: bool | None = None
+    us_resident: bool | None = None

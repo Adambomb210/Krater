@@ -66,3 +66,51 @@ class GuardianCheckUnavailable(InvalidState):
             "Krater couldn't reach Weave to check the team members' ages, so it granted no budget. "
             "Try again in a minute."
         )
+
+
+class DemographicsRequired(InvalidState):
+    """The member who submits a grant application hasn't answered Weave's demographics form yet, or Weave's directory
+    doesn't return them (docs/weave-integration.md "Demographics gate")."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Answer the demographics form in Weave before you submit. Funders need these answers. "
+            "Krater never sees them. Your draft is saved."
+        )
+
+
+class DemographicsCheckUnavailable(InvalidState):
+    """Krater couldn't ask Weave whether the member answered the demographics form, so it doesn't submit (fail
+    closed)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Krater couldn't reach Weave to check your demographics answers, so it didn't submit. "
+            "Your draft is saved. Try again in a minute."
+        )
+
+
+class UsResidencyRequired(InvalidState):
+    """The project can't use OSPool capacity: a team member is not a verified US resident in Weave, or Weave's
+    directory doesn't return them (`krater.services.residency`).
+
+    `members` holds `(label, reason)` for each such member, for reviewers, admins and the log. The message names
+    nobody: a team member may read it, and only reviewers and admins see who is not a resident."""
+
+    def __init__(self, members: list[tuple[str, str]]) -> None:
+        self.members = members
+        super().__init__(
+            "This project can't use OSPool capacity. OSPool is open only to US residents, and not every team member "
+            "is a verified US resident in Weave. Each member does the residency check on Weave's verification page."
+        )
+
+
+class UsResidencyCheckUnavailable(InvalidState):
+    """Krater couldn't ask Weave about the team members' US residency, so it doesn't use OSPool capacity (fail
+    closed)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Krater couldn't reach Weave to check the team members' US residency, so it didn't use OSPool capacity. "
+            "Try again in a minute."
+        )
