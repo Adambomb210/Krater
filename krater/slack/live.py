@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 #: success so a retried job (or a channel someone joined manually in between) doesn't fail.
 _ALREADY_IN_CHANNEL_ERRORS = frozenset({"already_in_channel"})
 _ALREADY_ARCHIVED_ERRORS = frozenset({"already_archived"})
-_NOT_IN_CHANNEL_ERRORS = frozenset({"not_in_channel"})
+#: `conversations.kick` answers for someone already out of the channel, or with no Slack account any more.
+_NOT_IN_CHANNEL_ERRORS = frozenset({"not_in_channel", "user_not_found"})
 
 #: Per-user `conversations.invite` failures explained by that one person's account (already in, a
 #: guest Slack won't add here, a deactivated or unknown id), as opposed to the channel or the app
