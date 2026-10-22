@@ -62,19 +62,26 @@ def test_raising_the_ceiling_rearms_both_warnings(db_session: Session, member: A
     assert _warn(db_session, project, 1900, ceiling_cents=2000)
 
 
-def test_a_warning_from_before_the_final_one_counts_as_its_percent(db_session: Session, member: Actor) -> None:
+def test_a_warning_from_before_the_final_one_counts_as_the_first(db_session: Session, member: Actor) -> None:
     project = _make_project(db_session, member)
     db_session.add(
         AuditEvent(
             action=budget_alerts.AUDIT_BUDGET_WARNING,
             project_id=project.id,
-            payload={"ceiling_cents": 1000, "spend_cents": 820, "percent": 82.0},
+            payload={"ceiling_cents": 1000, "spend_cents": 970, "percent": 97.0},
         )
     )
     db_session.flush()
 
     assert not _warn(db_session, project, 900)
-    assert _warn(db_session, project, 950)
+    assert _warn(db_session, project, 970)  # it was sent at 97%, but it wasn't the final warning
+
+
+def test_with_one_threshold_the_warning_is_not_final(db_session: Session, member: Actor) -> None:
+    project = _make_project(db_session, member)
+
+    assert budget_alerts.warn_if_due(db_session, project, ceiling_cents=1000, spend_cents=990, warn_percents=(95,))
+    assert _warnings(db_session, project)[0]["final"] is False
 
 
 def test_the_banner_turns_final_at_the_final_threshold(db_session: Session, member: Actor) -> None:
@@ -90,3 +97,18 @@ def test_the_banner_turns_final_at_the_final_threshold(db_session: Session, memb
     assert flag(900) == "warning"
     assert flag(960) == "final_warning"
     assert flag(500) is None
+
+
+def test_the_banner_shows_the_stop_below_100_until_the_ceiling_is_raised(db_session: Session, member: Actor) -> None:
+    """The stop fires a minute before 100%, so spend is usually just under the ceiling when it happens."""
+    project = _make_project(db_session, member)
+    _warn(db_session, project, 960)
+    budget_alerts.record_teardown(db_session, project, ceiling_cents=1000, spend_cents=996, details={})
+
+    def flag(ceiling_cents: int) -> str | None:
+        return budget_alerts.current_budget_flag(
+            db_session, project, ceiling_cents=ceiling_cents, spend_cents=996, warn_percents=WARN_PERCENTS
+        )
+
+    assert flag(1000) == "teardown"
+    assert flag(2000) is None

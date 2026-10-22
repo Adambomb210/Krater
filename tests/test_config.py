@@ -177,7 +177,6 @@ def test_production_rejects_a_plain_http_quilt_url() -> None:
         Settings(**_PRODUCTION_READY, quilt_url="http://quilt.patchworklabs.example")
 
 
-@pytest.mark.parametrize(("warn", "final"), [(95, 95), (96, 95), (80, 100), (0, 95)])
-def test_budget_warnings_must_come_in_order_before_the_stop(warn: int, final: int) -> None:
-    with pytest.raises(ValueError, match="BUDGET_FINAL_WARN_PERCENT"):
-        Settings(budget_warn_percent=warn, budget_final_warn_percent=final)
+def test_a_final_warning_at_or_below_the_first_turns_the_final_warning_off() -> None:
+    assert Settings().budget_warn_percents == (80, 95)
+    assert Settings(budget_warn_percent=95).budget_warn_percents == (95,)

@@ -36,9 +36,9 @@ def budget_percent(ceiling_cents: int, spend_cents: int) -> float:
     return (spend_cents / ceiling_cents) * 100.0
 
 
-def _warned_threshold(event: AuditEvent) -> float:
-    # Warnings from before the final warning carry no threshold; the percent they were sent at stands in for it.
-    return event.payload.get("threshold", event.payload.get("percent", 0))
+def _warned_threshold(event: AuditEvent, warn_percents: Sequence[int]) -> int:
+    # Warnings from before the final warning carry no threshold: they were all the first warning.
+    return event.payload.get("threshold", min(warn_percents))
 
 
 def warn_if_due(
@@ -58,7 +58,8 @@ def warn_if_due(
         sa.select(AuditEvent).where(AuditEvent.project_id == project.id, AuditEvent.action == AUDIT_BUDGET_WARNING)
     )
     if any(
-        ceiling_cents <= warning.payload.get("ceiling_cents", 0) and _warned_threshold(warning) >= threshold
+        ceiling_cents <= warning.payload.get("ceiling_cents", 0)
+        and _warned_threshold(warning, warn_percents) >= threshold
         for warning in warnings
     ):
         return False
@@ -72,7 +73,7 @@ def warn_if_due(
             "spend_cents": spend_cents,
             "percent": round(percent, 1),
             "threshold": threshold,
-            "final": threshold == max(warn_percents),
+            "final": len(warn_percents) > 1 and threshold == max(warn_percents),
         },
     )
     session.flush()
@@ -107,7 +108,10 @@ def current_budget_flag(
     """`"teardown"`, `"final_warning"`, `"warning"` or `None`: whether spend right now still meets the condition that
     last triggered a teardown or warning. Re-derived from the live numbers, so raising the ceiling clears the banner at
     once."""
-    if spend_cents >= ceiling_cents and latest_audit_event(session, project, AUDIT_BUDGET_TEARDOWN) is not None:
+    # The stop fires a minute before 100%, so spend usually stays just under the ceiling: what matters is that the
+    # ceiling hasn't been raised since.
+    teardown = latest_audit_event(session, project, AUDIT_BUDGET_TEARDOWN)
+    if teardown is not None and ceiling_cents <= teardown.payload.get("ceiling_cents", 0):
         return "teardown"
     percent = budget_percent(ceiling_cents, spend_cents)
     if percent < min(warn_percents) or latest_audit_event(session, project, AUDIT_BUDGET_WARNING) is None:

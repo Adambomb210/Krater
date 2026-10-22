@@ -192,17 +192,12 @@ class Settings(BaseSettings):
         return self.compute_mode != "off"
 
     @property
-    def budget_warn_percents(self) -> tuple[int, int]:
-        """The budget warning thresholds, first then final."""
+    def budget_warn_percents(self) -> tuple[int, ...]:
+        """The budget warning thresholds, first then final. A final threshold at or below the first one turns the
+        final warning off, so a deploy that already set a high KRATER_BUDGET_WARN_PERCENT keeps working."""
+        if self.budget_final_warn_percent <= self.budget_warn_percent:
+            return (self.budget_warn_percent,)
         return (self.budget_warn_percent, self.budget_final_warn_percent)
-
-    @model_validator(mode="after")
-    def _warnings_come_before_the_stop(self) -> Settings:
-        if not 0 < self.budget_warn_percent < self.budget_final_warn_percent < 100:
-            raise ValueError(
-                "KRATER_BUDGET_WARN_PERCENT must be below KRATER_BUDGET_FINAL_WARN_PERCENT, and both between 0 and 100"
-            )
-        return self
 
     @field_validator("compute_label_prefix")
     @classmethod

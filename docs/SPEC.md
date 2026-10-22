@@ -282,7 +282,9 @@ Uploads use presigned URLs, and only objects from approved completion revisions 
 - **Enforcement** (details in [compute/scheduler.md](compute/scheduler.md)): Krater only rents within the project's
   hourly cap and remaining budget (holding a job's expected cost), warns the project channel at 80% of the ceiling and
   again at 95% (a final warning to save work), and stops and destroys the project's machines one minute before it
-  would pass 100%. There is no grace period past the ceiling (decided in patchworklabsorg/krater#2).
+  would pass 100%. There is no grace period past the ceiling (decided in patchworklabsorg/krater#2). The warnings go
+  to Slack right after the scheduler pass that writes them, but the time between the final warning and the stop is
+  not guaranteed: a fast burn, a small ceiling or an hourly correction from Vast's charges can put both in one pass.
 - **No automatic expiry.** Stalled projects are reclaimed manually by an admin (`BudgetEntry(reclaim)`).
 - **Quilt.** Krater tells Quilt (Patchwork Labs finance) about each submission, each ledger entry and each change of
   spend, through Quilt's patch API. The events go through an outbox table in the same transaction as the change.
