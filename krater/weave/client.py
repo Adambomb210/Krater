@@ -46,3 +46,9 @@ class WeaveClient(Protocol):
     def invalidate_quilt_token(self) -> None:
         """Forget the cached Quilt token (Quilt answered 401), so the next call fetches a new one."""
         ...
+
+    def cli_token_sub(self, token: str) -> str | None:
+        """The Weave `sub` of a user's access token for the Krater CLI's app, or `None` when Weave says the token is
+        no good: expired, revoked, issued to another app, or its user may no longer use the app. Raises
+        `WeaveUnavailableError` when Weave can't answer: callers fail closed."""
+        ...

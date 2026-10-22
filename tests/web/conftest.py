@@ -18,6 +18,7 @@ from krater.services import projects as project_service
 from krater.services import users as user_service
 from krater.services.actor import GROUP_MEMBER, Actor
 from krater.weave import RoleMapping, StubWeaveClient
+from tests.factories import new_project
 
 #: A real PNG magic-byte header, for tests that need `confirm_screenshot`'s signature check to pass.
 PNG_SIGNATURE = bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)) + b"\x00" * 8
@@ -36,7 +37,7 @@ def create_project(db_session: Session) -> Callable[..., Project]:
         kwargs.setdefault("title", "Test Project")
         kwargs.setdefault("write_up", "A write-up.")
         kwargs.setdefault("budget_requested_cents", 10_000)
-        return project_service.create_project(db_session, actor_for(user), **kwargs)
+        return new_project(db_session, actor_for(user), **kwargs)
 
     return _create
 
@@ -53,7 +54,9 @@ def submitted_project(db_session: Session, create_project: Callable[..., Project
 
 
 @pytest.fixture
-def approved_project(db_session: Session, submitted_project: Callable[..., Project]) -> Callable[..., Project]:
+def approved_project(
+    db_session: Session, submitted_project: Callable[..., Project], weave_stub
+) -> Callable[..., Project]:
     """Factory: create, submit and get `reviewer` to approve a project for `user`."""
 
     def _approve(user: User, reviewer: User, **kwargs) -> Project:
@@ -64,6 +67,7 @@ def approved_project(db_session: Session, submitted_project: Callable[..., Proje
             revision=project.current_revision,
             decision=ReviewDecision.APPROVE,
             source=ReviewSource.WEB,
+            weave_client=weave_stub,
         )
         db_session.refresh(project)
         return project

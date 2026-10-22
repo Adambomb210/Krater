@@ -34,6 +34,10 @@ services:
     # only way in is through the TLS proxy (docs/dev/production.md). Applies to every port below.
     ports:
       - "${KRATER_BIND_ADDRESS:-0.0.0.0}:${PORT:-8000}:8000"
+    # The project secrets key: the portal hands secrets to each machine's runner. Point KRATER_PROJECT_SECRETS_KEY_HOST_FILE
+    # at the key file on the host and set KRATER_PROJECT_SECRETS_KEY_FILE=/run/secrets/project_secrets_key.
+    volumes:
+      - ${KRATER_PROJECT_SECRETS_KEY_HOST_FILE:-/dev/null}:/run/secrets/project_secrets_key:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -42,7 +46,9 @@ services:
     build: .
     restart: unless-stopped
     env_file: ${KRATER_ENV_FILE:-.env}
-    command: ["procrastinate", "--app=krater.worker.app.app", "worker"]
+    # Two at a time: the price-history run takes over a minute (its searches are paced for Vast's rate limit), and the
+    # compute scheduler must still run every minute. The scheduler and reconciliation share a lock, so never overlap.
+    command: ["procrastinate", "--app=krater.worker.app.app", "worker", "--concurrency=2"]
     # The Vast key, for Krater Compute (KRATER_COMPUTE_MODE=vast): mounted into the worker only, never the portal.
     # Point KRATER_VAST_KEY_FILE at the key on the host and set KRATER_VAST_API_KEY_FILE=/run/secrets/vast_api_key.
     volumes:
@@ -61,12 +67,14 @@ services:
       S3_ACCESS_KEY: ${KRATER_S3_ACCESS_KEY_ID:-krater}
       S3_SECRET_KEY: ${KRATER_S3_SECRET_ACCESS_KEY:-krater-dev-secret}
     # The S3 gateway reads its credentials from a JSON file; write it from the env so no secret lives in the repo.
+    # -volume.max=0 sizes the volume limit from free disk. The default (8) is used up by the first collections, after
+    # which a new bucket (screenshots, after compute's) can't get a volume and every upload to it fails with a 500.
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
         printf '{"identities":[{"name":"krater","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","List","Tagging","Write"]}]}'
         "$$S3_ACCESS_KEY" "$$S3_SECRET_KEY" > /tmp/s3.json &&
-        exec weed server -dir=/data -master.volumeSizeLimitMB=1024 -s3 -s3.port=8333 -s3.config=/tmp/s3.json
+        exec weed server -dir=/data -volume.max=0 -master.volumeSizeLimitMB=1024 -s3 -s3.port=8333 -s3.config=/tmp/s3.json
     ports:
       - "${KRATER_BIND_ADDRESS:-0.0.0.0}:${S3_PORT:-8333}:8333"
     volumes:

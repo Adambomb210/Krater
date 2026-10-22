@@ -1,8 +1,11 @@
 # Staging runbook (maintainer's Windows machine)
 
-A from-scratch setup for running the full stack (Krater, a local Weave and storage) on one Windows machine, plus a test
-script for the proposal flow. This release launches no machines (compute is off); Krater Compute's release adds the
-steps for renting from a small-credit Vast account.
+A from-scratch setup for running the full stack (Krater, a local Weave, storage, and Krater Compute renting from a
+small-credit Vast account) on one Windows machine, plus a test script for a real, tiny Vast run. Read
+[compute/README.md](../compute/README.md) first: it lists what a paid run is meant to check.
+
+**Every rental costs real money. Rent nothing without the maintainer's OK for that run**, and follow "Safety notes"
+below every time.
 
 ## 1. Prerequisites
 
@@ -15,8 +18,8 @@ winget install astral-sh.uv
 git clone https://github.com/<your-fork-or-org>/Krater.git
 ```
 
-Slack's buttons need to reach the portal over HTTPS: for the Slack part of the test script, expose `localhost:8000`
-through a public tunnel such as Tailscale Funnel (`tailscale funnel --bg 8000`) and see [slack-setup.md](slack-setup.md).
+Rented machines must reach the portal over HTTPS to fetch the runner and report to it, so staging also needs a public
+tunnel to `localhost:8000`, such as Tailscale Funnel (`tailscale funnel --bg 8000`).
 
 ## 2. A local Weave
 
@@ -53,7 +56,19 @@ bin/rails runner 'User.find_for_any_email("you@example.com").update_columns(slac
 Krater also checks Slack membership before a submission. A local Weave has no Slack integration either, so set
 `slack_id` and `slack_membership: "member"` the same way for anyone who submits.
 
-## 3. The env file
+## 3. A separate, small-credit Vast.ai account
+
+**Use a throwaway or clearly separate Vast account, never the production one.** Add a few dollars of credit and create
+an API key under Account > API Keys. Save it in a file outside the repo (never print it):
+
+```powershell
+Set-Content -NoNewline -Path ..\staging\vast_api_key -Value '<the test account API key>'
+```
+
+Keep the account free of SSH keys: Krater refuses to start boxes while it has any, since Vast may install them in every
+instance.
+
+## 4. The env file
 
 Keep it outside the repo (a `.env` in the repo root leaks into `uv run pytest`) and point Compose at it with
 `--env-file` and `KRATER_ENV_FILE`. Start from `.env.example`, then set:
@@ -64,29 +79,77 @@ KRATER_WEAVE_ISSUER=http://host.docker.internal:3000
 KRATER_WEAVE_CLIENT_ID=<from step 2>
 KRATER_WEAVE_CLIENT_SECRET=<from step 2>
 
+# Krater Compute on the test account. The key is mounted into the worker only.
+KRATER_COMPUTE_MODE=vast
+KRATER_VAST_MODE=live
+KRATER_VAST_KEY_FILE=../staging/vast_api_key
+KRATER_VAST_API_KEY_FILE=/run/secrets/vast_api_key
+# Staging's own prefix: the scheduler destroys unknown instances with it, so never share it with anything else
+# (spike scripts use krater-spike-).
+KRATER_COMPUTE_LABEL_PREFIX=krater-staging-
+# Where rented machines reach the portal: the public tunnel from step 1.
+KRATER_COMPUTE_RUNNER_URL=https://<your-tunnel-host>
+
 KRATER_PRICING_MODE=live
+# Tiny caps for a test run; see "Safety notes".
+KRATER_COMPUTE_MAX_HOURLY_COST_CENTS=20
 ```
 
 `host.docker.internal` is how containers reach Weave on the Windows host; Docker Desktop wires it up.
 
-## 4. Bring the stack up
+**Storage from Vast.** Presigned upload URLs point at `KRATER_S3_PUBLIC_ENDPOINT_URL`, which on staging is usually
+local. Machines can't reach it, so test jobs should write no checkpoints, or expose storage through a second tunnel
+and set that as the public endpoint.
+
+## 5. Bring the stack up
 
 ```powershell
 docker compose --env-file ..\staging\krater-staging.env up -d --build
 ```
 
-This starts `db`, `storage`, `migrate`, `portal` and `worker`. Check `docker compose logs worker` for errors, and that
-`/pricing` lists GPU prices once the first catalog refresh has run.
+This starts `db`, `storage`, `migrate`, `portal` and `worker`. The worker runs the compute scheduler every minute; with
+the settings above it can rent. Check `docker compose logs worker` for `krater.vast` errors (a missing key logs one on
+every pass) and that `/pricing/history` fills within ten minutes.
 
-## 5. Test script
+## 6. Test script
 
-1. **Create a project.** Sign in to Krater at `http://localhost:8000` with your Weave account and submit a small
-   proposal. The budget estimator should offer the catalog's GPUs.
-2. **Approve it** with a *second* Weave account that has `admin` or `reviewer` (via `/admin` or the review flow).
-   Nobody can approve their own project, admins included, so a one-person test needs that second account. The project
-   page shows its ceiling and "Launching machines from Krater isn't open yet."
-3. **Slack**, if the tunnel and app are set up: submitting creates the project's private channel with the review
-   message, and the Approve button there works like the web review.
-4. **Amend, complete, withdraw.** Start an amendment and get it approved (the ceiling follows), then submit the
-   completion with a screenshot and approve it: the project appears in `/gallery` and its channel is archived.
-5. **Quilt**, if configured: each submission and ledger entry shows up in Quilt ([../quilt-integration.md](../quilt-integration.md)).
+Before anything rents:
+
+1. **Make a test project** with a tiny budget (for example $0.25), approved by a second admin or reviewer account. Its
+   budget is the hard stop Krater enforces.
+2. **Start the watchdog** in its own terminal and leave it running until it reports nothing left:
+
+   ```powershell
+   uv run python scripts/dev/compute_watchdog.py --key-file ..\staging\vast_api_key --prefix krater-staging- --cap 0.25 --deadline 60
+   ```
+
+3. **Queue a job**, from the project's Compute page or the worker container:
+
+   ```powershell
+   docker compose --env-file ..\staging\krater-staging.env exec worker python -m krater.compute.submit submit `
+     --project <id> --name smoke --image alpine:3.20 --command 'echo hello; sleep 120' `
+     --gpu "RTX 3060" --disk 8 --target 0.08 --max 0.12 --max-runtime 20
+   ```
+
+Then watch the job page (`/projects/<id>/compute/<job>`): queued, renting, running once Vast says so, the runner's
+start and heartbeats, the exit code, and the machine destroyed within a minute. The watchdog should see it come and go.
+Check what [compute/README.md](../compute/README.md) lists for the paid round: an image with an ENTRYPOINT and one
+without, charges while running (`/admin/compute` shows mismatches after the hourly reconciliation), a natural pause,
+and a box (SSH in with a key from `/account/ssh-keys`).
+
+## 7. Spend against Vast's bill
+
+Krater's estimate is the rented price times running time (disk from create, GPU only while running); every hour it is
+corrected from Vast's own charges (`/api/v0/charges`), and mismatches past the alert threshold show on `/admin/compute`.
+After a run, compare the job's spend with the instance's line in Vast's billing page.
+
+## Safety notes
+
+- **Ask first.** No rental without the maintainer's OK for that run.
+- **Tiny caps.** `KRATER_COMPUTE_MAX_HOURLY_COST_CENTS` and the test project's budget should make a mistake cost cents.
+- **The watchdog, always**, with a spend cap and a deadline, on the staging prefix only.
+- **Confirm it's gone.** After a run, list the account's instances (the watchdog prints them) and see none with the
+  staging prefix.
+- **Never the production Vast key or a real Weave.** Rotate the test key afterwards if it was ever printed anywhere.
+- **Stop renting:** set `KRATER_COMPUTE_MODE=off` and restart the worker, or stop the worker
+  (`docker compose stop worker`). Running machines keep billing until destroyed, so let the watchdog finish.

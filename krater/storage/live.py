@@ -27,7 +27,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from krater.config import Settings
 from krater.storage.client import DEFAULT_DOWNLOAD_EXPIRES_SECONDS, DEFAULT_UPLOAD_EXPIRES_SECONDS
 from krater.storage.errors import StorageUnavailableError
-from krater.storage.types import ObjectMeta, PresignedPost
+from krater.storage.types import ListedObject, MultipartUpload, ObjectMeta, PresignedPost
 
 _BOTO_CONFIG = BotoConfig(signature_version="s3v4", s3={"addressing_style": "path"})
 
@@ -66,8 +66,15 @@ class S3ObjectStore:
     injectable for tests (e.g. botocore's `Stubber`); production code leaves them out and gets real
     boto3 clients built from `settings`."""
 
-    def __init__(self, settings: Settings, *, internal_client: Any = None, public_client: Any = None) -> None:
-        self._bucket = settings.s3_bucket
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        bucket: str | None = None,
+        internal_client: Any = None,
+        public_client: Any = None,
+    ) -> None:
+        self._bucket = bucket or settings.s3_bucket
         self._internal = (
             internal_client if internal_client is not None else self._build_client(settings, settings.s3_endpoint_url)
         )
@@ -154,11 +161,97 @@ class S3ObjectStore:
             raise StorageUnavailableError(f"could not read {key!r}: {exc}") from exc
         return response["Body"].read()
 
+    def read_tail(self, key: str, n: int) -> bytes | None:
+        try:
+            response = self._internal.get_object(Bucket=self._bucket, Key=key, Range=f"bytes=-{n}")
+        except ClientError as exc:
+            if _is_not_found(exc):
+                return None
+            if _is_invalid_range(exc):
+                return b""
+            raise StorageUnavailableError(f"could not read {key!r}: {exc}") from exc
+        except BotoCoreError as exc:
+            raise StorageUnavailableError(f"could not read {key!r}: {exc}") from exc
+        return response["Body"].read()
+
     def delete(self, key: str) -> None:
         try:
             self._internal.delete_object(Bucket=self._bucket, Key=key)
         except ClientError as exc:
             raise StorageUnavailableError(f"could not delete {key!r}: {exc}") from exc
+
+    def presign_put(self, key: str, *, content_length: int, expires: int = DEFAULT_UPLOAD_EXPIRES_SECONDS) -> str:
+        return self._public.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": self._bucket, "Key": key, "ContentLength": content_length},
+            ExpiresIn=expires,
+        )
+
+    def list_prefix(self, prefix: str) -> list[ListedObject]:
+        try:
+            pages = self._internal.get_paginator("list_objects_v2").paginate(Bucket=self._bucket, Prefix=prefix)
+            return [
+                ListedObject(key=item["Key"], size_bytes=int(item["Size"]))
+                for page in pages
+                for item in page.get("Contents", [])
+            ]
+        except (ClientError, BotoCoreError) as exc:
+            raise StorageUnavailableError(f"could not list {prefix!r}: {exc}") from exc
+
+    def create_multipart_upload(self, key: str) -> str:
+        try:
+            return self._internal.create_multipart_upload(Bucket=self._bucket, Key=key)["UploadId"]
+        except (ClientError, BotoCoreError) as exc:
+            raise StorageUnavailableError(f"could not start an upload of {key!r}: {exc}") from exc
+
+    def presign_upload_part(
+        self,
+        key: str,
+        *,
+        upload_id: str,
+        part_number: int,
+        content_length: int,
+        expires: int = DEFAULT_UPLOAD_EXPIRES_SECONDS,
+    ) -> str:
+        return self._public.generate_presigned_url(
+            "upload_part",
+            Params={
+                "Bucket": self._bucket,
+                "Key": key,
+                "UploadId": upload_id,
+                "PartNumber": part_number,
+                "ContentLength": content_length,
+            },
+            ExpiresIn=expires,
+        )
+
+    def complete_multipart_upload(self, key: str, *, upload_id: str, parts: list[tuple[int, str]]) -> None:
+        try:
+            self._internal.complete_multipart_upload(
+                Bucket=self._bucket,
+                Key=key,
+                UploadId=upload_id,
+                MultipartUpload={"Parts": [{"PartNumber": n, "ETag": etag} for n, etag in sorted(parts)]},
+            )
+        except (ClientError, BotoCoreError) as exc:
+            raise StorageUnavailableError(f"could not finish the upload of {key!r}: {exc}") from exc
+
+    def list_multipart_uploads(self, prefix: str) -> list[MultipartUpload]:
+        try:
+            pages = self._internal.get_paginator("list_multipart_uploads").paginate(Bucket=self._bucket, Prefix=prefix)
+            return [
+                MultipartUpload(key=item["Key"], upload_id=item["UploadId"], initiated=item.get("Initiated"))
+                for page in pages
+                for item in page.get("Uploads", [])
+            ]
+        except (ClientError, BotoCoreError) as exc:
+            raise StorageUnavailableError(f"could not list uploads under {prefix!r}: {exc}") from exc
+
+    def abort_multipart_upload(self, key: str, *, upload_id: str) -> None:
+        try:
+            self._internal.abort_multipart_upload(Bucket=self._bucket, Key=key, UploadId=upload_id)
+        except (ClientError, BotoCoreError) as exc:
+            raise StorageUnavailableError(f"could not abort the upload of {key!r}: {exc}") from exc
 
 
 __all__ = ["BUCKET_CORS_RULES", "S3ObjectStore"]

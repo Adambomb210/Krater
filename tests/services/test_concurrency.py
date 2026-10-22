@@ -30,6 +30,7 @@ from krater.models import (
 from krater.services import projects
 from krater.services.actor import Actor
 from krater.services.errors import DomainError
+from tests.factories import new_project
 
 _MEMBER = frozenset({"ganymede:member"})
 _REVIEWER = frozenset({"ganymede:member", "ganymede:reviewer"})
@@ -63,7 +64,7 @@ def _cleanup(engine: Engine, *, project_id: uuid.UUID, user_ids: list[uuid.UUID]
         session.commit()
 
 
-def test_two_concurrent_approvals_do_not_double_apply_the_budget(engine: Engine) -> None:
+def test_two_concurrent_approvals_do_not_double_apply_the_budget(engine: Engine, weave) -> None:
     """Two reviewers approve the same revision at (as close to) the same instant. Without a lock on the
     project row, both threads can each read the revision as still-`pending`, each independently see the
     (default, 1-approval) policy as satisfied by their own review, and each run `_apply_approve` --
@@ -74,7 +75,9 @@ def test_two_concurrent_approvals_do_not_double_apply_the_budget(engine: Engine)
         submitter = _make_user(setup, "sub")
         reviewer_a = _make_user(setup, "r1")
         reviewer_b = _make_user(setup, "r2")
-        project = projects.create_project(
+        # The guardian gate asks Weave about the team; a member Weave doesn't return would block the grant.
+        weave.put_user(submitter.weave_sub, roles=["member"], minor=False)
+        project = new_project(
             setup, Actor(submitter, _MEMBER), title="Race", write_up="w", budget_requested_cents=10_000
         )
         projects.submit(setup, Actor(submitter, _MEMBER), project=project)
@@ -95,7 +98,12 @@ def test_two_concurrent_approvals_do_not_double_apply_the_budget(engine: Engine)
             barrier.wait()  # both threads start their `record_review` call at the same time
             try:
                 projects.record_review(
-                    session, actor, revision=revision, decision=ReviewDecision.APPROVE, source=ReviewSource.WEB
+                    session,
+                    actor,
+                    revision=revision,
+                    decision=ReviewDecision.APPROVE,
+                    source=ReviewSource.WEB,
+                    weave_client=weave,
                 )
                 session.commit()
                 with lock:

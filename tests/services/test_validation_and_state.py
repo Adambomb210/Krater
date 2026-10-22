@@ -11,17 +11,19 @@ from krater.models import ProjectStatus, ReviewDecision, ReviewSource, RevisionK
 from krater.services import projects
 from krater.services.actor import Actor
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
+from tests.factories import new_project
+from tests.services.conftest import add_to_team
 
 
 def test_create_project_requires_membership(db_session: Session, make_actor) -> None:
     non_member = make_actor(groups=frozenset())
 
     with pytest.raises(NotAllowed):
-        projects.create_project(db_session, non_member, title="x", write_up="y", budget_requested_cents=100)
+        new_project(db_session, non_member, title="x", write_up="y", budget_requested_cents=100)
 
 
 def test_update_draft_requires_submitter(db_session: Session, member: Actor, make_actor) -> None:
-    project = projects.create_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
+    project = new_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
     someone_else = make_actor(groups=frozenset({"ganymede:member"}))
 
     with pytest.raises(NotAllowed):
@@ -29,7 +31,7 @@ def test_update_draft_requires_submitter(db_session: Session, member: Actor, mak
 
 
 def test_update_draft_fails_when_no_draft_exists(db_session: Session, member: Actor, reviewer: Actor) -> None:
-    project = projects.create_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
+    project = new_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
     project = projects.submit(db_session, member, project=project)
 
     with pytest.raises(InvalidState):
@@ -37,16 +39,76 @@ def test_update_draft_fails_when_no_draft_exists(db_session: Session, member: Ac
 
 
 def test_submit_validates_required_fields(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(db_session, member)  # blank title/write-up, budget 0
+    project = new_project(db_session, member)  # blank title/write-up, budget 0
 
     with pytest.raises(ValidationFailed) as excinfo:
         projects.submit(db_session, member, project=project)
 
-    assert set(excinfo.value.errors) == {"title", "write_up", "budget_requested_cents"}
+    assert set(excinfo.value.errors) == {"title", "write_up", "poc_budget"}
+
+
+def test_submit_needs_every_answer_of_the_application(db_session: Session, member: Actor) -> None:
+    project = projects.create_project(db_session, member, title="T", write_up="W", budget_requested_cents=100)
+
+    with pytest.raises(ValidationFailed) as excinfo:
+        projects.submit(db_session, member, project=project)
+
+    assert set(excinfo.value.errors) == {"summary", "experience", "compute_use", "poc_gpu", "full_gpu"}
+
+
+@pytest.mark.parametrize(("field", "limit"), [("experience", 300), ("write_up", 500)])
+def test_submit_enforces_the_word_limits(db_session: Session, member: Actor, field: str, limit: int) -> None:
+    fields = {"title": "T", "write_up": "W", "budget_requested_cents": 100}
+    project = new_project(db_session, member, **(fields | {field: "word " * limit}))
+    projects.update_draft(db_session, member, project=project, **{field: "word " * (limit + 1)})
+
+    with pytest.raises(ValidationFailed) as excinfo:
+        projects.submit(db_session, member, project=project)
+
+    assert excinfo.value.errors == {field: f"{limit + 1} words: keep it to {limit}."}
+    projects.update_draft(db_session, member, project=project, **{field: "word " * limit})
+    assert projects.submit(db_session, member, project=project).status is ProjectStatus.PENDING_REVIEW
+
+
+def test_a_contest_or_professor_needs_naming(db_session: Session, member: Actor) -> None:
+    project = new_project(
+        db_session, member, title="T", write_up="W", budget_requested_cents=100, affiliation="contest"
+    )
+
+    with pytest.raises(ValidationFailed) as excinfo:
+        projects.submit(db_session, member, project=project)
+
+    assert set(excinfo.value.errors) == {"affiliation_detail"}
+    with pytest.raises(ValidationFailed):
+        projects.update_draft(db_session, member, project=project, affiliation="hackathon")
+
+
+def test_an_amendment_starts_with_every_answer_of_the_approved_revision(
+    db_session: Session, member: Actor, reviewer: Actor, weave
+) -> None:
+    project = new_project(db_session, member, title="T", write_up="W", budget_requested_cents=100)
+    project = projects.submit(db_session, member, project=project)
+    projects.record_review(
+        db_session,
+        reviewer,
+        revision=project.current_revision,
+        decision=ReviewDecision.APPROVE,
+        source=ReviewSource.WEB,
+        weave_client=weave,
+    )
+
+    draft = projects.start_amendment(db_session, member, project=project)
+
+    approved = project.approved_revision
+    for field in ("summary", "experience", "write_up", "compute_use", "full_budget_estimate", "full_budget_cents"):
+        assert getattr(draft, field) == getattr(approved, field)
+    # What it needs now starts as the finished product, on top of the approved budget.
+    assert draft.budget_estimate == approved.full_budget_estimate
+    assert draft.budget_requested_cents == 100 + approved.full_budget_cents
 
 
 def test_submit_fails_without_a_draft(db_session: Session, member: Actor, reviewer: Actor) -> None:
-    project = projects.create_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
+    project = new_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
     project = projects.submit(db_session, member, project=project)
 
     with pytest.raises(InvalidState):
@@ -54,12 +116,17 @@ def test_submit_fails_without_a_draft(db_session: Session, member: Actor, review
 
 
 def test_submit_on_a_completion_draft_directs_to_submit_completion(
-    db_session: Session, member: Actor, admin: Actor
+    db_session: Session, member: Actor, admin: Actor, weave
 ) -> None:
-    project = projects.create_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
+    project = new_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
     project = projects.submit(db_session, member, project=project)
     projects.admin_decide(
-        db_session, admin, revision=project.current_revision, decision=ReviewDecision.APPROVE, reason="ok"
+        db_session,
+        admin,
+        revision=project.current_revision,
+        decision=ReviewDecision.APPROVE,
+        reason="ok",
+        weave_client=weave,
     )
     db_session.refresh(project)
     projects.start_completion(db_session, member, project=project)
@@ -69,26 +136,31 @@ def test_submit_on_a_completion_draft_directs_to_submit_completion(
 
 
 def test_start_amendment_requires_an_approved_project(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
+    project = new_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
 
     with pytest.raises(InvalidState):
         projects.start_amendment(db_session, member, project=project)
 
 
 def test_start_completion_requires_an_approved_project(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
+    project = new_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
 
     with pytest.raises(InvalidState):
         projects.start_completion(db_session, member, project=project)
 
 
 def test_start_amendment_fails_with_a_draft_already_in_progress(
-    db_session: Session, member: Actor, admin: Actor
+    db_session: Session, member: Actor, admin: Actor, weave
 ) -> None:
-    project = projects.create_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
+    project = new_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
     project = projects.submit(db_session, member, project=project)
     projects.admin_decide(
-        db_session, admin, revision=project.current_revision, decision=ReviewDecision.APPROVE, reason="ok"
+        db_session,
+        admin,
+        revision=project.current_revision,
+        decision=ReviewDecision.APPROVE,
+        reason="ok",
+        weave_client=weave,
     )
     db_session.refresh(project)
     projects.start_amendment(db_session, member, project=project)
@@ -97,11 +169,16 @@ def test_start_amendment_fails_with_a_draft_already_in_progress(
         projects.start_amendment(db_session, member, project=project)
 
 
-def test_submit_completion_requires_a_completion_draft(db_session: Session, member: Actor, admin: Actor) -> None:
-    project = projects.create_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
+def test_submit_completion_requires_a_completion_draft(db_session: Session, member: Actor, admin: Actor, weave) -> None:
+    project = new_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
     project = projects.submit(db_session, member, project=project)
     projects.admin_decide(
-        db_session, admin, revision=project.current_revision, decision=ReviewDecision.APPROVE, reason="ok"
+        db_session,
+        admin,
+        revision=project.current_revision,
+        decision=ReviewDecision.APPROVE,
+        reason="ok",
+        weave_client=weave,
     )
     db_session.refresh(project)
 
@@ -115,7 +192,7 @@ def test_get_project_not_found_raises(db_session: Session) -> None:
 
 
 def test_get_project_returns_the_project(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
+    project = new_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
 
     found = projects.get_project(db_session, project_id=project.id)
 
@@ -124,8 +201,8 @@ def test_get_project_returns_the_project(db_session: Session, member: Actor) -> 
 
 def test_list_projects_for_user(db_session: Session, member: Actor, make_actor) -> None:
     other = make_actor(groups=frozenset({"ganymede:member"}))
-    mine = projects.create_project(db_session, member, title="mine", write_up="y", budget_requested_cents=100)
-    projects.create_project(db_session, other, title="theirs", write_up="y", budget_requested_cents=100)
+    mine = new_project(db_session, member, title="mine", write_up="y", budget_requested_cents=100)
+    new_project(db_session, other, title="theirs", write_up="y", budget_requested_cents=100)
 
     result = projects.list_projects_for_user(db_session, user_id=member.user.id)
 
@@ -137,27 +214,22 @@ def test_review_queue_requires_reviewer(db_session: Session, member: Actor) -> N
         projects.review_queue(db_session, member)
 
 
-def test_review_queue_excludes_own_projects_credited_builders_and_already_reviewed(
-    db_session: Session, member: Actor, reviewer: Actor, make_actor
+def test_review_queue_excludes_own_projects_team_projects_and_already_reviewed(
+    db_session: Session, member: Actor, reviewer: Actor, make_actor, weave
 ) -> None:
     other_member = make_actor(groups=frozenset({"ganymede:member"}))
 
     # A submission by someone else: should show up.
-    visible = projects.create_project(
-        db_session, other_member, title="visible", write_up="y", budget_requested_cents=100
-    )
+    visible = new_project(db_session, other_member, title="visible", write_up="y", budget_requested_cents=100)
     visible = projects.submit(db_session, other_member, project=visible)
 
     # reviewer's own submission: excluded.
-    own = projects.create_project(db_session, reviewer, title="own", write_up="y", budget_requested_cents=100)
+    own = new_project(db_session, reviewer, title="own", write_up="y", budget_requested_cents=100)
     projects.submit(db_session, reviewer, project=own)
 
-    # A submission crediting the reviewer as a builder: excluded.
-    credited = projects.create_project(
-        db_session, other_member, title="credited", write_up="y", budget_requested_cents=100
-    )
-    credited.current_revision.credited_builder_ids = [reviewer.user.id]
-    db_session.flush()
+    # A submission whose team the reviewer is invited to: excluded.
+    credited = new_project(db_session, other_member, title="credited", write_up="y", budget_requested_cents=100)
+    add_to_team(db_session, credited, reviewer, accepted=False)
     credited = projects.submit(db_session, other_member, project=credited)
 
     queue_before = {r.id for r in projects.review_queue(db_session, reviewer)}
@@ -173,15 +245,16 @@ def test_review_queue_excludes_own_projects_credited_builders_and_already_review
         decision=ReviewDecision.REJECT,
         reason="not ready",
         source=ReviewSource.WEB,
+        weave_client=weave,
     )
     queue_after = {r.id for r in projects.review_queue(db_session, reviewer)}
     assert visible.current_revision.id not in queue_after  # rejected -> no longer pending anyway
 
 
 def test_project_summary_reports_policy_explanation_while_pending(
-    db_session: Session, member: Actor, reviewer: Actor
+    db_session: Session, member: Actor, reviewer: Actor, weave
 ) -> None:
-    project = projects.create_project(db_session, member, title="x", write_up="y", budget_requested_cents=1_000)
+    project = new_project(db_session, member, title="x", write_up="y", budget_requested_cents=1_000)
     project = projects.submit(db_session, member, project=project)
 
     summary = projects.project_summary(db_session, project=project)
@@ -196,6 +269,7 @@ def test_project_summary_reports_policy_explanation_while_pending(
         revision=project.current_revision,
         decision=ReviewDecision.APPROVE,
         source=ReviewSource.WEB,
+        weave_client=weave,
     )
     db_session.refresh(project)
     summary = projects.project_summary(db_session, project=project)
@@ -220,17 +294,17 @@ def test_project_summary_reports_policy_explanation_while_pending(
 )
 def test_links_must_be_http_urls(db_session: Session, member: Actor, url: str) -> None:
     with pytest.raises(ValidationFailed) as exc:
-        projects.create_project(db_session, member, title="x", write_up="y", budget_requested_cents=100, repo_url=url)
+        new_project(db_session, member, title="x", write_up="y", budget_requested_cents=100, repo_url=url)
     assert "repo_url" in exc.value.errors
 
-    project = projects.create_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
+    project = new_project(db_session, member, title="x", write_up="y", budget_requested_cents=100)
     with pytest.raises(ValidationFailed) as exc:
         projects.update_draft(db_session, member, project=project, demo_url=url)
     assert "demo_url" in exc.value.errors
 
 
 def test_links_accept_http_urls_and_blank_clears(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(
+    project = new_project(
         db_session, member, title="x", write_up="y", budget_requested_cents=100, repo_url="  https://github.com/o/r  "
     )
     assert project.repo_url == "https://github.com/o/r"

@@ -76,6 +76,8 @@ class BudgetEntryKind(enum.StrEnum):
 
 class SpendSource(enum.StrEnum):
     SKYPILOT_COST_REPORT = "skypilot_cost_report"
+    # Krater Compute's live estimate: each instance's rented price for the time it ran (`krater.compute.spend`).
+    VAST_ESTIMATE = "vast_estimate"
 
 
 class QuiltOutboxState(enum.StrEnum):
@@ -90,3 +92,59 @@ class QuiltOutboxState(enum.StrEnum):
 class ApprovalStage(enum.StrEnum):
     PROPOSAL = "proposal"
     COMPLETION = "completion"
+
+
+class ComputeJobKind(enum.StrEnum):
+    JOB = "job"  # runs a command and ends
+    BOX = "box"  # keeps a workspace open (SSH, Jupyter) until idle
+
+
+class ComputeJobState(enum.StrEnum):
+    """Where a Krater Compute job is. See docs/compute/scheduler.md for the transitions."""
+
+    QUEUED = "queued"  # waiting for an offer at or under its target price (and for budget)
+    STARTING = "starting"  # an instance is being created or is pulling the image
+    RUNNING = "running"
+    PAUSED = "paused"  # its interruptible instance was outbid
+    STOPPED = "stopped"  # a box Krater stopped (idle, or the member asked): its disk is kept until it resumes
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ComputeEscalation(enum.StrEnum):
+    """What a job does once it has waited `max_wait_minutes` for an offer at its target price."""
+
+    KEEP_WAITING = "keep_waiting"
+    RAISE_BID = "raise_bid"  # accept offers up to the max price
+    ON_DEMAND = "on_demand"  # rent on demand, up to the max price
+    CANCEL = "cancel"
+
+
+class ComputeOutbid(enum.StrEnum):
+    """What an interruptible job does when it stays outbid (paused) past the policy's "move after" time."""
+
+    MOVE = "move"  # destroy the machine and start again elsewhere, from the last stored checkpoint
+    # Keep the paused machine, its disk and the job's state on it, and let Vast resume it when the price comes back
+    # under the job's max; move only once a machine at or under the max is free. A limit order does this.
+    HOLD = "hold"
+
+
+class ComputeInstanceState(enum.StrEnum):
+    """One rented Vast instance. A job has one per attempt."""
+
+    CREATING = "creating"  # row written, create call sent; no Vast id known yet
+    PROVISIONING = "provisioning"  # Vast id known; pulling the image (disk billed, GPU not yet)
+    RUNNING = "running"
+    PAUSED = "paused"  # outbid: not running, but not stopped by Krater either
+    STOPPED = "stopped"  # stopped by Krater (a box): the GPU is free, the disk still bills
+    DESTROYED = "destroyed"  # destroyed and confirmed gone (or never existed)
+    CREATE_FAILED = "create_failed"  # Vast refused the create, or it never appeared
+
+
+class GalleryMinorNames(enum.StrEnum):
+    """How the public gallery names a team member who is under 18, or whose age Weave doesn't say."""
+
+    FULL = "full"  # their name as Weave has it
+    FIRST = "first"  # the first word of it
+    HIDDEN = "hidden"  # not named: "and 1 more team member"

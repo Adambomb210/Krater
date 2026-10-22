@@ -18,11 +18,14 @@ from krater.models import (
 )
 from krater.services import budget, projects
 from krater.services.actor import Actor
+from tests.factories import new_project
 
 
-def test_happy_path_proposal_amendment_and_completion(db_session: Session, member: Actor, reviewer: Actor) -> None:
+def test_happy_path_proposal_amendment_and_completion(
+    db_session: Session, member: Actor, reviewer: Actor, weave
+) -> None:
     # --- Draft & submit the proposal --------------------------------------------------------
-    project = projects.create_project(db_session, member, title="", write_up="", budget_requested_cents=0)
+    project = new_project(db_session, member, title="", write_up="", budget_requested_cents=0)
     assert project.status is ProjectStatus.DRAFT
     assert project.current_revision.number == 1
     assert project.current_revision.kind is RevisionKind.PROPOSAL
@@ -51,6 +54,7 @@ def test_happy_path_proposal_amendment_and_completion(db_session: Session, membe
         revision=proposal_revision,
         decision=ReviewDecision.APPROVE,
         source=ReviewSource.WEB,
+        weave_client=weave,
     )
     assert review.reviewer_groups == sorted(reviewer.groups)
 
@@ -65,7 +69,8 @@ def test_happy_path_proposal_amendment_and_completion(db_session: Session, membe
     # --- Amend: decrease the budget -----------------------------------------------------------
     amendment = projects.start_amendment(db_session, member, project=project)
     assert amendment.kind is RevisionKind.AMENDMENT
-    assert amendment.budget_requested_cents == 100_000  # copied from the approved revision
+    # Starts as the approved budget plus the finished product's estimate ($100 in the test application).
+    assert amendment.budget_requested_cents == 110_000
 
     projects.update_draft(db_session, member, project=project, budget_requested_cents=60_000)
     project = projects.submit(db_session, member, project=project)
@@ -74,7 +79,12 @@ def test_happy_path_proposal_amendment_and_completion(db_session: Session, membe
     assert amendment.submitted_at is not None
 
     projects.record_review(
-        db_session, reviewer, revision=amendment, decision=ReviewDecision.APPROVE, source=ReviewSource.WEB
+        db_session,
+        reviewer,
+        revision=amendment,
+        decision=ReviewDecision.APPROVE,
+        source=ReviewSource.WEB,
+        weave_client=weave,
     )
     db_session.refresh(project)
     assert project.status is ProjectStatus.APPROVED
@@ -105,7 +115,12 @@ def test_happy_path_proposal_amendment_and_completion(db_session: Session, membe
     db_session.flush()
 
     projects.record_review(
-        db_session, reviewer, revision=completion, decision=ReviewDecision.APPROVE, source=ReviewSource.WEB
+        db_session,
+        reviewer,
+        revision=completion,
+        decision=ReviewDecision.APPROVE,
+        source=ReviewSource.WEB,
+        weave_client=weave,
     )
     db_session.refresh(project)
     assert project.status is ProjectStatus.COMPLETED

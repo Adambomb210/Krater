@@ -329,6 +329,41 @@ def test_get_user_parses_a_directory_record(fake_weave: FakeWeave, live_client: 
     )
 
 
+def test_get_user_reads_the_minor_and_guardian_verified_fields(
+    fake_weave: FakeWeave, live_client: LiveWeaveClient
+) -> None:
+    fake_weave.directory_users["PWLDIR0001"] = {**DIRECTORY_USER, "minor": True, "guardian_verified": False}
+
+    user = live_client.get_user("PWLDIR0001")
+
+    assert user is not None
+    assert user.minor is True
+    assert user.guardian_verified is False
+
+
+def test_a_record_without_the_age_fields_says_nothing_about_age(
+    fake_weave: FakeWeave, live_client: LiveWeaveClient
+) -> None:
+    # Older Weave versions leave both fields out.
+    fake_weave.directory_users["PWLDIR0001"] = DIRECTORY_USER
+
+    user = live_client.get_user("PWLDIR0001")
+
+    assert user is not None
+    assert user.minor is None
+    assert user.guardian_verified is None
+
+
+def test_non_boolean_age_fields_count_as_missing(fake_weave: FakeWeave, live_client: LiveWeaveClient) -> None:
+    fake_weave.directory_users["PWLDIR0001"] = {**DIRECTORY_USER, "minor": "yes", "guardian_verified": 1}
+
+    user = live_client.get_user("PWLDIR0001")
+
+    assert user is not None
+    assert user.minor is None
+    assert user.guardian_verified is None
+
+
 def test_get_user_answers_none_on_404(live_client: LiveWeaveClient) -> None:
     assert live_client.get_user("PWLNOBODY") is None
 
@@ -539,3 +574,44 @@ def test_a_refused_quilt_token_raises_weave_unavailable_and_logs_the_config_erro
     with pytest.raises(WeaveUnavailableError):
         client.quilt_token()
     assert "scope 'quilt'" in caplog.text
+
+
+# -- The CLI's tokens ----------------------------------------------------------------------------------------------
+
+
+def _cli_weave(app_uid: str = "cli-app", *, info_status: int = 200, userinfo_status: int = 200, calls=None):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if calls is not None:
+            calls.append(request.url.path)
+        assert request.headers["authorization"] == "Bearer member-token"
+        if request.url.path == "/oauth/token/info":
+            return httpx.Response(info_status, json={"application": {"uid": app_uid}, "expires_in": 3600})
+        if request.url.path == "/oauth/userinfo":
+            return httpx.Response(userinfo_status, json={"sub": "PWLLIVE0001"})
+        return httpx.Response(404)
+
+    settings = _settings().model_copy(update={"weave_cli_client_id": "cli-app"})
+    return LiveWeaveClient(settings, http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+
+def test_a_cli_token_gives_its_users_sub_and_is_cached() -> None:
+    calls: list[str] = []
+    client = _cli_weave(calls=calls)
+
+    assert client.cli_token_sub("member-token") == "PWLLIVE0001"
+    assert client.cli_token_sub("member-token") == "PWLLIVE0001"
+    assert calls == ["/oauth/token/info", "/oauth/userinfo"]  # checked once, then cached
+
+
+def test_a_token_for_another_app_is_refused() -> None:
+    assert _cli_weave(app_uid="quilt-app").cli_token_sub("member-token") is None
+
+
+def test_an_expired_or_revoked_token_or_a_user_who_lost_access_is_refused() -> None:
+    assert _cli_weave(info_status=401).cli_token_sub("member-token") is None
+    assert _cli_weave(userinfo_status=401).cli_token_sub("member-token") is None
+
+
+def test_weave_failing_is_unavailable_not_refused() -> None:
+    with pytest.raises(WeaveUnavailableError):
+        _cli_weave(info_status=502).cli_token_sub("member-token")

@@ -7,17 +7,27 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import UTC, datetime
 
 import procrastinate
 
+from krater import providers
+from krater.compute import launch as compute_launch
+from krater.compute import reconcile as compute_reconciler
+from krater.compute import scheduler as compute_scheduler
+from krater.compute import search_quota as compute_search_quota
+from krater.compute import storage_cleanup as compute_storage
+from krater.compute.search_pacing import SearchPacer
 from krater.config import get_settings
 from krater.db import get_sessionmaker
 from krater.models import Project, ProjectRevision
 from krater.pricing.catalog import CatalogError, get_price_catalog
 from krater.quilt import sender as quilt_sender
-from krater.services import people, slack_notify, slack_reviews
+from krater.services import people, price_history, slack_notify, slack_reviews
 from krater.services.pricing import refresh_prices
 from krater.slack import SlackError, get_slack_client
+from krater.storage import StorageError, get_compute_store
+from krater.vast import get_vast_client
 from krater.weave import get_weave_client
 
 logger = logging.getLogger(__name__)
@@ -67,6 +77,152 @@ def pricing_refresh(timestamp: int) -> None:
     except CatalogError:
         logger.exception("krater.pricing_refresh task failed; keeping last known prices")
         session.rollback()
+    finally:
+        session.close()
+
+
+# --------------------------------------------------------------------------------------------------
+# Krater Compute: Krater's own Vast price history. See `krater.services.price_history`. Only the worker
+# holds a Vast client; without a usable one (no key, or the fake in production) this does nothing. It runs with
+# compute off too, so the budget estimator has interruptible prices before launching opens; it stops at half of
+# Vast's daily search quota, leaving the rest to the scheduler.
+# --------------------------------------------------------------------------------------------------
+
+
+def _price_history_cron() -> str:
+    """The cron for `price_history_interval_minutes` (a divisor of 60, or whole hours), built at import time: a
+    change takes effect when the worker restarts. Runs at 5 past, away from the hourly tasks."""
+    minutes = get_settings().price_history_interval_minutes
+    if minutes >= 60:
+        hours = minutes // 60
+        return "5 * * * *" if hours == 1 else f"5 */{hours} * * *"
+    return f"*/{minutes} * * * *"
+
+
+#: Seconds between price-history searches: 36 searches take about 75 s, leaving the scheduler room under Vast's
+#: rate limit.
+PRICE_HISTORY_SEARCH_PAUSE_SECONDS = 2.0
+
+
+@app.periodic(cron=_price_history_cron())
+@app.task(name="price_history_record")
+def price_history_record(timestamp: int) -> None:
+    """Sample Vast's prices for the tracked GPU models. Fails soft: a failed run leaves a gap in the history."""
+    settings = get_settings()
+    client = get_vast_client()
+    if client is None:
+        return
+    session = get_sessionmaker()()
+    try:
+        result = price_history.record(
+            session,
+            client,
+            gpu_names=settings.price_history_gpus,
+            disk_gb=settings.price_history_disk_gb,
+            now=datetime.fromtimestamp(timestamp, tz=UTC),
+            # Vast rate-limits about 30 searches in quick succession (staging, 2026-10-11).
+            pause_seconds=PRICE_HISTORY_SEARCH_PAUSE_SECONDS,
+        )
+        compute_search_quota.record(session, client.search_quota, now=datetime.now(UTC))
+        session.commit()
+        logger.info(
+            "krater price_history_record: %d samples, %d failed%s",
+            result.written,
+            result.failed,
+            " (stopped early)" if result.stopped_early else "",
+        )
+    except Exception:
+        logger.exception("krater.price_history_record failed")
+        session.rollback()
+    finally:
+        session.close()
+
+
+#: The scheduler's memory of when it last searched for what (`krater.compute.search_pacing`), for this process.
+SEARCH_PACER = SearchPacer()
+
+#: Only one scheduler pass runs at a time, so a slow pass can't overlap the next minute's and rent twice.
+COMPUTE_SCHEDULER_LOCK = "compute_scheduler"
+
+
+@app.periodic(cron="* * * * *")
+@app.task(name="compute_schedule", lock=COMPUTE_SCHEDULER_LOCK, queueing_lock=COMPUTE_SCHEDULER_LOCK)
+def compute_schedule(timestamp: int) -> None:
+    """One Krater Compute scheduler pass (`krater.compute.scheduler`). Only with a provider in
+    `KRATER_COMPUTE_MODE` and a usable client for it; otherwise nothing is rented or destroyed."""
+    settings = get_settings()
+    client = providers.get_provider(settings)
+    if client is None:
+        return
+    session = get_sessionmaker()()
+    try:
+        result = compute_scheduler.run_pass(
+            session,
+            client,
+            settings,
+            now=max(datetime.now(UTC), datetime.fromtimestamp(timestamp, tz=UTC)),
+            runner_sha256=compute_launch.runner_sha256(settings.compute_runner_binary_path),
+            pacer=SEARCH_PACER,
+        )
+        if result.rented or result.destroyed or result.swept or result.errors:
+            logger.info(
+                "krater compute_schedule: rented %d, destroyed %d, swept %d, errors %d",
+                len(result.rented),
+                len(result.destroyed),
+                len(result.swept),
+                result.errors,
+            )
+    except Exception:
+        logger.exception("krater.compute_schedule failed")
+        session.rollback()
+    finally:
+        session.close()
+
+
+@app.periodic(cron="7 * * * *")
+@app.task(name="compute_reconcile", lock=COMPUTE_SCHEDULER_LOCK)
+def compute_reconcile(timestamp: int) -> None:
+    """Hourly: replace Krater Compute's spend estimate with Vast's own charges (`krater.compute.reconcile`). Shares
+    the scheduler's lock, since both write instance estimates."""
+    del timestamp
+    settings = get_settings()
+    provider = providers.active(settings)
+    if provider is None or not provider.capabilities.charges:
+        return  # without the provider's charges, Krater's estimate is the spend
+    client = provider.client(settings)
+    if client is None:
+        return
+    session = get_sessionmaker()()
+    try:
+        result = compute_reconciler.run(session, client, settings, now=datetime.now(UTC))
+        logger.info(
+            "krater compute_reconcile: %d projects, %d alerts, %d unknown sources",
+            result.projects,
+            result.alerts,
+            len(result.unknown_sources),
+        )
+    except Exception:
+        logger.exception("krater.compute_reconcile failed")
+        session.rollback()
+    finally:
+        session.close()
+
+
+@app.periodic(cron="37 * * * *")
+@app.task(name="compute_storage_cleanup")
+def compute_storage_cleanup(timestamp: int) -> None:
+    """Hourly: abort unfinished multipart uploads of jobs that have ended (`krater.compute.storage_cleanup`)."""
+    if providers.active(get_settings()) is None:
+        return
+    session = get_sessionmaker()()
+    try:
+        aborted = compute_storage.abort_abandoned_uploads(
+            session, get_compute_store(), now=datetime.fromtimestamp(timestamp, tz=UTC)
+        )
+        if aborted:
+            logger.info("krater compute_storage_cleanup: aborted %d unfinished uploads", aborted)
+    except StorageError:
+        logger.exception("krater.compute_storage_cleanup failed")
     finally:
         session.close()
 
@@ -147,6 +303,24 @@ def slack_post_admin_override(
         session.commit()
     except SlackError:
         logger.exception("krater.slack_post_admin_override failed")
+        session.rollback()
+    finally:
+        session.close()
+
+
+@app.task(name="slack_invite_team")
+def slack_invite_team(project_id: str) -> None:
+    """Invite a project's team to its channel after someone joins. A no-op while the project has no channel:
+    submitting creates it and invites the whole team then."""
+    session = get_sessionmaker()()
+    try:
+        project = session.get(Project, uuid.UUID(project_id))
+        if project is None or project.slack_channel_id is None or project.slack_channel_archived:
+            return
+        slack_notify.ensure_channel(session, get_slack_client(), get_weave_client(), project=project)
+        session.commit()
+    except SlackError:
+        logger.exception("krater.slack_invite_team failed")
         session.rollback()
     finally:
         session.close()

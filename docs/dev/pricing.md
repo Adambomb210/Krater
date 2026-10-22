@@ -1,6 +1,6 @@
 # GPU pricing: source, refresh, and how the estimator uses it
 
-> Krater no longer runs SkyPilot (removed on 2026-10-11), but `/pricing` and the budget estimator
+> Krater no longer runs SkyPilot (Krater Compute replaced it on 2026-10-11), but `/pricing` and the budget estimator
 > still read SkyPilot's public Vast catalog CSV, now through `krater/pricing/catalog.py`. The "why" below is kept as
 > written; its references to the SkyPilot integration and spike docs are history (see git).
 
@@ -137,11 +137,38 @@ from `KRATER_PRICING_CATALOG_URL` (defaults to the GitHub URL above), with nothi
 
 ## Estimator: never trust a client-sent rate
 
-The budget estimator on the proposal/amendment draft form posts the *inputs* (GPU key, count, hours,
-pricing basis, safety margin) to the server; `krater.services.pricing.estimate_cost` looks up the
+The application form has two estimators, the proof of concept (`poc_*` fields) and the finished product (`full_*`);
+see `docs/SPEC.md` "The application". Each posts the *inputs* (GPU key, count, hours, pricing basis, safety margin)
+to the server; `krater.services.pricing.estimate_cost` looks up the
 **current** `GpuPrice` row and computes the rate/subtotal/margin/total itself. Nothing about the
 resulting dollar figure is ever accepted from the client — only the choice of which GPU/count/hours/
 basis/margin to price. The computed breakdown (including which `refreshed_at` snapshot priced it) is
 what gets stored on `ProjectRevision.budget_estimate` when the submitter used the estimator, and it's
 recomputed again, from scratch, at draft-save time — a tampered rate in a resubmitted form changes
 nothing.
+
+**Overrides are explicit and visible.** The team may give its own price per card-hour (`*_rate`, up to four
+decimal places, kept as `rate_microusd`). That is the one rate taken from the client, and it is recorded as such:
+`rate_source: member`, with Krater's own rate kept beside it
+as `market_rate_cents` (`null` when Krater has none, for example a card picked as "Another card" by name). The
+summary says "the team's own hourly price; Krater's typical is $X/hr". The amount requested (`*_budget`) can also
+differ from the estimate's total; it starts as the total, and the project page flags a large difference
+(`budget_estimate_flag_threshold_percent`). Both estimates are always stored when filled in, whatever was requested.
+
+## Estimator: Krater's own Vast samples first
+
+Whenever the worker has a Vast key, compute on or off, it samples Vast every hour (`krater.services.price_history`). The
+estimator uses those samples instead of the catalog for a GPU that has at least a day of them in the last 7 days: the
+rate is the median of the samples' median full hourly prices (32 GB of disk included) for the chosen basis (`spot` =
+interruptible bids, `on_demand`), a typical price rather than the catalog's cheapest spot offer. Catalog names are
+matched to Vast's ignoring spaces and dashes, with Vast's `SXM`/`PCIE`/`NVL` variants counting as the catalog's GPU
+(never `Ti`, which is a different card). The stored estimate records `rate_source` (`krater_samples` or `catalog`);
+estimates stored before that field read as the catalog. With production compute off and no key in the worker, there
+are no samples and the estimator keeps using the catalog.
+
+**Interruptible first.** The estimator defaults to `spot` (interruptible), what Krater Compute rents by default.
+SkyPilot's catalog has no interruptible prices at all (0 of 43 GPUs on staging, 2026-10-11), so they come from
+Krater's bid samples. A GPU with neither is estimated on demand instead, as an upper bound: the estimate's `basis`
+becomes `on_demand`, it records `spot_unavailable: true`, and its summary says "on-demand; no interruptible prices
+for this GPU yet". `/pricing` shows a "Typical interruptible" column from the same samples (the 1-GPU bid times the
+row's GPU count), or the catalog's spot price if it ever has one.

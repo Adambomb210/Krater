@@ -13,8 +13,7 @@ It's a **temporary** choice (see `docs/SPEC.md`'s "Open questions" #1) -- MinIO 
 its community edition stopped publishing images in 2025; a long-term provider is still to be picked.
 
 Credentials come from `KRATER_S3_ACCESS_KEY_ID`/`KRATER_S3_SECRET_ACCESS_KEY` (defaults: `krater` /
-`krater-dev-secret` for local dev), written into a JSON identity file at container start, so no secret is
-ever committed.
+`krater-dev-secret` for local dev), written into a JSON identity file at container start -- so no secret is ever committed.
 
 The bucket and its CORS policy are created by `krater.storage.ensure_bucket`, which the one-shot
 `migrate` service runs right after `alembic upgrade head` (retrying until `storage` answers; skipped

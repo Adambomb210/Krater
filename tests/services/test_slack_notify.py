@@ -12,13 +12,15 @@ from krater.services.actor import GROUP_MEMBER, GROUP_REVIEWER, Actor
 from krater.slack.errors import SlackRequestFailedError
 from krater.slack.fake import FakeSlackClient
 from krater.weave import StubWeaveClient
+from tests.factories import new_project
+from tests.services.conftest import add_to_team
 
 
 def test_ensure_channel_creates_and_invites_the_team(
     db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
     member.user.slack_user_id = "U_MEMBER"
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
     reviewer.user.slack_user_id = "U_REVIEWER"
     slack_client = FakeSlackClient()
 
@@ -32,7 +34,7 @@ def test_ensure_channel_creates_and_invites_the_team(
 def test_ensure_channel_is_idempotent(
     db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
     reviewer.user.slack_user_id = "U_REVIEWER"
     slack_client = FakeSlackClient()
 
@@ -46,9 +48,7 @@ def test_ensure_channel_is_idempotent(
 def test_notify_revision_submitted_posts_a_review_message_and_a_feed_line(
     db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
-    project = projects.create_project(
-        db_session, member, title="Rover", write_up="A rover.", budget_requested_cents=5000
-    )
+    project = new_project(db_session, member, title="Rover", write_up="A rover.", budget_requested_cents=5000)
     project = projects.submit(db_session, member, project=project)
     revision = project.current_revision
     reviewer.user.slack_user_id = "U_REVIEWER"
@@ -70,7 +70,7 @@ def test_notify_revision_submitted_posts_a_review_message_and_a_feed_line(
 def test_notify_revision_submitted_is_idempotent(
     db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     project = projects.submit(db_session, member, project=project)
     revision = project.current_revision
     reviewer.user.slack_user_id = "U_REVIEWER"
@@ -86,7 +86,7 @@ def test_notify_revision_submitted_is_idempotent(
 def test_no_feed_line_for_a_resubmission_after_rejection(
     db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     project = projects.submit(db_session, member, project=project)
     projects.record_review(
         db_session,
@@ -95,6 +95,7 @@ def test_no_feed_line_for_a_resubmission_after_rejection(
         decision=ReviewDecision.REJECT,
         reason="no",
         source=ReviewSource.WEB,
+        weave_client=weave,
     )
     db_session.refresh(project)
     projects.update_draft(db_session, member, project=project, write_up="revised")
@@ -112,7 +113,7 @@ def test_no_feed_line_for_a_resubmission_after_rejection(
 def test_no_feed_line_for_an_amendment(
     db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     project = projects.submit(db_session, member, project=project)
     projects.record_review(
         db_session,
@@ -120,6 +121,7 @@ def test_no_feed_line_for_an_amendment(
         revision=project.current_revision,
         decision=ReviewDecision.APPROVE,
         source=ReviewSource.WEB,
+        weave_client=weave,
     )
     db_session.refresh(project)
     projects.start_amendment(db_session, member, project=project)
@@ -136,14 +138,19 @@ def test_no_feed_line_for_an_amendment(
 def test_notify_decision_updates_the_message_and_drops_the_buttons(
     db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     project = projects.submit(db_session, member, project=project)
     revision = project.current_revision
     slack_client = FakeSlackClient()
     slack_notify.notify_revision_submitted(db_session, slack_client, weave, revision=revision, feed_channel_id=None)
 
     projects.record_review(
-        db_session, reviewer, revision=revision, decision=ReviewDecision.APPROVE, source=ReviewSource.WEB
+        db_session,
+        reviewer,
+        revision=revision,
+        decision=ReviewDecision.APPROVE,
+        source=ReviewSource.WEB,
+        weave_client=weave,
     )
     db_session.refresh(revision)
     assert revision.outcome is RevisionOutcome.APPROVED
@@ -158,7 +165,7 @@ def test_notify_decision_updates_the_message_and_drops_the_buttons(
 def test_notify_decision_is_a_no_op_while_still_pending(
     db_session: Session, member: Actor, weave: StubWeaveClient
 ) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     project = projects.submit(db_session, member, project=project)
     revision = project.current_revision
     slack_client = FakeSlackClient()
@@ -171,7 +178,7 @@ def test_notify_decision_is_a_no_op_while_still_pending(
 
 
 def test_post_admin_override_posts_to_the_channel(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     slack_client = FakeSlackClient()
     project.slack_channel_id = slack_client.create_channel("ganymede-rover-test")
 
@@ -187,7 +194,7 @@ def test_post_admin_override_posts_to_the_channel(db_session: Session, member: A
 
 
 def test_post_admin_override_is_a_no_op_without_a_channel(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     slack_client = FakeSlackClient()
 
     slack_notify.post_admin_override(
@@ -198,7 +205,7 @@ def test_post_admin_override_is_a_no_op_without_a_channel(db_session: Session, m
 
 
 def test_archive_project_channel_is_idempotent(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     slack_client = FakeSlackClient()
     project.slack_channel_id = slack_client.create_channel("ganymede-rover-test")
     project.status = ProjectStatus.WITHDRAWN
@@ -214,7 +221,7 @@ def test_archive_project_channel_is_idempotent(db_session: Session, member: Acto
 
 
 def test_archive_project_channel_is_a_no_op_while_not_terminal(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     slack_client = FakeSlackClient()
     project.slack_channel_id = slack_client.create_channel("ganymede-rover-test")
 
@@ -227,7 +234,7 @@ def test_archive_project_channel_is_a_no_op_while_not_terminal(db_session: Sessi
 def test_sync_reviewer_invites_invites_reviewers_to_open_channels(
     db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     slack_client = FakeSlackClient()
     project.slack_channel_id = slack_client.create_channel("ganymede-rover-test")
     reviewer.user.slack_user_id = "U_NEW_REVIEWER"
@@ -240,7 +247,7 @@ def test_sync_reviewer_invites_invites_reviewers_to_open_channels(
 def test_sync_reviewer_invites_skips_archived_channels(
     db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     slack_client = FakeSlackClient()
     project.slack_channel_id = slack_client.create_channel("ganymede-rover-test")
     project.slack_channel_archived = True
@@ -267,7 +274,7 @@ def test_ensure_channel_invites_reviewers_weave_lists_and_leaves_out_inactive_on
     plain_member = make_actor(groups=frozenset({GROUP_MEMBER}), slack_user_id="U_PLAIN")
     member.user.slack_user_id = "U_MEMBER"
     reviewer.user.slack_user_id = "U_REVIEWER"
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
 
     invited = _team_invites(db_session, weave, project)
 
@@ -280,7 +287,7 @@ def test_ensure_channel_uses_the_slack_id_weave_reports_for_a_reviewer_krater_ha
 ) -> None:
     weave.put_user("PWLNEVERSEEN", name="Nev", email="nev@example.com", roles=["member", "reviewer"], slack_id="U_NEV")
     member.user.slack_user_id = "U_MEMBER"
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
 
     assert _team_invites(db_session, weave, project) == {"U_MEMBER", "U_NEV"}
 
@@ -294,22 +301,24 @@ def test_ensure_channel_invites_slack_guests_too_and_leaves_refusals_to_slack(
     member.user.slack_user_id = "U_MEMBER"
     slack_client = FakeSlackClient()
     slack_client.set_user_info("U_GUEST", is_ultra_restricted=True)
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
 
     assert _team_invites(db_session, weave, project, slack_client) == {"U_MEMBER", "U_GUEST"}
 
 
-def test_ensure_channel_invites_credited_builders(
+def test_ensure_channel_invites_the_team_but_not_pending_invitees(
     db_session: Session, member: Actor, make_actor, weave: StubWeaveClient
 ) -> None:
-    builder = make_actor(slack_user_id="U_BUILDER")
-    unlinked_builder = make_actor(email="nobody-in-slack@example.com")
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
-    assert project.current_revision is not None
-    project.current_revision.credited_builder_ids = [builder.user.id, unlinked_builder.user.id]
+    teammate = make_actor(slack_user_id="U_TEAMMATE")
+    unlinked_teammate = make_actor()
+    invitee = make_actor(slack_user_id="U_INVITEE")
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
+    add_to_team(db_session, project, teammate)
+    add_to_team(db_session, project, unlinked_teammate)
+    add_to_team(db_session, project, invitee, accepted=False)
     member.user.slack_user_id = "U_MEMBER"
 
-    assert _team_invites(db_session, weave, project) == {"U_MEMBER", "U_BUILDER"}
+    assert _team_invites(db_session, weave, project) == {"U_MEMBER", "U_TEAMMATE"}
 
 
 def test_ensure_channel_leaves_out_people_without_a_slack_id_from_weave(
@@ -317,7 +326,7 @@ def test_ensure_channel_leaves_out_people_without_a_slack_id_from_weave(
 ) -> None:
     # No Slack lookups by email: Krater keeps no emails (patchworklabsorg/krater#7).
     make_actor(groups=reviewer.groups, slack_user_id="U_LINKED")
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=1000)
     slack_client = FakeSlackClient()
 
     assert _team_invites(db_session, weave, project, slack_client) == {"U_LINKED"}
@@ -326,7 +335,7 @@ def test_ensure_channel_leaves_out_people_without_a_slack_id_from_weave(
 def test_sync_reviewer_invites_sees_a_reviewer_role_weave_granted_after_the_channel_exists(
     db_session: Session, member: Actor, make_actor, weave: StubWeaveClient
 ) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     slack_client = FakeSlackClient()
     project.slack_channel_id = slack_client.create_channel("ganymede-rover-test")
     newcomer = make_actor(groups=frozenset({GROUP_MEMBER}), slack_user_id="U_NEWCOMER")
@@ -354,8 +363,8 @@ class _OneBrokenChannelSlackClient(FakeSlackClient):
 def test_sync_reviewer_invites_carries_on_past_a_channel_slack_refuses(
     db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
-    broken = projects.create_project(db_session, member, title="Broken", write_up="w", budget_requested_cents=5000)
-    fine = projects.create_project(db_session, member, title="Fine", write_up="w", budget_requested_cents=5000)
+    broken = new_project(db_session, member, title="Broken", write_up="w", budget_requested_cents=5000)
+    fine = new_project(db_session, member, title="Fine", write_up="w", budget_requested_cents=5000)
     slack_client = _OneBrokenChannelSlackClient()
     broken.slack_channel_id = slack_client.create_channel("ganymede-broken")
     fine.slack_channel_id = slack_client.create_channel("ganymede-fine")
@@ -369,7 +378,7 @@ def test_sync_reviewer_invites_carries_on_past_a_channel_slack_refuses(
 
 
 def test_sync_budget_notifications_posts_a_warning_once(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     slack_client = FakeSlackClient()
     project.slack_channel_id = slack_client.create_channel("ganymede-rover-test")
     event = AuditEvent(
@@ -389,8 +398,49 @@ def test_sync_budget_notifications_posts_a_warning_once(db_session: Session, mem
     assert len(slack_client.messages) == 1
 
 
+class _BrokenChannelSlack(FakeSlackClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.broken_channel_id: str | None = None
+
+    def post_message(self, channel_id: str, *, blocks: list[dict], text: str) -> str:
+        if channel_id == self.broken_channel_id:
+            raise SlackRequestFailedError("chat.postMessage failed: not_in_channel")
+        return super().post_message(channel_id, blocks=blocks, text=text)
+
+
+def test_budget_notices_skip_archived_channels_and_survive_a_refusal(db_session: Session, member: Actor) -> None:
+    """Seen on staging: a completed project's notice went to its archived channel, Slack refused it (`is_archived`)
+    on every reconcile, and the loop stopped there, holding up every other project's notices."""
+    slack_client = _BrokenChannelSlack()
+    archived = new_project(db_session, member, title="Done", write_up="w", budget_requested_cents=5000)
+    archived.slack_channel_id = slack_client.create_channel("ganymede-done")
+    archived.slack_channel_archived = True
+    broken = new_project(db_session, member, title="Kicked", write_up="w", budget_requested_cents=5000)
+    broken.slack_channel_id = slack_client.create_channel("ganymede-kicked")
+    slack_client.broken_channel_id = broken.slack_channel_id
+    fine = new_project(db_session, member, title="Fine", write_up="w", budget_requested_cents=5000)
+    fine.slack_channel_id = slack_client.create_channel("ganymede-fine")
+    for project in (archived, broken, fine):
+        db_session.add(
+            AuditEvent(
+                actor_id=None,
+                action=slack_notify.AUDIT_BUDGET_WARNING,
+                project_id=project.id,
+                payload={"ceiling_cents": 5000, "spend_cents": 4000, "percent": 80.0},
+            )
+        )
+    db_session.flush()
+
+    slack_notify.sync_budget_notifications(db_session, slack_client)
+
+    assert [channel for channel, _ts in slack_client.messages] == [fine.slack_channel_id]
+    slack_notify.sync_budget_notifications(db_session, slack_client)  # the archived one is handled, not retried
+    assert len(slack_client.messages) == 1
+
+
 def test_sync_missed_archives_archives_finished_projects(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     slack_client = FakeSlackClient()
     project.slack_channel_id = slack_client.create_channel("ganymede-rover-test")
     project.status = ProjectStatus.COMPLETED
@@ -402,7 +452,7 @@ def test_sync_missed_archives_archives_finished_projects(db_session: Session, me
 
 
 def test_reconcile_runs_every_step(db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     slack_client = FakeSlackClient()
     project.slack_channel_id = slack_client.create_channel("ganymede-rover-test")
     project.status = ProjectStatus.COMPLETED
@@ -428,8 +478,8 @@ _ESCAPED_INJECTION = "&lt;!channel&gt; ignore this &lt;https://phish.example/|Ap
 def test_review_message_escapes_the_project_title_and_write_up(
     db_session: Session, member: Actor, weave: StubWeaveClient
 ) -> None:
-    project = projects.create_project(
-        db_session, member, title=_INJECTION, write_up=_INJECTION, budget_requested_cents=5000
+    project = new_project(
+        db_session, member, title=_INJECTION, summary=_INJECTION, write_up=_INJECTION, budget_requested_cents=5000
     )
     project = projects.submit(db_session, member, project=project)
     revision = project.current_revision
@@ -447,7 +497,7 @@ def test_review_message_escapes_the_project_title_and_write_up(
 
 
 def test_feed_line_escapes_the_project_title(db_session: Session, member: Actor, weave: StubWeaveClient) -> None:
-    project = projects.create_project(db_session, member, title=_INJECTION, write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title=_INJECTION, write_up="w", budget_requested_cents=5000)
     project = projects.submit(db_session, member, project=project)
     revision = project.current_revision
     slack_client = FakeSlackClient()
@@ -465,7 +515,7 @@ def test_feed_line_escapes_the_project_title(db_session: Session, member: Actor,
 def test_notify_decision_escapes_the_title_and_reject_reason(
     db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
-    project = projects.create_project(db_session, member, title=_INJECTION, write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title=_INJECTION, write_up="w", budget_requested_cents=5000)
     project = projects.submit(db_session, member, project=project)
     revision = project.current_revision
     slack_client = FakeSlackClient()
@@ -478,6 +528,7 @@ def test_notify_decision_escapes_the_title_and_reject_reason(
         decision=ReviewDecision.REJECT,
         reason=_INJECTION,
         source=ReviewSource.WEB,
+        weave_client=weave,
     )
     db_session.refresh(revision)
 
@@ -490,7 +541,7 @@ def test_notify_decision_escapes_the_title_and_reject_reason(
 
 
 def test_post_admin_override_escapes_actor_name_and_reason(db_session: Session, member: Actor) -> None:
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     slack_client = FakeSlackClient()
     project.slack_channel_id = slack_client.create_channel("ganymede-rover-test")
 
@@ -508,3 +559,77 @@ def test_post_admin_override_escapes_actor_name_and_reason(db_session: Session, 
     assert "<!channel>" not in block_text
     assert _ESCAPED_INJECTION in block_text
     assert _INJECTION in posted["text"]  # fallback text isn't mrkdwn-parsed, so left raw
+
+
+def test_box_notices_mention_the_owner_in_the_project_channel_once(db_session: Session, member: Actor) -> None:
+    from krater.services.compute_jobs import AUDIT_BOX_DESTROY_SOON
+
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    member.user.slack_user_id = "U_OWNER"
+    slack_client = FakeSlackClient()
+    project.slack_channel_id = slack_client.create_channel("ganymede-rover-test")
+    db_session.add(
+        AuditEvent(
+            actor_id=None,
+            action=AUDIT_BOX_DESTROY_SOON,
+            project_id=project.id,
+            payload={
+                "job_id": "00000000-0000-0000-0000-000000000001",
+                "job_name": "<!channel> notebook",
+                "owner_id": str(member.user.id),
+                "destroy_after_hours": 24,
+                "destroy_at": "2026-10-12T14:00:00+00:00",
+            },
+        )
+    )
+    db_session.flush()
+
+    slack_notify.sync_box_notifications(db_session, slack_client)
+    slack_notify.sync_box_notifications(db_session, slack_client)
+
+    assert len(slack_client.messages) == 1
+    (message,) = slack_client.messages.values()
+    text = message["blocks"][0]["text"]["text"]
+    assert "<@U_OWNER>" in text and "2026-10-12 14:00 UTC" in text
+    assert "<!channel>" not in text  # the box's name is escaped
+
+
+def _box_notice(db_session: Session, project, member: Actor, name: str) -> AuditEvent:
+    from krater.services.compute_jobs import AUDIT_BOX_STOPPED
+
+    event = AuditEvent(
+        actor_id=None,
+        action=AUDIT_BOX_STOPPED,
+        project_id=project.id,
+        payload={"job_id": "j", "job_name": name, "owner_id": str(member.user.id), "destroy_after_hours": 24},
+    )
+    db_session.add(event)
+    db_session.flush()
+    return event
+
+
+def test_a_failing_channel_does_not_hold_up_other_box_notices(db_session: Session, member: Actor) -> None:
+    slack_client = FakeSlackClient()
+    gone = new_project(db_session, member, title="Gone", write_up="w", budget_requested_cents=5000)
+    gone.slack_channel_id = "C_REMOVED"
+    fine = new_project(db_session, member, title="Fine", write_up="w", budget_requested_cents=5000)
+    fine.slack_channel_id = slack_client.create_channel("ganymede-fine")
+    archived = new_project(db_session, member, title="Done", write_up="w", budget_requested_cents=5000)
+    archived.slack_channel_id = slack_client.create_channel("ganymede-done")
+    archived.slack_channel_archived = True
+    _box_notice(db_session, gone, member, "first")
+    _box_notice(db_session, fine, member, "second")
+    _box_notice(db_session, archived, member, "third")
+    real_post = slack_client.post_message
+
+    def post(channel_id, **kwargs):
+        if channel_id == "C_REMOVED":
+            raise SlackRequestFailedError("channel_not_found")
+        return real_post(channel_id, **kwargs)
+
+    slack_client.post_message = post
+
+    slack_notify.sync_box_notifications(db_session, slack_client)
+
+    texts = [m["text"] for m in slack_client.messages.values()]
+    assert len(texts) == 1 and "second" in texts[0]  # the archived channel's is dropped, the failing one retried later

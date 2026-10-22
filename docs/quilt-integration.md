@@ -58,7 +58,8 @@ amendments and the completion review. The `status` is Krater's project status, f
 | `BudgetEntry` with a positive amount: `initial_approval`, an amendment that adds budget, an admin adjustment up | `record_review`, `admin_decide`, `admin_adjust_budget` | `budget.committed` | `amount_cents` (the entry's amount), `actor_sub` (the Weave sub of the entry's actor) |
 | `BudgetEntry` with a negative amount: an amendment that cuts budget, an admin adjustment down, a `reclaim` (admin, withdrawal, completion) | `record_review`, `admin_decide`, `admin_adjust_budget`, `reclaim_budget`, `withdraw` | `budget.released` | `amount_cents` (the entry's amount, capped, see below), `actor_sub` |
 | `BudgetEntry` with amount 0 (an amendment that keeps the budget) | | nothing | The row is stored as `skipped` |
-| A new `SpendSnapshot` with a different total | The compute layer (none while compute is off) | `spend.recorded` | `spent_cents_total` (the cumulative total) |
+| A new `SpendSnapshot` with a higher total | Krater Compute's spend loop and hourly reconciliation (`krater.compute.spend`, `krater.compute.reconcile`) | `spend.recorded` | `spent_cents_total` (the cumulative total) |
+| A new `SpendSnapshot` with a lower total | Hourly reconciliation, when finished machines' final charges came in under the estimate | `spend.corrected` | `spent_cents_total` and a fixed `reason` |
 
 Rules of the mapping:
 
@@ -93,7 +94,7 @@ so a retry, a second sync or the backfill always gives the same id:
 | `submission.created` | `submission.created:{project id}` |
 | `submission.updated` | `submission.updated:{project id}:{n}`, where n counts the earlier updates of the project |
 | `budget.committed`, `budget.released` | `budget:{BudgetEntry id}` |
-| `spend.recorded` | `spend:{SpendSnapshot id}` |
+| `spend.recorded`, `spend.corrected` | `spend:{SpendSnapshot id}` |
 
 The outbox stores the full payload and `occurred_at`. A retry sends the same id and the same payload, so Quilt
 answers `200 duplicate` for an event that it applied before.
@@ -176,7 +177,8 @@ path already wrote is not added again.
 ## Limits
 
 - Quilt sees the current status at the time of the backfill, not the history of statuses.
-- When spend goes down (a corrected estimate), Krater sends the lower total. Quilt keeps the higher total and marks
-  the event "needs review".
+- A lower spend total goes as `spend.corrected` (Quilt #19), never as `spend.recorded`, which Quilt doesn't lower.
+  Only reconciliation lowers a total, from machines that have finished; the live estimate only rises. A Quilt from
+  before #19 refuses the event type, and the admin page shows it as failed.
 - After overspend, Quilt's remaining commitment can differ from Krater's "ceiling minus spend". The release cap keeps
   every release valid. Krater's ledger stays the source of truth for the ceiling.

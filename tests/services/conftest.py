@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import itertools
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy.orm import Session
 
-from krater.models import User
+from krater.models import Project, ProjectMember, User
 from krater.services.actor import GROUP_ADMIN, GROUP_MEMBER, GROUP_REVIEWER, Actor
 from krater.weave import RoleMapping, StubWeaveClient
 
@@ -97,3 +98,16 @@ def reviewer(make_actor) -> Actor:
 def admin(make_actor) -> Actor:
     """A Ganymede admin (and member)."""
     return make_actor(groups=frozenset({GROUP_MEMBER, GROUP_ADMIN}))
+
+
+def add_to_team(db_session: Session, project: Project, actor: Actor, *, accepted: bool = True) -> ProjectMember:
+    """Put `actor` on `project`'s team directly (accepted, or just invited), skipping the Weave lookup."""
+    member = ProjectMember(
+        project_id=project.id,
+        user_id=actor.user.id,
+        invited_by_id=project.submitter_id,
+        accepted_at=datetime.now(UTC) if accepted else None,
+    )
+    project.members.append(member)
+    db_session.flush()
+    return member

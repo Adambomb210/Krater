@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
+from krater.config import get_settings
 from krater.models import (
     AuditEvent,
     Project,
@@ -31,16 +33,14 @@ from krater.models import (
     SlackNotification,
     User,
 )
+from krater.services import teams
 from krater.services.actor import GROUP_REVIEWER
+from krater.services.budget_alerts import AUDIT_BUDGET_TEARDOWN, AUDIT_BUDGET_WARNING
+from krater.services.compute_jobs import AUDIT_BOX_DESTROY_SOON, AUDIT_BOX_DESTROYED, AUDIT_BOX_STOPPED
 from krater.services.slack_membership import slack_id_for
 from krater.slack.client import SlackClient
 from krater.slack.errors import SlackError, SlackRequestFailedError
 from krater.weave.client import WeaveClient
-
-#: The audit events a compute layer writes when a project nears or reaches its ceiling. Nothing writes them while
-#: compute is off; Krater Compute does (`krater.services.budget_alerts`).
-AUDIT_BUDGET_WARNING = "budget_warning"
-AUDIT_BUDGET_TEARDOWN = "budget_teardown"
 
 logger = logging.getLogger(__name__)
 
@@ -114,12 +114,9 @@ def _reviewer_slack_ids(session: Session, slack_client: SlackClient, weave_clien
 def _team_slack_ids(
     session: Session, slack_client: SlackClient, weave_client: WeaveClient, *, project: Project
 ) -> list[str]:
-    """The submitter, the current revision's credited builders, and every current Ganymede reviewer --
-    everyone `docs/SPEC.md` says should be in a project's channel -- resolved to Slack user ids."""
-    people = [project.submitter]
-    revision = project.current_revision
-    if revision is not None and revision.credited_builder_ids:
-        people.extend(session.scalars(sa.select(User).where(User.id.in_(revision.credited_builder_ids))))
+    """The project's team (its lead and accepted members) and every current Ganymede reviewer -- everyone
+    `docs/SPEC.md` says should be in a project's channel -- resolved to Slack user ids."""
+    people = list(session.scalars(sa.select(User).where(User.id.in_(teams.team_user_ids(project)))))
     ids = _slack_ids(session, slack_client, people) | _reviewer_slack_ids(session, slack_client, weave_client)
     return sorted(ids)
 
@@ -129,7 +126,7 @@ def ensure_channel(session: Session, slack_client: SlackClient, weave_client: We
 
     Idempotent: creates the channel only if `project.slack_channel_id` is unset. Always (re-)invites the
     current team -- cheap, and safe to re-run (`docs/SPEC.md`: "safe to retry: already_in_channel counts
-    as success") -- so a team change (a new reviewer, a newly-credited builder) is picked up every call.
+    as success") -- so a team change (a new reviewer, a teammate who just joined) is picked up every call.
     """
     if project.slack_channel_id is None:
         channel_id = slack_client.create_channel(channel_name_for(project))
@@ -157,6 +154,17 @@ def _write_up_excerpt(write_up: str) -> str:
     return write_up[:_MAX_WRITE_UP_EXCERPT_LENGTH].rstrip() + "…"
 
 
+def _budget_fields(revision: ProjectRevision) -> list[dict]:
+    """The amounts on a review message: what approval funds, and for a proposal or amendment the finished product's
+    rough total, which approval doesn't fund."""
+    label = "Proof of concept" if revision.kind is RevisionKind.PROPOSAL else "Requested budget"
+    fields = [{"type": "mrkdwn", "text": f"*{label}:*\n{_format_cents(revision.budget_requested_cents)}"}]
+    if revision.kind is not RevisionKind.COMPLETION and revision.full_budget_cents:
+        amount = _format_cents(revision.full_budget_cents)
+        fields.append({"type": "mrkdwn", "text": f"*Finished product (not requested yet):*\n~{amount}"})
+    return fields
+
+
 def _review_message(project: Project, revision: ProjectRevision) -> tuple[list[dict], str]:
     """The Approve/Reject review message for `revision`. The buttons' `value` carries the revision id,
     per `docs/SPEC.md`, so `/slack/interactions` knows which revision a click is about."""
@@ -167,13 +175,15 @@ def _review_message(project: Project, revision: ProjectRevision) -> tuple[list[d
     text = f"{stage}: {project.title} (revision {revision.number})"
     blocks = [
         {"type": "section", "text": {"type": "mrkdwn", "text": header}},
+        {"type": "section", "fields": _budget_fields(revision)},
         {
             "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*Requested budget:*\n{_format_cents(revision.budget_requested_cents)}"}
-            ],
+            # The application's one-sentence summary, when it has one: what reviewers should read first.
+            "text": {
+                "type": "mrkdwn",
+                "text": _escape_mrkdwn(_write_up_excerpt(revision.summary or revision.write_up)),
+            },
         },
-        {"type": "section", "text": {"type": "mrkdwn", "text": _escape_mrkdwn(_write_up_excerpt(revision.write_up))}},
         {
             "type": "actions",
             "block_id": "review_actions",
@@ -356,7 +366,7 @@ def _budget_event_message(event: AuditEvent) -> tuple[list[dict], str]:
     payload = event.payload or {}
     if event.action == AUDIT_BUDGET_TEARDOWN:
         text = (
-            ":octagonal_sign: *Budget teardown*: this project's clusters and managed jobs have been "
+            ":octagonal_sign: *Budget teardown*: this project's machines have been "
             f"torn down. Ceiling: {_format_cents(payload.get('ceiling_cents', 0))}, "
             f"spend: {_format_cents(payload.get('spend_cents', 0))}."
         )
@@ -382,13 +392,85 @@ def sync_budget_notifications(session: Session, slack_client: SlackClient) -> No
         AuditEvent.project_id.is_not(None),
         AuditEvent.id.not_in(already_posted),
     )
-    for event in session.scalars(stmt):
+    for event in list(session.scalars(stmt)):
         project = session.get(Project, event.project_id)
         if project is None or project.slack_channel_id is None:
             # Nothing to post to yet -- try again next reconcile tick once a channel exists.
             continue
+        if project.slack_channel_archived:
+            # The project finished; nobody reads its channel. Mark it handled so it isn't retried forever.
+            session.add(SlackNotification(audit_event_id=event.id))
+            session.flush()
+            continue
         blocks, text = _budget_event_message(event)
-        slack_client.post_message(project.slack_channel_id, blocks=blocks, text=text)
+        try:
+            slack_client.post_message(project.slack_channel_id, blocks=blocks, text=text)
+        except SlackRequestFailedError:
+            # One channel Slack refuses (archived by hand, bot kicked) mustn't hold up every other notice.
+            logger.exception("krater.slack budget notice %s for project %s failed; continuing", event.id, project.id)
+            continue
+        session.add(SlackNotification(audit_event_id=event.id))
+        session.flush()
+
+
+BOX_NOTICES = (AUDIT_BOX_STOPPED, AUDIT_BOX_DESTROY_SOON, AUDIT_BOX_DESTROYED)
+
+
+def _box_message(session: Session, slack_client: SlackClient, event: AuditEvent, project: Project):
+    payload = event.payload or {}
+    owner = session.get(User, uuid.UUID(payload["owner_id"])) if payload.get("owner_id") else None
+    slack_id = slack_id_for(session, slack_client, owner) if owner is not None else None
+    # Without a Slack id there is no name to fall back on: Krater stores none (docs/weave-integration.md).
+    who = f"<@{slack_id}>" if slack_id else "Box owner"
+    name = _escape_mrkdwn(payload.get("job_name", "a box"))
+    link = f"{get_settings().base_url.rstrip('/')}/projects/{project.id}/compute/{payload.get('job_id', '')}"
+    hours = payload.get("destroy_after_hours")
+    if event.action == AUDIT_BOX_STOPPED:
+        saved = "/workspace is saved" if payload.get("synced") else "/workspace may not have saved"
+        text = (
+            f":zzz: *Box stopped*: {who}, your box *{name}* stopped ({_escape_mrkdwn(payload.get('reason', ''))}); "
+            f"{saved}. <{link}|Resume it> within {hours} hours, or Krater destroys it."
+        )
+    elif event.action == AUDIT_BOX_DESTROY_SOON:
+        at = payload.get("destroy_at", "")[:16].replace("T", " ")
+        text = (
+            f":hourglass_flowing_sand: *Box destroyed soon*: {who}, your stopped box *{name}* will be destroyed at "
+            f"{at} UTC unless you <{link}|resume it>."
+        )
+    else:
+        text = (
+            f":wastebasket: *Box destroyed*: {who}, your box *{name}* was stopped for {hours} hours and is gone. "
+            "Its last saved /workspace is kept."
+        )
+    plain = re.sub(r"<[^|>]*\|([^>]*)>", r"\1", text)  # links as their words, for the notification
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}], plain
+
+
+def sync_box_notifications(session: Session, slack_client: SlackClient) -> None:
+    """Post every not-yet-posted box notice (stopped by Krater, destroyed soon, destroyed) to its project's channel,
+    mentioning the box's owner, once each (`SlackNotification`)."""
+    already_posted = sa.select(SlackNotification.audit_event_id)
+    stmt = sa.select(AuditEvent).where(
+        AuditEvent.action.in_(BOX_NOTICES),
+        AuditEvent.project_id.is_not(None),
+        AuditEvent.id.not_in(already_posted),
+    )
+    for event in list(session.scalars(stmt)):
+        project = session.get(Project, event.project_id)
+        if project is None or project.slack_channel_id is None:
+            continue  # no channel yet: try again next tick
+        if project.slack_channel_archived:
+            # The project finished; nobody reads its channel. Mark it handled so it isn't retried forever.
+            session.add(SlackNotification(audit_event_id=event.id))
+            session.flush()
+            continue
+        blocks, text = _box_message(session, slack_client, event, project)
+        try:
+            slack_client.post_message(project.slack_channel_id, blocks=blocks, text=text)
+        except SlackRequestFailedError:
+            # One channel Slack refuses (removed, bot kicked) mustn't hold up every other notice: retried next tick.
+            logger.exception("krater.slack box notice %s for project %s failed; continuing", event.id, project.id)
+            continue
         session.add(SlackNotification(audit_event_id=event.id))
         session.flush()
 
@@ -412,6 +494,7 @@ def reconcile(session: Session, slack_client: SlackClient, weave_client: WeaveCl
     steps = (
         ("sync_reviewer_invites", lambda: sync_reviewer_invites(session, slack_client, weave_client)),
         ("sync_budget_notifications", lambda: sync_budget_notifications(session, slack_client)),
+        ("sync_box_notifications", lambda: sync_box_notifications(session, slack_client)),
         ("sync_missed_archives", lambda: sync_missed_archives(session, slack_client)),
     )
     for name, step in steps:

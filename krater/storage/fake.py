@@ -9,13 +9,18 @@ real server would otherwise report.
 
 from __future__ import annotations
 
-from krater.storage.types import ObjectMeta, PresignedPost
+import itertools
+
+from krater.storage.types import ListedObject, MultipartUpload, ObjectMeta, PresignedPost
 
 
 class FakeObjectStore:
     def __init__(self) -> None:
         self._objects: dict[str, ObjectMeta] = {}
         self._content: dict[str, bytes] = {}
+        #: upload id -> key, for multipart uploads started and not yet completed.
+        self.multipart_uploads: dict[str, str] = {}
+        self._upload_ids = itertools.count(1)
 
     # -- ObjectStore protocol ------------------------------------------------------------------------
 
@@ -41,9 +46,54 @@ class FakeObjectStore:
             return None
         return content[:n]
 
+    def read_tail(self, key: str, n: int) -> bytes | None:
+        content = self._content.get(key)
+        if content is None:
+            return None
+        return content[-n:] if n else b""
+
     def delete(self, key: str) -> None:
         self._objects.pop(key, None)
         self._content.pop(key, None)
+
+    def presign_put(self, key: str, *, content_length: int, expires: int = 300) -> str:
+        return f"fake://krater-storage/{key}?put&length={content_length}&expires={expires}"
+
+    def list_prefix(self, prefix: str) -> list[ListedObject]:
+        return [
+            ListedObject(key=k, size_bytes=m.size_bytes)
+            for k, m in sorted(self._objects.items())
+            if k.startswith(prefix)
+        ]
+
+    def create_multipart_upload(self, key: str) -> str:
+        upload_id = f"upload-{next(self._upload_ids)}"
+        self.multipart_uploads[upload_id] = key
+        return upload_id
+
+    def list_multipart_uploads(self, prefix: str) -> list[MultipartUpload]:
+        return [
+            MultipartUpload(key=key, upload_id=upload_id, initiated=None)
+            for upload_id, key in sorted(self.multipart_uploads.items())
+            if key.startswith(prefix)
+        ]
+
+    def abort_multipart_upload(self, key: str, *, upload_id: str) -> None:
+        if self.multipart_uploads.get(upload_id) == key:
+            del self.multipart_uploads[upload_id]
+
+    def presign_upload_part(
+        self, key: str, *, upload_id: str, part_number: int, content_length: int, expires: int = 300
+    ) -> str:
+        return (
+            f"fake://krater-storage/{key}?uploadId={upload_id}&partNumber={part_number}"
+            f"&length={content_length}&expires={expires}"
+        )
+
+    def complete_multipart_upload(self, key: str, *, upload_id: str, parts: list[tuple[int, str]]) -> None:
+        if self.multipart_uploads.pop(upload_id, None) != key:
+            raise ValueError(f"no multipart upload {upload_id!r} for {key!r}")
+        self._objects[key] = ObjectMeta(size_bytes=len(parts), content_type=None)
 
     # -- Test helpers ----------------------------------------------------------------------------------
 

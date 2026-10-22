@@ -10,10 +10,11 @@ from krater.services import projects, slack_reviews
 from krater.services.actor import GROUP_MEMBER, GROUP_REVIEWER, Actor
 from krater.slack.fake import FakeSlackClient
 from krater.weave import StubWeaveClient, WeaveUnavailableError
+from tests.factories import new_project
 
 
 def _submitted_revision(db_session: Session, member: Actor):
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     project = projects.submit(db_session, member, project=project)
     # Mirrors production: the submitting web request commits before the Slack job (which may itself
     # roll back on a domain error) ever runs, in a fresh session of its own.
@@ -136,7 +137,7 @@ def test_approve_that_completes_the_project_archives_the_channel(
     db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
 ) -> None:
     reviewer.user.slack_user_id = "U_REVIEWER"
-    project = projects.create_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
+    project = new_project(db_session, member, title="Rover", write_up="w", budget_requested_cents=5000)
     project = projects.submit(db_session, member, project=project)
     projects.record_review(
         db_session,
@@ -144,6 +145,7 @@ def test_approve_that_completes_the_project_archives_the_channel(
         revision=project.current_revision,
         decision=ReviewDecision.APPROVE,
         source=ReviewSource.WEB,
+        weave_client=weave,
     )
     db_session.refresh(project)
     assert project.status is ProjectStatus.APPROVED
@@ -225,3 +227,41 @@ def test_a_click_while_weave_is_down_is_refused(
     db_session.refresh(revision)
     assert revision.outcome is RevisionOutcome.PENDING
     assert "Weave" in slack_client.ephemeral_messages[0][1]
+
+
+def test_a_slack_approval_is_refused_while_a_minor_has_no_verified_guardian(
+    db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
+) -> None:
+    # The same service rule as the web path: `record_review` runs the guardian gate.
+    reviewer.user.slack_user_id = "U_REVIEWER"
+    weave.set_minor(member.user.weave_sub, True)
+    project, revision = _submitted_revision(db_session, member)
+    slack_client = FakeSlackClient()
+
+    _approve(db_session, slack_client, weave, revision, "U_REVIEWER")
+
+    db_session.refresh(revision)
+    db_session.refresh(project)
+    assert revision.outcome is RevisionOutcome.PENDING
+    assert project.status is ProjectStatus.PENDING_REVIEW
+    assert revision.reviews == []
+    assert len(slack_client.ephemeral_messages) == 1
+    text = slack_client.ephemeral_messages[0][1]
+    assert "verified guardian in Weave" in text
+    assert member.user.weave_sub in text
+
+
+def test_a_slack_approval_goes_through_once_weave_verifies_the_guardian(
+    db_session: Session, member: Actor, reviewer: Actor, weave: StubWeaveClient
+) -> None:
+    reviewer.user.slack_user_id = "U_REVIEWER"
+    weave.set_minor(member.user.weave_sub, True)
+    weave.set_guardian_verified(member.user.weave_sub, True)
+    _project, revision = _submitted_revision(db_session, member)
+    slack_client = FakeSlackClient()
+
+    _approve(db_session, slack_client, weave, revision, "U_REVIEWER")
+
+    db_session.refresh(revision)
+    assert revision.outcome is RevisionOutcome.APPROVED
+    assert slack_client.ephemeral_messages == []

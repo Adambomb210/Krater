@@ -7,6 +7,7 @@ CSRF, and how domain errors map to responses.
 from __future__ import annotations
 
 import uuid
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -52,7 +53,7 @@ def test_member_can_create_a_project(client: TestClient, login_as, db_session: S
             "title": "Rover",
             "repo_url": "https://github.com/x/rover",
             "write_up": "A rover.",
-            "budget_requested": "1,234.50",
+            "poc_budget": "1,234.50",
         },
         follow_redirects=False,
     )
@@ -72,7 +73,7 @@ def test_create_project_rejects_an_invalid_budget(client: TestClient, login_as) 
 
     response = client.post(
         "/projects/new",
-        data={"csrf_token": csrf, "title": "X", "write_up": "Y", "budget_requested": "not-a-number"},
+        data={"csrf_token": csrf, "title": "X", "write_up": "Y", "poc_budget": "not-a-number"},
     )
 
     assert response.status_code == 422
@@ -82,7 +83,7 @@ def test_create_project_rejects_an_invalid_budget(client: TestClient, login_as) 
 def test_create_project_without_csrf_fails(client: TestClient, login_as) -> None:
     login_as(MEMBER_SUB)
 
-    response = client.post("/projects/new", data={"title": "X", "write_up": "Y", "budget_requested": "10"})
+    response = client.post("/projects/new", data={"title": "X", "write_up": "Y", "poc_budget": "10"})
 
     assert response.status_code == 403
 
@@ -163,7 +164,7 @@ def test_submitter_can_edit_and_save_their_draft(
             "title": "Updated",
             "repo_url": "",
             "write_up": "Updated write-up.",
-            "budget_requested": "500",
+            "poc_budget": "500",
         },
         follow_redirects=False,
     )
@@ -174,6 +175,24 @@ def test_submitter_can_edit_and_save_their_draft(
     assert project.current_revision.budget_requested_cents == 50_000
 
 
+def test_blanking_the_repo_link_clears_it(client: TestClient, login_as, create_project, db_session: Session) -> None:
+    member = login_as(MEMBER_SUB)
+    project = create_project(member, title="Linked")
+    project.repo_url = "https://github.com/x/rover"
+    db_session.commit()
+    csrf = get_csrf_token(client.get(f"/projects/{project.id}/edit").text)
+
+    response = client.post(
+        f"/projects/{project.id}/edit",
+        data={"csrf_token": csrf, "title": "Linked", "repo_url": "", "write_up": "W.", "poc_budget": "500"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    db_session.refresh(project)
+    assert project.repo_url is None
+
+
 def test_reviewer_cannot_edit_someone_elses_draft(client: TestClient, login_as, create_project) -> None:
     member = login_as(MEMBER_SUB)
     project = create_project(member)
@@ -182,38 +201,6 @@ def test_reviewer_cannot_edit_someone_elses_draft(client: TestClient, login_as, 
     response = client.get(f"/projects/{project.id}/edit")
 
     assert response.status_code == 403
-
-
-def test_edit_rejects_an_unknown_credited_builder_email(client: TestClient, login_as, approved_project) -> None:
-    member = login_as(MEMBER_SUB)
-    reviewer = login_as(REVIEWER_SUB)
-    project = approved_project(member, reviewer)
-    login_as(MEMBER_SUB)
-
-    completion_start = client.post(
-        f"/projects/{project.id}/complete",
-        data={"csrf_token": get_csrf_token(client.get(f"/projects/{project.id}").text)},
-        follow_redirects=False,
-    )
-    assert completion_start.status_code == 303
-
-    edit_form = client.get(f"/projects/{project.id}/edit")
-    csrf = get_csrf_token(edit_form.text)
-    response = client.post(
-        f"/projects/{project.id}/edit",
-        data={
-            "csrf_token": csrf,
-            "title": project.title,
-            "write_up": "Final write-up.",
-            "budget_requested": "100",
-            "demo_url": "",
-            "tags": "",
-            "credited_builders": "nobody-like-this@example.com",
-        },
-    )
-
-    assert response.status_code == 422
-    assert "Not a Ganymede member" in response.text
 
 
 # --------------------------------------------------------------------------------------------------
@@ -243,7 +230,8 @@ def test_submit_with_missing_fields_rerenders_the_edit_form(client: TestClient, 
     response = client.post(f"/projects/{project.id}/submit", data={"csrf_token": csrf})
 
     assert response.status_code == 422
-    assert "required" in response.text.lower()
+    assert "Explain the project." in response.text
+    assert "Requested budget must be greater than zero." in response.text
 
 
 def test_submit_without_csrf_fails(client: TestClient, login_as, create_project) -> None:
@@ -454,7 +442,7 @@ def test_create_project_rejects_a_non_http_repo_link_as_a_field_error(
             "title": "Keep me",
             "repo_url": "ssh://git@example.com/x.git",
             "write_up": "Typed text that must survive.",
-            "budget_requested": "10",
+            "poc_budget": "10",
         },
     )
 
@@ -476,7 +464,7 @@ def test_edit_rejects_a_non_http_repo_link_as_a_field_error(client: TestClient, 
             "title": "T",
             "repo_url": "javascript:alert(1)",
             "write_up": "W",
-            "budget_requested": "1",
+            "poc_budget": "1",
         },
     )
 
@@ -490,7 +478,7 @@ def test_create_project_rejects_a_budget_past_the_maximum(client: TestClient, lo
 
     response = client.post(
         "/projects/new",
-        data={"csrf_token": csrf, "title": "Big", "write_up": "W", "budget_requested": "21,474,836.48"},
+        data={"csrf_token": csrf, "title": "Big", "write_up": "W", "poc_budget": "21,474,836.48"},
     )
 
     assert response.status_code == 422
@@ -570,6 +558,19 @@ def test_compute_off_notice_only_shows_while_a_project_could_launch(
     login_as(MEMBER_SUB)
 
     assert "Launching machines from Krater" not in client.get(f"/projects/{project.id}").text
+
+
+def test_compute_on_vast_shows_the_budget_banner_without_a_workspace(
+    client: TestClient, login_as, approved_project, monkeypatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "compute_mode", "vast")
+    member = login_as(MEMBER_SUB)
+    reviewer = login_as(REVIEWER_SUB)
+    project = approved_project(member, reviewer)
+    login_as(MEMBER_SUB)
+
+    with patch("krater.web.routers.projects.current_budget_flag", return_value="teardown"):
+        assert "machines have been torn down" in client.get(f"/projects/{project.id}").text
 
 
 # --------------------------------------------------------------------------------------------------

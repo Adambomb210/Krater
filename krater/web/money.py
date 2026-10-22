@@ -67,3 +67,9 @@ def cents_to_input(cents: int) -> str:
 
 
 __all__ = ["MAX_AMOUNT_CENTS", "InvalidDollarAmount", "cents_to_input", "format_cents", "parse_dollars"]
+
+
+def format_rate(microusd: int) -> str:
+    """An hourly rate in integer micro-dollars as `$0.0638/h`: to the tenth of a cent, since bids differ by less
+    than a cent."""
+    return f"${Decimal(int(microusd)) / Decimal(1_000_000):.4f}/h"

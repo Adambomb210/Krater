@@ -11,6 +11,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from krater.models import ApprovalPolicy, ApprovalStage, ProjectRevision, Review, ReviewDecision, RevisionKind
+from krater.services import teams
 
 
 def stage_for(revision: ProjectRevision) -> ApprovalStage:
@@ -47,12 +48,18 @@ def _approving_review_count(session: Session, revision: ProjectRevision, policy:
 
     A review counts when the reviewer was in `policy.required_group` *at review time* (checked
     against `Review.reviewer_groups`, a snapshot -- never the reviewer's current groups), or when
-    `policy` has no `required_group` (or is `None`, for the no-policy-rows default).
+    `policy` has no `required_group` (or is `None`, for the no-policy-rows default), and the reviewer isn't on
+    the project's team (or invited to it) now.
     """
     stmt = (
         sa.select(sa.func.count())
         .select_from(Review)
-        .where(Review.revision_id == revision.id, Review.decision == ReviewDecision.APPROVE)
+        .where(
+            Review.revision_id == revision.id,
+            Review.decision == ReviewDecision.APPROVE,
+            # A reviewer who has since joined (or been invited to) the team no longer counts.
+            Review.reviewer_id.not_in(teams.conflict_user_ids(revision.project)),
+        )
     )
     if policy is not None and policy.required_group is not None:
         stmt = stmt.where(policy.required_group == sa.any_(Review.reviewer_groups))

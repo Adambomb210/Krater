@@ -254,16 +254,20 @@ def test_estimate_cost_unknown_gpu_key_is_a_validation_error(db_session: Session
     assert "estimator_gpu" in exc_info.value.errors
 
 
-def test_estimate_cost_spot_with_no_spot_pricing_is_a_validation_error(db_session: Session) -> None:
+def test_interruptible_without_any_interruptible_price_is_estimated_on_demand(db_session: Session) -> None:
+    # The catalog has no interruptible prices and Krater hasn't sampled this GPU: an on-demand upper bound, labelled.
     price = _seed_gpu_price(db_session, name="A100", count=1)
     price.spot_min_cents = None
     db_session.flush()
 
-    with pytest.raises(ValidationFailed) as exc_info:
-        pricing.estimate_cost(
-            db_session, accelerator_name="A100", accelerator_count=1, hours=1, basis="spot", margin_percent=0
-        )
-    assert "estimator_basis" in exc_info.value.errors
+    result = pricing.estimate_cost(
+        db_session, accelerator_name="A100", accelerator_count=1, hours=1, basis="spot", margin_percent=0
+    )
+
+    assert result.basis == "on_demand"
+    assert result.spot_unavailable is True
+    assert result.rate_cents == price.on_demand_median_cents
+    assert result.as_dict()["spot_unavailable"] is True
 
 
 @pytest.mark.parametrize(
@@ -279,3 +283,102 @@ def test_estimate_cost_validates_input(db_session: Session, kwargs: dict) -> Non
     _seed_gpu_price(db_session, name="A100", count=1)
     with pytest.raises(ValidationFailed):
         pricing.estimate_cost(db_session, **kwargs)
+
+
+# -- Krater's own Vast samples -----------------------------------------------------------------------------------
+
+NOW = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
+
+
+def _sample(session: Session, name: str, rental_type: str, median_microusd: int, *, hours_ago: float) -> None:
+    from datetime import timedelta
+
+    from krater.models import GpuPriceSample
+
+    session.add(
+        GpuPriceSample(
+            sampled_at=NOW - timedelta(hours=hours_ago),
+            gpu_name=name,
+            rental_type=rental_type,
+            num_gpus=1,
+            disk_gb=32,
+            offer_count=10,
+            truncated=False,
+            min_microusd=median_microusd // 2,
+            p10_microusd=median_microusd - 1,
+            median_microusd=median_microusd,
+        )
+    )
+    session.flush()
+
+
+@pytest.mark.parametrize(
+    ("catalog", "sample", "matches"),
+    [
+        ("RTX3060", "RTX 3060", True),
+        ("A100", "A100 SXM4", True),
+        ("A100", "A100 PCIE", True),
+        ("H100", "H100 SXM", True),
+        ("RTX6000-Ada", "RTX 6000Ada", True),
+        ("RTXPRO6000WS", "RTX PRO 6000 WS", True),
+        ("RTX5070", "RTX 5070 Ti", False),
+        ("RTX4060", "RTX 4060 Ti", False),
+        ("RTXA6000", "RTX A4000", False),
+        ("L4", "L40S", False),
+    ],
+)
+def test_catalog_and_vast_gpu_names_are_matched(catalog: str, sample: str, matches: bool) -> None:
+    assert pricing.sample_name_matches(catalog, sample) is matches
+
+
+def test_estimate_uses_krater_samples_once_there_is_a_day_of_them(db_session: Session) -> None:
+    _seed_gpu_price(db_session, name="A100", count=1)
+    for hours_ago, median in [(1, 90_000), (12, 110_000), (30, 100_000)]:
+        _sample(db_session, "A100 SXM4", "bid", median, hours_ago=hours_ago)
+    _sample(db_session, "A100 PCIE", "bid", 400_000, hours_ago=200)  # older than the week: left out
+
+    result = pricing.estimate_cost(
+        db_session, accelerator_name="A100", accelerator_count=2, hours=10, basis="spot", margin_percent=0, now=NOW
+    )
+
+    assert result.rate_source == pricing.SOURCE_SAMPLES
+    assert result.rate_cents == 10  # the median $0.10/h, not the catalog's minimum
+    assert result.total_cents == 200
+    assert "Krater's Vast prices" in estimator_summary(result)
+
+
+def test_estimate_falls_back_to_the_catalog_without_a_day_of_samples(db_session: Session) -> None:
+    _seed_gpu_price(db_session, name="A100", count=1)
+    _sample(db_session, "A100 SXM4", "ondemand", 900_000, hours_ago=1)
+    _sample(db_session, "A100 SXM4", "ondemand", 900_000, hours_ago=5)
+
+    result = pricing.estimate_cost(
+        db_session, accelerator_name="A100", accelerator_count=1, hours=1, basis="on_demand", margin_percent=0, now=NOW
+    )
+
+    assert result.rate_source == pricing.SOURCE_CATALOG and result.rate_cents == 120
+
+
+def test_an_estimate_stored_before_rate_sources_still_reads(db_session: Session) -> None:
+    from krater.web.estimator_form import summary_text_from_dict
+
+    old = {
+        "accelerator_name": "A100",
+        "accelerator_count": 1,
+        "hours": 40,
+        "basis": "on_demand",
+        "margin_percent": 20,
+        "rate_cents": 120,
+        "subtotal_cents": 4800,
+        "margin_cents": 960,
+        "total_cents": 5760,
+        "refreshed_at": "2026-09-27T07:00:00+00:00",
+    }
+
+    assert summary_text_from_dict(old).endswith("(prices from Sep 27)")
+
+
+def estimator_summary(result) -> str:
+    from krater.web.estimator_form import summary_text
+
+    return summary_text(result)

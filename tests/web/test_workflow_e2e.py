@@ -9,6 +9,30 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import MEMBER_SUB, REVIEWER_SUB, get_csrf_token
 
+#: The application's other answers, as the form posts them. The cards aren't in Krater's price list, so each estimate
+#: uses the team's own hourly price.
+ANSWERS = {
+    "summary": "A rover that maps Ganymede's ice.",
+    "experience": "Two years of robotics club.",
+    "affiliation": "professor",
+    "affiliation_detail": "Prof. Ada Example, Example University",
+    "compute_use": "Training the rover's mapping model.",
+    "poc_gpu": "other",
+    "poc_gpu_other": "RTX A4000",
+    "poc_gpu_count": "1",
+    "poc_hours": "100",
+    "poc_basis": "spot",
+    "poc_rate": "0.20",
+    "poc_margin_percent": "0",
+    "full_gpu": "other",
+    "full_gpu_other": "RTX A4000",
+    "full_gpu_count": "2",
+    "full_hours": "500",
+    "full_basis": "spot",
+    "full_rate": "0.20",
+    "full_margin_percent": "10",
+}
+
 
 def test_full_workflow_through_http(client: TestClient, login_as) -> None:
     # --- Member creates a draft proposal --------------------------------------------------------
@@ -23,7 +47,8 @@ def test_full_workflow_through_http(client: TestClient, login_as) -> None:
             "title": "Ganymede Rover",
             "repo_url": "https://github.com/patchworklabs/rover",
             "write_up": "A rover for Ganymede.\nSecond line.",
-            "budget_requested": "1,000.00",
+            "poc_budget": "1,000.00",
+            **ANSWERS,
         },
         follow_redirects=False,
     )
@@ -73,7 +98,8 @@ def test_full_workflow_through_http(client: TestClient, login_as) -> None:
             "title": "Ganymede Rover",
             "repo_url": "https://github.com/patchworklabs/rover",
             "write_up": "A rover for Ganymede.",
-            "budget_requested": "600.00",
+            "poc_budget": "600.00",
+            **ANSWERS,
         },
         follow_redirects=False,
     )
@@ -116,10 +142,9 @@ def test_full_workflow_through_http(client: TestClient, login_as) -> None:
             "title": "Ganymede Rover",
             "repo_url": "https://github.com/patchworklabs/rover",
             "write_up": "Final write-up for the rover.",
-            "budget_requested": "600.00",
+            "poc_budget": "600.00",
             "demo_url": "https://example.com/rover-demo",
             "tags": "rover, ganymede",
-            "credited_builder_emails": "",
         },
         follow_redirects=False,
     )

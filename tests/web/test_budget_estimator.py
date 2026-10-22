@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -91,6 +92,38 @@ def test_estimate_endpoint_unknown_gpu_key_is_a_field_error(client: TestClient, 
     assert "estimator_gpu" in response.json()["errors"]
 
 
+@pytest.mark.parametrize(
+    ("hours", "margin", "field"),
+    [
+        ("nan", "20", "estimator_hours"),
+        ("inf", "20", "estimator_hours"),
+        ("1e308", "20", "estimator_hours"),
+        ("40", "inf", "estimator_margin_percent"),
+        ("40", "1e400", "estimator_margin_percent"),
+    ],
+)
+def test_estimate_endpoint_refuses_non_finite_numbers(
+    client: TestClient, login_as, db_session: Session, hours, margin, field
+) -> None:
+    login_as(MEMBER_SUB)
+    _seed_price(db_session, name="A100", count=1, median_cents=110)
+    csrf = get_csrf_token(client.get("/projects/new").text)
+
+    response = client.post(
+        "/pricing/estimate",
+        data={
+            "csrf_token": csrf,
+            "estimator_gpu": "A100:1",
+            "estimator_hours": hours,
+            "estimator_basis": "on_demand",
+            "estimator_margin_percent": margin,
+        },
+    )
+
+    assert response.status_code == 422
+    assert field in response.json()["errors"]
+
+
 def test_estimate_endpoint_ignores_any_client_sent_rate_or_total(
     client: TestClient, login_as, db_session: Session
 ) -> None:
@@ -139,11 +172,11 @@ def test_new_project_estimate_submit_fills_budget_field_without_creating_a_proje
             "csrf_token": csrf,
             "title": "Rover",
             "write_up": "notes",
-            "form_action": "estimate",
-            "estimator_gpu": "A100:1",
-            "estimator_hours": "40",
-            "estimator_basis": "on_demand",
-            "estimator_margin_percent": "20",
+            "form_action": "estimate_poc",
+            "poc_gpu": "A100:1",
+            "poc_hours": "40",
+            "poc_basis": "on_demand",
+            "poc_margin_percent": "20",
         },
     )
 
@@ -166,11 +199,11 @@ def test_new_project_estimate_submit_unknown_gpu_is_a_field_error(
         data={
             "csrf_token": csrf,
             "title": "Rover",
-            "form_action": "estimate",
-            "estimator_gpu": "NOT-A-REAL-GPU:1",
-            "estimator_hours": "10",
-            "estimator_basis": "on_demand",
-            "estimator_margin_percent": "20",
+            "form_action": "estimate_poc",
+            "poc_gpu": "NOT-A-REAL-GPU:1",
+            "poc_hours": "10",
+            "poc_basis": "on_demand",
+            "poc_margin_percent": "20",
         },
     )
 
@@ -203,13 +236,12 @@ def test_save_recomputes_the_estimate_from_current_prices_not_the_earlier_previe
             "csrf_token": csrf,
             "title": "Rover",
             "write_up": "notes",
-            "budget_requested": "1.00",  # whatever the (stale) preview had filled in, ignored below
+            "poc_budget": "1.00",  # whatever the (stale) preview had filled in, ignored below
             "form_action": "save",
-            "estimator_gpu": "A100:1",
-            "estimator_hours": "10",
-            "estimator_basis": "on_demand",
-            "estimator_margin_percent": "0",
-            "estimator_used": "1",
+            "poc_gpu": "A100:1",
+            "poc_hours": "10",
+            "poc_basis": "on_demand",
+            "poc_margin_percent": "0",
         },
         follow_redirects=False,
     )
@@ -238,11 +270,10 @@ def test_estimate_breakdown_is_shown_to_reviewers_on_the_project_page(
             "title": "Rover",
             "write_up": "notes",
             "form_action": "save",
-            "estimator_gpu": "A100:1",
-            "estimator_hours": "40",
-            "estimator_basis": "on_demand",
-            "estimator_margin_percent": "20",
-            "estimator_used": "1",
+            "poc_gpu": "A100:1",
+            "poc_hours": "40",
+            "poc_basis": "on_demand",
+            "poc_margin_percent": "20",
         },
         follow_redirects=False,
     )
@@ -270,11 +301,10 @@ def test_estimate_mismatch_is_flagged_when_requested_budget_differs_a_lot(
             "title": "Rover",
             "write_up": "notes",
             "form_action": "save",
-            "estimator_gpu": "A100:1",
-            "estimator_hours": "40",
-            "estimator_basis": "on_demand",
-            "estimator_margin_percent": "20",
-            "estimator_used": "1",
+            "poc_gpu": "A100:1",
+            "poc_hours": "40",
+            "poc_basis": "on_demand",
+            "poc_margin_percent": "20",
         },
         follow_redirects=False,
     )
@@ -289,7 +319,11 @@ def test_estimate_mismatch_is_flagged_when_requested_budget_differs_a_lot(
             "csrf_token": csrf2,
             "title": "Rover",
             "write_up": "notes",
-            "budget_requested": "5000.00",
+            "poc_budget": "5000.00",
+            "poc_gpu": "A100:1",
+            "poc_hours": "40",
+            "poc_basis": "on_demand",
+            "poc_margin_percent": "20",
             "form_action": "save",
         },
         follow_redirects=False,
@@ -297,7 +331,7 @@ def test_estimate_mismatch_is_flagged_when_requested_budget_differs_a_lot(
 
     detail = client.get(f"/projects/{project_id}")
 
-    assert "requested budget differs a lot from this estimate" in detail.text
+    assert "The requested amount differs a lot from the estimate." in detail.text
 
 
 # --------------------------------------------------------------------------------------------------
@@ -311,8 +345,9 @@ def test_new_project_page_renders_estimator_fieldset_with_no_pricing_yet(client:
     response = client.get("/projects/new")
 
     assert response.status_code == 200
-    assert "Budget estimator" in response.text
-    assert "No pricing data yet" in response.text
+    assert "Proof of concept" in response.text and "Finished product" in response.text
+    # With no prices yet, a card can still be estimated at the team's own price.
+    assert "Another card (give its price)" in response.text
 
 
 def test_creating_a_project_without_using_the_estimator_stores_no_estimate(
@@ -328,7 +363,7 @@ def test_creating_a_project_without_using_the_estimator_stores_no_estimate(
             "csrf_token": csrf,
             "title": "Rover",
             "write_up": "notes",
-            "budget_requested": "500.00",
+            "poc_budget": "500.00",
             "form_action": "save",
         },
         follow_redirects=False,
@@ -339,14 +374,13 @@ def test_creating_a_project_without_using_the_estimator_stores_no_estimate(
     assert revision.budget_estimate is None
 
 
-def test_estimator_offers_the_spot_basis_only_when_some_gpu_has_a_spot_price(
-    client: TestClient, login_as, db_session: Session
-) -> None:
+def test_the_estimator_starts_on_interruptible(client: TestClient, login_as, db_session: Session) -> None:
+    # Interruptible is what Krater Compute rents by default, so it's the estimator's default too, catalog or not.
     login_as(MEMBER_SUB)
     _seed_price(db_session, name="A100", count=1, median_cents=110, spot_cents=None)
 
-    assert "Lowest spot (interruptible)" not in client.get("/projects/new").text
+    page = client.get("/projects/new").text
 
-    _seed_price(db_session, name="H100", count=1, median_cents=200, spot_cents=60)
-
-    assert "Lowest spot (interruptible)" in client.get("/projects/new").text
+    assert 'value="spot" selected' in page
+    assert "Interruptible (Krater's default)" in page
+    assert page.index('value="spot"') < page.index('value="on_demand"')

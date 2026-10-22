@@ -7,6 +7,7 @@
   <div>
     <a class="back-link" href="/gallery">&larr; Gallery</a>
     <h1>{{ project.title or "Untitled project" }}</h1>
+    {% if revision and revision.summary %}<p class="page-subtitle">{{ revision.summary }}</p>{% endif %}
     {% if revision and revision.tags %}
       <p class="tag-list page-subtitle">
         {% for tag in revision.tags %}<span class="tag">{{ tag }}</span>{% endfor %}
@@ -50,11 +51,12 @@
         <dd>&asymp; {{ spend_cents | dollars }}</dd>
       </div>
     </dl>
-    {% if builders %}
+    {% if team or unnamed %}
       <section class="card">
-        <h2>Credited builders</h2>
+        <h2>Built by</h2>
         <ul class="link-list">
-          {% for builder in builders %}<li>{{ builder }}</li>{% endfor %}
+          {% for name in team %}<li>{{ name }}</li>{% endfor %}
+          {% if unnamed %}<li>{{ "and " if team }}{{ unnamed }} {{ "more " if team }}team member{{ "s" if unnamed != 1 }}</li>{% endif %}
         </ul>
       </section>
     {% endif %}

@@ -29,25 +29,28 @@ from krater.models import (
     RevisionOutcome,
     User,
 )
-from krater.services import people, pricing, slack_membership
+from krater.services import budget as budget_service
+from krater.services import guardian, people, slack_membership, teams
 from krater.services import projects as project_service
 from krater.services import screenshots as screenshot_service
 from krater.services.actor import Actor
+from krater.services.budget_alerts import current_budget_flag
 from krater.services.errors import InvalidState, NotAllowed, NotFound, ValidationFailed
 from krater.services.launch_rules import LAUNCHABLE_STATUSES, hourly_cap_cents
 from krater.slack import get_slack_client
 from krater.storage import ObjectStore, get_object_store
-from krater.weave import WeaveClient, get_weave_client
-from krater.web import estimator_form
+from krater.weave import WeaveClient, WeaveUnavailableError, get_weave_client
+from krater.web import application_form, estimator_form
 from krater.web.csrf import verify_csrf_token
 from krater.web.deps import fresh_actor
 from krater.web.flash import flash
-from krater.web.forms import UnknownMembers, parse_members, parse_tags
+from krater.web.forms import parse_tags
 from krater.web.money import InvalidDollarAmount, cents_to_input, format_cents, parse_dollars
 from krater.web.templates import templates
 from krater.worker.app import (
     kick_quilt_delivery,
     slack_archive_channel,
+    slack_invite_team,
     slack_notify_decision,
     slack_notify_revision_submitted,
     slack_post_admin_override,
@@ -83,13 +86,13 @@ def _enforce_slack_membership(db_session: Session, actor: Actor) -> str | None:
 
 
 # --------------------------------------------------------------------------------------------------
-# Visibility: the submitter, reviewers and admins only -- anyone else gets a 404, not a 403, so a
-# project's existence doesn't leak to members who have no relationship to it.
+# Visibility: the team (and people invited to it), reviewers and admins only -- anyone else gets a 404, not a 403,
+# so a project's existence doesn't leak to members who have no relationship to it.
 # --------------------------------------------------------------------------------------------------
 
 
 def _can_view(actor: Actor, project: Project) -> bool:
-    return actor.user.id == project.submitter_id or actor.is_reviewer or actor.is_admin
+    return teams.has_conflict(project, actor.user.id) or actor.is_reviewer or actor.is_admin
 
 
 def _get_visible_project(session: Session, actor: Actor, project_id: uuid.UUID) -> Project:
@@ -130,63 +133,67 @@ def _success_redirect(
 
 
 # --------------------------------------------------------------------------------------------------
-# New project
+# The application form: new proposals, and editing proposal/amendment drafts (krater.web.application_form)
 # --------------------------------------------------------------------------------------------------
 
 
-def _new_project_values(*, title: str = "", repo_url: str = "", write_up: str = "", budget_requested: str = "") -> dict:
-    return {"title": title, "repo_url": repo_url, "write_up": write_up, "budget_requested": budget_requested}
-
-
-def _estimator_context(
+def _form_context(
     db_session: Session,
+    actor: Actor,
     *,
-    estimator_gpu: str = "",
-    estimator_hours: str = "",
-    estimator_basis: str = "",
-    estimator_margin_percent: str = "",
-    estimate_summary: str | None = None,
-    estimator_used: str = "",
+    values: dict[str, str],
+    errors: dict[str, str] | None = None,
+    summaries: dict[str, str | None] | None = None,
+    team: list[dict] | None = None,
+    base_cents: int = 0,
 ) -> dict:
-    """Shared new/edit-form context for the budget estimator fieldset (`_macros.html`'s
-    `budget_estimator`). `estimator_values` echoes back whatever was posted so a validation-failure
-    round trip doesn't lose the submitter's inputs; falls back to blank defaults on a fresh GET."""
-    defaults = estimator_form.default_estimator_values(get_settings())
     return {
+        "base_cents": base_cents,
+        "values": values,
+        "errors": errors or {},
+        "summaries": summaries or {"poc": None, "full": None},
         "gpu_options": estimator_form.gpu_options(db_session),
-        "estimator_values": {
-            "estimator_gpu": estimator_gpu or defaults["estimator_gpu"],
-            "estimator_hours": estimator_hours or defaults["estimator_hours"],
-            "estimator_basis": estimator_basis or defaults["estimator_basis"],
-            "estimator_margin_percent": estimator_margin_percent or defaults["estimator_margin_percent"],
-        },
-        "estimate_summary": estimate_summary,
-        "estimator_used": estimator_used,
+        "applicant": {"name": actor.display_name, "email": actor.email, "sub": actor.user.weave_sub},
+        "word_limits": project_service.WORD_LIMITS,
+        "summary_max": project_service.SUMMARY_MAX_CHARS,
+        "other_gpu": estimator_form.OTHER_GPU,
+        "team": team,
     }
 
 
-def _run_estimate(db_session: Session, **fields: str) -> tuple[pricing.BudgetEstimate | None, dict]:
-    """`(result, errors)`: exactly one is truthy. `fields` are the four `estimator_*` posted strings."""
+def _fill_from_action(form_action: str) -> str | None:
+    """The estimator whose "Estimate" button was pressed (the no-JavaScript path), if any."""
+    prefix = form_action.removeprefix("estimate_")
+    return prefix if form_action.startswith("estimate_") and prefix in application_form.SECTIONS else None
+
+
+def _check_teammates(weave_client: WeaveClient, raw: str) -> str | None:
+    """Why the "Invite teammates" entries can't all be invited, or `None` when every one is a Ganymede member."""
     try:
-        return estimator_form.parse_and_estimate(db_session, **fields), {}
-    except ValidationFailed as exc:
-        return None, exc.errors
+        unknown = [
+            entry for entry in application_form.teammate_entries(raw) if people.find_member(weave_client, entry) is None
+        ]
+    except WeaveUnavailableError:
+        return "Weave isn't answering, so Krater can't look your teammates up. Try again shortly."
+    if unknown:
+        return f"No Ganymede member has this Patchwork ID or email: {', '.join(unknown)}."
+    return None
 
 
-def _store_estimate_best_effort(
-    db_session: Session, actor: Actor, *, project: Project, estimator_used: str, **fields: str
-) -> None:
-    """If the submitter used the estimator on this save, recompute it (never trusting anything but the
-    choice of GPU/hours/basis/margin -- see `docs/dev/pricing.md`) and store the breakdown. Best-effort:
-    a stale/removed GPU key here shouldn't block saving the rest of the draft, so a failure is silently
-    skipped rather than surfaced as a field error (unlike the dedicated "Estimate" action, where it is)."""
-    if estimator_used != "1":
-        return
-    result, errors = _run_estimate(db_session, **fields)
-    if result is not None:
-        project_service.set_budget_estimate(db_session, actor, project=project, budget_estimate=result.as_dict())
-    else:
-        del errors  # best-effort; see docstring
+def _invite_teammates(db_session: Session, actor: Actor, weave_client: WeaveClient, project: Project, raw: str) -> None:
+    for entry in application_form.teammate_entries(raw):
+        try:
+            teams.invite(db_session, actor, weave_client, project=project, query=entry)
+        except ValidationFailed as exc:
+            raise ValidationFailed({"teammates": f"{entry}: {exc.errors['member']}"}) from None
+
+
+def _team_rows(weave_client: WeaveClient, session: Session, project: Project) -> list[dict]:
+    users = list(session.scalars(sa.select(User).where(User.id.in_(teams.conflict_user_ids(project)))))
+    names = people.names(weave_client, users)
+    rows = [{"name": names[project.submitter_id], "lead": True}]
+    rows += [{"name": names[m.user_id], "lead": False, "accepted": m.accepted} for m in project.members]
+    return rows
 
 
 @router.get("/projects/new")
@@ -195,84 +202,223 @@ def new_project_form(
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
 ):
-    del actor  # membership itself is enforced by `fresh_actor`; the service checks it again
-    context = {"errors": {}, "values": _new_project_values(), **_estimator_context(db_session)}
+    context = _form_context(db_session, actor, values=application_form.blank_values(get_settings()))
     return templates.TemplateResponse(request, "projects/new.html", context)
 
 
 @router.post("/projects/new", dependencies=[Depends(verify_csrf_token)])
-def create_project(
+async def create_project(
     request: Request,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
-    title: Annotated[str, Form()] = "",
-    repo_url: Annotated[str, Form()] = "",
-    write_up: Annotated[str, Form()] = "",
-    budget_requested: Annotated[str, Form()] = "",
-    form_action: Annotated[str, Form()] = "save",
-    estimator_gpu: Annotated[str, Form()] = "",
-    estimator_hours: Annotated[str, Form()] = "",
-    estimator_basis: Annotated[str, Form()] = "on_demand",
-    estimator_margin_percent: Annotated[str, Form()] = "",
-    estimator_used: Annotated[str, Form()] = "",
+    weave_client: Weave,
 ):
-    estimator_fields = dict(
-        estimator_gpu=estimator_gpu,
-        estimator_hours=estimator_hours,
-        estimator_basis=estimator_basis,
-        estimator_margin_percent=estimator_margin_percent,
-    )
-    values = _new_project_values(title=title, repo_url=repo_url, write_up=write_up, budget_requested=budget_requested)
+    form = await request.form()
+    fill = _fill_from_action(str(form.get("form_action", "save")))
+    posted = application_form.parse(db_session, form, get_settings(), fill=fill)
 
-    if form_action == "estimate":
-        # The no-JS degrade path (docs/SPEC.md's estimator requirement): recompute right now and
-        # re-render with the budget field already filled in, without creating anything yet -- there's
-        # no project to attach a draft estimate to before it's created.
-        result, errors = _run_estimate(db_session, **estimator_fields)
-        estimate_summary = None
-        if result is not None:
-            values["budget_requested"] = cents_to_input(result.total_cents)
-            estimate_summary = estimator_form.summary_text(result)
-            estimator_used = "1"
-        context = {
-            "errors": errors,
-            "values": values,
-            **_estimator_context(
-                db_session, estimate_summary=estimate_summary, estimator_used=estimator_used, **estimator_fields
-            ),
-        }
-        return templates.TemplateResponse(request, "projects/new.html", context, status_code=422 if errors else 200)
+    def _again(status_code: int):
+        context = _form_context(
+            db_session, actor, values=posted.values, errors=posted.errors, summaries=posted.summaries
+        )
+        return templates.TemplateResponse(request, "projects/new.html", context, status_code=status_code)
 
-    errors: dict[str, str] = {}
-    budget_cents = 0
-    raw_budget = budget_requested.strip()
-    if raw_budget:
-        try:
-            budget_cents = parse_dollars(raw_budget)
-        except InvalidDollarAmount as exc:
-            errors["budget_requested_cents"] = str(exc)
-    errors.update(project_service.link_errors(repo_url=repo_url))
+    if fill is not None:
+        # The no-JS "Estimate" button: show the estimate and its amount without creating anything yet.
+        return _again(422 if posted.errors else 200)
+    if not posted.errors and (teammates_error := _check_teammates(weave_client, posted.values["teammates"])):
+        posted.errors["teammates"] = teammates_error
+    if posted.errors:
+        return _again(422)
 
-    if errors:
-        context = {
-            "errors": errors,
-            "values": values,
-            **_estimator_context(db_session, estimator_used=estimator_used, **estimator_fields),
-        }
-        return templates.TemplateResponse(request, "projects/new.html", context, status_code=422)
-
+    changes = dict(posted.changes)
     project = project_service.create_project(
         db_session,
         actor,
-        title=title,
-        write_up=write_up,
-        budget_requested_cents=budget_cents,
-        repo_url=repo_url or None,
+        title=changes.pop("title"),
+        repo_url=changes.pop("repo_url"),
+        write_up=changes.pop("write_up"),
+        budget_requested_cents=changes.pop("budget_requested_cents"),
+        **changes,
     )
-    _store_estimate_best_effort(db_session, actor, project=project, estimator_used=estimator_used, **estimator_fields)
+    try:
+        _invite_teammates(db_session, actor, weave_client, project, posted.values["teammates"])
+    except (ValidationFailed, WeaveUnavailableError) as exc:
+        db_session.rollback()
+        posted.errors["teammates"] = exc.errors["teammates"] if isinstance(exc, ValidationFailed) else str(exc)
+        return _again(422)
     db_session.commit()
-    flash(request, "Draft created.", "success")
+    flash(request, "Draft saved.", "success")
     return RedirectResponse(f"/projects/{project.id}", status_code=303)
+
+
+def _require_editable_draft(project: Project) -> ProjectRevision | None:
+    """The project's current draft, or `None` if there's nothing to edit right now."""
+    draft = project.current_revision
+    if draft is None or draft.submitted_at is not None:
+        return None
+    return draft
+
+
+def _screenshot_entries(store: ObjectStore, draft: ProjectRevision) -> list[dict[str, str]]:
+    """Short-lived presigned GET URLs for a draft's screenshots, for the edit page's thumbnails."""
+    return [{"key": key, "url": store.presign_download(key)} for key in draft.screenshot_keys]
+
+
+def _completion_values(project: Project, draft: ProjectRevision) -> dict:
+    return {
+        "title": project.title,
+        "repo_url": project.repo_url or "",
+        "write_up": draft.write_up,
+        "demo_url": draft.demo_url or "",
+        "tags": ", ".join(draft.tags),
+    }
+
+
+def _edit_context(
+    db_session: Session,
+    weave_client: WeaveClient,
+    store: ObjectStore,
+    actor: Actor,
+    project: Project,
+    draft: ProjectRevision,
+    *,
+    values: dict | None = None,
+    errors: dict[str, str] | None = None,
+    summaries: dict[str, str | None] | None = None,
+) -> dict:
+    """The edit page's context: the application form for a proposal or amendment, the completion form otherwise.
+    `values` defaults to what the draft holds now."""
+    if draft.kind is RevisionKind.COMPLETION:
+        return {
+            "project": project,
+            "draft": draft,
+            "values": values or _completion_values(project, draft),
+            "errors": errors or {},
+            "screenshots": _screenshot_entries(store, draft),
+            "max_screenshots": screenshot_service.MAX_SCREENSHOTS,
+            "max_screenshot_bytes": screenshot_service.MAX_SCREENSHOT_BYTES,
+        }
+    return {
+        "project": project,
+        "draft": draft,
+        **_form_context(
+            db_session,
+            actor,
+            values=values or application_form.values_from_draft(project, draft, get_settings()),
+            errors=errors,
+            summaries=summaries or application_form.summaries_from_draft(draft),
+            team=_team_rows(weave_client, db_session, project),
+            base_cents=_amendment_base(db_session, project, draft),
+        ),
+    }
+
+
+def _amendment_base(session: Session, project: Project, draft: ProjectRevision) -> int:
+    """What an amendment's estimate adds to: the budget approved so far. Zero for a proposal."""
+    return budget_service.ceiling_cents(session, project) if draft.kind is RevisionKind.AMENDMENT else 0
+
+
+def _editable(request: Request, db_session: Session, actor: Actor, project_id: uuid.UUID):
+    """`(project, draft)` when `actor` may edit the project's draft now; else `(project, None)` after a flash."""
+    project = _get_visible_project(db_session, actor, project_id)
+    if not teams.on_team(project, actor.user.id):
+        raise NotAllowed("Only the project's team may edit it.")
+    draft = _require_editable_draft(project)
+    if draft is None:
+        flash(request, "This project has no draft to edit right now.", "error")
+    return project, draft
+
+
+@router.get("/projects/{project_id}/edit")
+def edit_draft_form(
+    request: Request,
+    project_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
+    store: Annotated[ObjectStore, Depends(get_object_store)],
+):
+    project, draft = _editable(request, db_session, actor, project_id)
+    if draft is None:
+        return _redirect_to_project(project_id)
+    context = _edit_context(db_session, weave_client, store, actor, project, draft)
+    return templates.TemplateResponse(request, "projects/edit.html", context)
+
+
+@router.post("/projects/{project_id}/edit", dependencies=[Depends(verify_csrf_token)])
+async def update_draft(
+    request: Request,
+    project_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
+    store: Annotated[ObjectStore, Depends(get_object_store)],
+):
+    project, draft = _editable(request, db_session, actor, project_id)
+    if draft is None:
+        return _redirect_to_project(project_id)
+    form = await request.form()
+
+    if draft.kind is RevisionKind.COMPLETION:
+        values = {key: str(form.get(key, "")) for key in ("title", "repo_url", "write_up", "demo_url", "tags")}
+        errors = project_service.link_errors(repo_url=values["repo_url"], demo_url=values["demo_url"])
+        if errors:
+            context = _edit_context(
+                db_session, weave_client, store, actor, project, draft, values=values, errors=errors
+            )
+            return templates.TemplateResponse(request, "projects/edit.html", context, status_code=422)
+        project_service.update_draft(
+            db_session,
+            actor,
+            project=project,
+            title=values["title"],
+            repo_url=values["repo_url"],  # "" clears it
+            write_up=values["write_up"],
+            demo_url=values["demo_url"],  # "" clears it
+            tags=parse_tags(values["tags"]),
+        )
+        db_session.commit()
+        flash(request, "Draft saved.", "success")
+        return RedirectResponse(f"/projects/{project_id}/edit", status_code=303)
+
+    fill = _fill_from_action(str(form.get("form_action", "save")))
+    posted = application_form.parse(
+        db_session, form, get_settings(), fill=fill, base_cents=_amendment_base(db_session, project, draft)
+    )
+
+    def _again(status_code: int):
+        context = _edit_context(
+            db_session,
+            weave_client,
+            store,
+            actor,
+            project,
+            draft,
+            values=posted.values,
+            errors=posted.errors,
+            summaries=posted.summaries,
+        )
+        return templates.TemplateResponse(request, "projects/edit.html", context, status_code=status_code)
+
+    if fill is not None:
+        return _again(422 if posted.errors else 200)
+    if not posted.errors and (teammates_error := _check_teammates(weave_client, posted.values["teammates"])):
+        posted.errors["teammates"] = teammates_error
+    if posted.errors:
+        return _again(422)
+
+    project_service.update_draft(db_session, actor, project=project, **posted.changes)
+    try:
+        _invite_teammates(db_session, actor, weave_client, project, posted.values["teammates"])
+    except (ValidationFailed, WeaveUnavailableError) as exc:
+        db_session.rollback()
+        db_session.refresh(project)
+        posted.errors["teammates"] = exc.errors["teammates"] if isinstance(exc, ValidationFailed) else str(exc)
+        return _again(422)
+    db_session.commit()
+    flash(request, "Draft saved.", "success")
+    return RedirectResponse(f"/projects/{project_id}/edit", status_code=303)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -294,61 +440,108 @@ def _build_detail_context(
     revisions = sorted(project.revisions, key=lambda revision: revision.number, reverse=True)
 
     reviewer_ids = {review.reviewer_id for revision in revisions for review in revision.reviews}
-    builder_ids: set[uuid.UUID] = set()
-    for revision in revisions:
-        builder_ids.update(revision.credited_builder_ids)
-    user_ids = reviewer_ids | builder_ids
-    users = list(session.scalars(sa.select(User).where(User.id.in_(user_ids)))) if user_ids else []
+    user_ids = reviewer_ids | {project.submitter_id} | {member.user_id for member in project.members}
+    users = list(session.scalars(sa.select(User).where(User.id.in_(user_ids))))
     names_by_id = people.names(weave_client, users)
+    subs_by_id = {user.id: user.weave_sub for user in users}
 
-    is_submitter = actor.user.id == project.submitter_id
+    is_lead = actor.user.id == project.submitter_id
+    is_team = teams.on_team(project, actor.user.id)
+    conflicted = teams.has_conflict(project, actor.user.id)
+    team_open = project.status not in teams.CLOSED_STATUSES
+    team = [{"name": names_by_id[project.submitter_id], "sub": subs_by_id[project.submitter_id], "lead": True}]
+    for member in project.members:
+        team.append(
+            {
+                "id": member.id,
+                "name": names_by_id[member.user_id],
+                "sub": subs_by_id[member.user_id],
+                "accepted": member.accepted,
+                "is_me": member.user_id == actor.user.id,
+                "can_remove": team_open and (is_lead or actor.is_admin or member.user_id == actor.user.id),
+            }
+        )
+    my_invitation = next((m for m in project.members if m.user_id == actor.user.id and not m.accepted), None)
     current = project.current_revision
     has_draft = current is not None and current.submitted_at is None
     current_is_pending = (
         current is not None and current.submitted_at is not None and current.outcome is RevisionOutcome.PENDING
     )
-    is_credited_builder = current is not None and actor.user.id in current.credited_builder_ids
+    can_review = actor.is_reviewer and not conflicted and current_is_pending
 
-    can_review = actor.is_reviewer and not is_submitter and not is_credited_builder and current_is_pending
+    compute_mode = get_settings().compute_mode
+    budget_flag = None
+    if compute_mode != "off":
+        budget_flag = current_budget_flag(
+            session,
+            project,
+            ceiling_cents=budget_service.ceiling_cents(session, project),
+            spend_cents=budget_service.latest_spend_cents(session, project),
+            warn_percent=get_settings().budget_warn_percent,
+        )
 
     screenshots = _screenshot_entries(get_object_store(), current) if current is not None else []
 
-    # For each revision that used the budget estimator (`budget_estimate` set), whether its actually
-    # -requested budget has drifted far enough from that stored estimate to flag for reviewers -- e.g.
-    # the submitter estimated one thing, then hand-edited the requested amount well past it.
+    # Team members under 18 without a verified guardian in Weave block every budget grant (docs/SPEC.md
+    # "Guardian verification"). A finished project gets no more budget, so it doesn't ask. `None` means Weave
+    # couldn't say right now; the decision itself still checks Weave fresh.
+    guardian_pending = (
+        guardian.pending_for_display(session, weave_client, project) if project.status not in _TERMINAL_STATUSES else []
+    )
+
+    # For each revision with an estimate, whether the amount it asks for has drifted far enough from that estimate to
+    # flag for reviewers -- e.g. the team estimated one thing, then typed a requested amount well past it. An
+    # amendment's estimate is the extra compute, so it's compared with what the amendment adds to the ceiling; that's
+    # only known while it's undecided, so a decided amendment isn't flagged.
     threshold_percent = get_settings().budget_estimate_flag_threshold_percent
     estimate_mismatch_by_revision: dict[uuid.UUID, bool] = {}
+    amendment_adds_cents = None
+    if current is not None and current.kind is RevisionKind.AMENDMENT and current.outcome is RevisionOutcome.PENDING:
+        amendment_adds_cents = current.budget_requested_cents - summary.ceiling_cents
     for revision in revisions:
         estimate = revision.budget_estimate
-        if not estimate:
+        if not estimate or revision.kind is RevisionKind.COMPLETION:
             continue
+        asked_cents = revision.budget_requested_cents
+        if revision.kind is RevisionKind.AMENDMENT:
+            if revision is not current or amendment_adds_cents is None:
+                continue
+            asked_cents = amendment_adds_cents
         total_cents = estimate.get("total_cents", 0)
         if total_cents > 0:
-            diff_percent = abs(revision.budget_requested_cents - total_cents) / total_cents * 100
+            diff_percent = abs(asked_cents - total_cents) / total_cents * 100
             estimate_mismatch_by_revision[revision.id] = diff_percent > threshold_percent
 
     return {
         "project": project,
         "summary": summary,
+        "budget_flag": budget_flag,
         "screenshots": screenshots,
+        "guardian_pending": guardian_pending,
         "revisions": revisions,
         "estimate_mismatch_by_revision": estimate_mismatch_by_revision,
+        "amendment_adds_cents": amendment_adds_cents,
         "names_by_id": names_by_id,
-        "is_submitter": is_submitter,
+        "is_lead": is_lead,
+        "is_team": is_team,
+        "team": team,
+        "my_invitation": my_invitation,
+        "can_invite": team_open and (is_team or actor.is_admin),
         "is_admin": actor.is_admin,
-        "show_compute_off_notice": project.status in LAUNCHABLE_STATUSES,
+        "show_compute_off_notice": compute_mode == "off" and project.status in LAUNCHABLE_STATUSES,
+        "compute_on": compute_mode != "off",
         "has_draft": has_draft,
-        "can_edit_draft": is_submitter and has_draft,
-        "can_submit": is_submitter and has_draft and current.kind is not RevisionKind.COMPLETION,
-        "can_submit_completion": is_submitter and has_draft and current.kind is RevisionKind.COMPLETION,
-        "can_start_amendment": is_submitter and project.status is ProjectStatus.APPROVED and not has_draft,
-        "can_start_completion": is_submitter and project.status is ProjectStatus.APPROVED and not has_draft,
-        "can_withdraw": is_submitter and project.status not in _TERMINAL_STATUSES,
+        "can_edit_draft": is_team and has_draft,
+        "can_submit": is_team and has_draft and current.kind is not RevisionKind.COMPLETION,
+        "can_submit_completion": is_team and has_draft and current.kind is RevisionKind.COMPLETION,
+        "can_start_amendment": is_team and project.status is ProjectStatus.APPROVED and not has_draft,
+        "can_start_completion": is_team and project.status is ProjectStatus.APPROVED and not has_draft,
+        "can_withdraw": is_lead and project.status not in _TERMINAL_STATUSES,
         "can_review": can_review,
         # Admin overrides on your own project: deciding it is off entirely, and adding budget is refused by the
         # service (cutting it is still allowed), so the page explains why instead of offering the form.
-        "admin_own_project": actor.is_admin and (is_submitter or is_credited_builder),
-        "can_admin_decide": actor.is_admin and current_is_pending and not is_submitter and not is_credited_builder,
+        "admin_own_project": actor.is_admin and conflicted,
+        "can_admin_decide": actor.is_admin and current_is_pending and not conflicted,
         "can_admin_adjust_budget": actor.is_admin
         and project.status in (ProjectStatus.APPROVED, ProjectStatus.PENDING_COMPLETION_REVIEW),
         "can_admin_reclaim": actor.is_admin and summary.ceiling_cents > 0,
@@ -380,205 +573,6 @@ def project_detail(
 
 
 # --------------------------------------------------------------------------------------------------
-# Edit the draft
-# --------------------------------------------------------------------------------------------------
-
-
-def _edit_form_values(session: Session, project: Project, draft: ProjectRevision) -> dict:
-    builder_ids = ""
-    if draft.credited_builder_ids:
-        users = session.scalars(sa.select(User).where(User.id.in_(draft.credited_builder_ids)))
-        builder_ids = ", ".join(sorted(user.weave_sub for user in users))
-    return {
-        "title": project.title,
-        "repo_url": project.repo_url or "",
-        "write_up": draft.write_up,
-        "budget_requested": cents_to_input(draft.budget_requested_cents),
-        "demo_url": draft.demo_url or "",
-        "tags": ", ".join(draft.tags),
-        "credited_builders": builder_ids,
-    }
-
-
-def _require_editable_draft(project: Project) -> ProjectRevision | None:
-    """The project's current draft, or `None` if there's nothing to edit right now."""
-    draft = project.current_revision
-    if draft is None or draft.submitted_at is not None:
-        return None
-    return draft
-
-
-def _screenshot_entries(store: ObjectStore, draft: ProjectRevision) -> list[dict[str, str]]:
-    """Short-lived presigned GET URLs for a draft's screenshots, for the edit page's thumbnails."""
-    return [{"key": key, "url": store.presign_download(key)} for key in draft.screenshot_keys]
-
-
-def _estimator_context_from_draft(db_session: Session, draft: ProjectRevision) -> dict:
-    """`_estimator_context`, prefilled from `draft.budget_estimate` if it has one (so reopening the
-    edit page still shows what the estimator last computed for this draft), else blank defaults."""
-    stored = draft.budget_estimate
-    if not stored:
-        return _estimator_context(db_session)
-    return _estimator_context(
-        db_session,
-        estimator_gpu=pricing.gpu_key(stored["accelerator_name"], stored["accelerator_count"]),
-        estimator_hours=str(stored["hours"]),
-        estimator_basis=stored["basis"],
-        estimator_margin_percent=str(stored["margin_percent"]),
-        estimate_summary=estimator_form.summary_text_from_dict(stored),
-    )
-
-
-@router.get("/projects/{project_id}/edit")
-def edit_draft_form(
-    request: Request,
-    project_id: uuid.UUID,
-    db_session: Annotated[Session, Depends(get_session)],
-    actor: Annotated[Actor, Depends(fresh_actor)],
-    store: Annotated[ObjectStore, Depends(get_object_store)],
-):
-    project = _get_visible_project(db_session, actor, project_id)
-    if actor.user.id != project.submitter_id:
-        raise NotAllowed("Only the submitter may edit this project.")
-
-    draft = _require_editable_draft(project)
-    if draft is None:
-        flash(request, "This project has no draft to edit right now.", "error")
-        return _redirect_to_project(project_id)
-
-    values = _edit_form_values(db_session, project, draft)
-    context = {
-        "project": project,
-        "draft": draft,
-        "errors": {},
-        "values": values,
-        **_estimator_context_from_draft(db_session, draft),
-    }
-    if draft.kind is RevisionKind.COMPLETION:
-        context["screenshots"] = _screenshot_entries(store, draft)
-        context["max_screenshots"] = screenshot_service.MAX_SCREENSHOTS
-        context["max_screenshot_bytes"] = screenshot_service.MAX_SCREENSHOT_BYTES
-    return templates.TemplateResponse(request, "projects/edit.html", context)
-
-
-@router.post("/projects/{project_id}/edit", dependencies=[Depends(verify_csrf_token)])
-def update_draft(
-    request: Request,
-    project_id: uuid.UUID,
-    db_session: Annotated[Session, Depends(get_session)],
-    actor: Annotated[Actor, Depends(fresh_actor)],
-    weave_client: Weave,
-    store: Annotated[ObjectStore, Depends(get_object_store)],
-    title: Annotated[str, Form()] = "",
-    repo_url: Annotated[str, Form()] = "",
-    write_up: Annotated[str, Form()] = "",
-    budget_requested: Annotated[str, Form()] = "",
-    demo_url: Annotated[str, Form()] = "",
-    tags: Annotated[str, Form()] = "",
-    credited_builders: Annotated[str, Form()] = "",
-    form_action: Annotated[str, Form()] = "save",
-    estimator_gpu: Annotated[str, Form()] = "",
-    estimator_hours: Annotated[str, Form()] = "",
-    estimator_basis: Annotated[str, Form()] = "on_demand",
-    estimator_margin_percent: Annotated[str, Form()] = "",
-    estimator_used: Annotated[str, Form()] = "",
-):
-    project = _get_visible_project(db_session, actor, project_id)
-    if actor.user.id != project.submitter_id:
-        raise NotAllowed("Only the submitter may edit this project.")
-
-    draft = _require_editable_draft(project)
-    if draft is None:
-        flash(request, "This project has no draft to edit right now.", "error")
-        return _redirect_to_project(project_id)
-
-    estimator_fields = dict(
-        estimator_gpu=estimator_gpu,
-        estimator_hours=estimator_hours,
-        estimator_basis=estimator_basis,
-        estimator_margin_percent=estimator_margin_percent,
-    )
-    values = {
-        "title": title,
-        "repo_url": repo_url,
-        "write_up": write_up,
-        "budget_requested": budget_requested,
-        "demo_url": demo_url,
-        "tags": tags,
-        "credited_builders": credited_builders,
-    }
-
-    if form_action == "estimate":
-        result, errors = _run_estimate(db_session, **estimator_fields)
-        estimate_summary = None
-        if result is not None:
-            values["budget_requested"] = cents_to_input(result.total_cents)
-            estimate_summary = estimator_form.summary_text(result)
-            estimator_used = "1"
-        context = {
-            "project": project,
-            "draft": draft,
-            "errors": errors,
-            "values": values,
-            **_estimator_context(
-                db_session, estimate_summary=estimate_summary, estimator_used=estimator_used, **estimator_fields
-            ),
-        }
-        if draft.kind is RevisionKind.COMPLETION:
-            context["screenshots"] = _screenshot_entries(store, draft)
-            context["max_screenshots"] = screenshot_service.MAX_SCREENSHOTS
-            context["max_screenshot_bytes"] = screenshot_service.MAX_SCREENSHOT_BYTES
-        return templates.TemplateResponse(request, "projects/edit.html", context, status_code=422 if errors else 200)
-
-    errors: dict[str, str] = {}
-    budget_cents = draft.budget_requested_cents
-    raw_budget = budget_requested.strip()
-    if raw_budget:
-        try:
-            budget_cents = parse_dollars(raw_budget)
-        except InvalidDollarAmount as exc:
-            errors["budget_requested_cents"] = str(exc)
-
-    builder_ids = list(draft.credited_builder_ids)
-    if draft.kind is RevisionKind.COMPLETION:
-        try:
-            builder_ids = parse_members(db_session, weave_client, credited_builders)
-        except UnknownMembers as exc:
-            errors["credited_builders"] = f"Not a Ganymede member: {', '.join(exc.entries)}"
-    is_completion = draft.kind is RevisionKind.COMPLETION
-    errors.update(project_service.link_errors(repo_url=repo_url, demo_url=demo_url if is_completion else None))
-
-    if errors:
-        context = {
-            "project": project,
-            "draft": draft,
-            "errors": errors,
-            "values": values,
-            **_estimator_context(db_session, estimator_used=estimator_used, **estimator_fields),
-        }
-        if draft.kind is RevisionKind.COMPLETION:
-            context["screenshots"] = _screenshot_entries(store, draft)
-            context["max_screenshots"] = screenshot_service.MAX_SCREENSHOTS
-            context["max_screenshot_bytes"] = screenshot_service.MAX_SCREENSHOT_BYTES
-        return templates.TemplateResponse(request, "projects/edit.html", context, status_code=422)
-
-    update_kwargs: dict = {
-        "title": title,
-        "repo_url": repo_url or None,
-        "write_up": write_up,
-        "budget_requested_cents": budget_cents,
-    }
-    if draft.kind is RevisionKind.COMPLETION:
-        update_kwargs.update(demo_url=demo_url or None, tags=parse_tags(tags), credited_builder_ids=builder_ids)
-
-    project_service.update_draft(db_session, actor, project=project, **update_kwargs)
-    _store_estimate_best_effort(db_session, actor, project=project, estimator_used=estimator_used, **estimator_fields)
-    db_session.commit()
-    flash(request, "Draft saved.", "success")
-    return RedirectResponse(f"/projects/{project_id}/edit", status_code=303)
-
-
-# --------------------------------------------------------------------------------------------------
 # Submitter actions
 # --------------------------------------------------------------------------------------------------
 
@@ -589,6 +583,8 @@ def submit_project(
     project_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
+    store: Annotated[ObjectStore, Depends(get_object_store)],
 ):
     project = _get_visible_project(db_session, actor, project_id)
 
@@ -602,14 +598,11 @@ def submit_project(
         project_service.submit(db_session, actor, project=project)
     except ValidationFailed as exc:
         db_session.rollback()
-        draft = project.current_revision
-        values = _edit_form_values(db_session, project, draft) if draft is not None else {}
-        return templates.TemplateResponse(
-            request,
-            "projects/edit.html",
-            {"project": project, "draft": draft, "errors": exc.errors, "values": values},
-            status_code=422,
+        flash(request, "Some answers are missing or too long. They're marked below.", "error")
+        context = _edit_context(
+            db_session, weave_client, store, actor, project, project.current_revision, errors=exc.errors
         )
+        return templates.TemplateResponse(request, "projects/edit.html", context, status_code=422)
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
 
@@ -627,6 +620,8 @@ def submit_completion(
     project_id: uuid.UUID,
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
+    store: Annotated[ObjectStore, Depends(get_object_store)],
 ):
     project = _get_visible_project(db_session, actor, project_id)
 
@@ -640,14 +635,11 @@ def submit_completion(
         project_service.submit_completion(db_session, actor, project=project)
     except ValidationFailed as exc:
         db_session.rollback()
-        draft = project.current_revision
-        values = _edit_form_values(db_session, project, draft) if draft is not None else {}
-        return templates.TemplateResponse(
-            request,
-            "projects/edit.html",
-            {"project": project, "draft": draft, "errors": exc.errors, "values": values},
-            status_code=422,
+        flash(request, "Some answers are missing or too long. They're marked below.", "error")
+        context = _edit_context(
+            db_session, weave_client, store, actor, project, project.current_revision, errors=exc.errors
         )
+        return templates.TemplateResponse(request, "projects/edit.html", context, status_code=422)
     except InvalidState as exc:
         return _invalid_state_redirect(db_session, request, project_id, exc)
 
@@ -724,6 +716,100 @@ def withdraw_project(
 
 
 # --------------------------------------------------------------------------------------------------
+# Team: invite, accept or decline, remove or leave (krater.services.teams)
+# --------------------------------------------------------------------------------------------------
+
+
+@router.post("/projects/{project_id}/team", dependencies=[Depends(verify_csrf_token)])
+def invite_team_member(
+    request: Request,
+    project_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
+    member: Annotated[str, Form()] = "",
+):
+    project = _get_visible_project(db_session, actor, project_id)
+    try:
+        teams.invite(db_session, actor, weave_client, project=project, query=member)
+    except ValidationFailed as exc:
+        db_session.rollback()
+        context = _build_detail_context(
+            db_session, weave_client, project, actor, errors=exc.errors, error_form="team", posted={"member": member}
+        )
+        return templates.TemplateResponse(request, "projects/detail.html", context, status_code=422)
+    except WeaveUnavailableError:
+        db_session.rollback()
+        flash(request, "Weave isn't answering, so Krater can't look that person up. Try again shortly.", "error")
+        return _redirect_to_project(project_id)
+    except InvalidState as exc:
+        return _invalid_state_redirect(db_session, request, project_id, exc)
+    return _success_redirect(
+        db_session, request, project_id, "Invited. They join the team once they accept on their Krater home page."
+    )
+
+
+@router.post("/projects/{project_id}/team/{member_id}/accept", dependencies=[Depends(verify_csrf_token)])
+def accept_team_invitation(
+    request: Request,
+    project_id: uuid.UUID,
+    member_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+    weave_client: Weave,
+):
+    try:
+        teams.accept(db_session, actor, weave_client, member_id=member_id)
+    except InvalidState as exc:
+        return _invalid_state_redirect(db_session, request, project_id, exc)
+    return _success_redirect(
+        db_session,
+        request,
+        project_id,
+        "You're on the team.",
+        after_commit=lambda: slack_invite_team.defer(project_id=str(project_id)),
+    )
+
+
+@router.post("/projects/{project_id}/team/{member_id}/decline", dependencies=[Depends(verify_csrf_token)])
+def decline_team_invitation(
+    request: Request,
+    project_id: uuid.UUID,
+    member_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+):
+    try:
+        teams.decline(db_session, actor, member_id=member_id)
+    except InvalidState as exc:
+        return _invalid_state_redirect(db_session, request, project_id, exc)
+    db_session.commit()
+    flash(request, "Invitation declined.", "success")
+    return RedirectResponse("/", status_code=303)
+
+
+@router.post("/projects/{project_id}/team/{member_id}/remove", dependencies=[Depends(verify_csrf_token)])
+def remove_team_member(
+    request: Request,
+    project_id: uuid.UUID,
+    member_id: uuid.UUID,
+    db_session: Annotated[Session, Depends(get_session)],
+    actor: Annotated[Actor, Depends(fresh_actor)],
+):
+    project = _get_visible_project(db_session, actor, project_id)
+    leaving = any(m.id == member_id and m.user_id == actor.user.id for m in project.members)
+    try:
+        teams.remove(db_session, actor, project=project, member_id=member_id)
+    except InvalidState as exc:
+        return _invalid_state_redirect(db_session, request, project_id, exc)
+    if leaving:
+        db_session.commit()
+        flash(request, "You left the team.", "success")
+        return RedirectResponse("/", status_code=303)
+    return _success_redirect(db_session, request, project_id, "Removed from the team.")
+
+
+# --------------------------------------------------------------------------------------------------
 # Reviewer action (project-scoped; the review *queue* lives in krater/web/routers/reviews.py)
 # --------------------------------------------------------------------------------------------------
 
@@ -751,7 +837,13 @@ def record_review(
     revision = project.current_revision
     try:
         project_service.record_review(
-            db_session, actor, revision=revision, decision=decision_enum, reason=reason or None, source=ReviewSource.WEB
+            db_session,
+            actor,
+            revision=revision,
+            decision=decision_enum,
+            reason=reason or None,
+            source=ReviewSource.WEB,
+            weave_client=weave_client,
         )
     except ValidationFailed as exc:
         db_session.rollback()
@@ -805,7 +897,9 @@ def admin_decide(
 
     revision = project.current_revision
     try:
-        project_service.admin_decide(db_session, actor, revision=revision, decision=decision_enum, reason=reason)
+        project_service.admin_decide(
+            db_session, actor, revision=revision, decision=decision_enum, reason=reason, weave_client=weave_client
+        )
     except ValidationFailed as exc:
         db_session.rollback()
         context = _build_detail_context(
@@ -866,7 +960,7 @@ def admin_adjust_budget(
 
     try:
         project_service.admin_adjust_budget(
-            db_session, actor, project=project, amount_cents=amount_cents, reason=reason
+            db_session, actor, project=project, amount_cents=amount_cents, reason=reason, weave_client=weave_client
         )
     except (ValidationFailed, NotAllowed) as exc:
         # An admin's NotAllowed here is the own-project rule, worth showing next to the amount; anyone else's

@@ -39,7 +39,10 @@
           {% set on_home = path == "/" or path.startswith("/projects") or path.startswith("/reviews") or path.startswith("/admin") %}
           <a class="site-nav__link" href="/"{% if on_home %} aria-current="{{ 'page' if path == '/' else 'true' }}"{% endif %}>{{ "My projects" if signed_in_name else "Home" }}</a>
           <a class="site-nav__link" href="/gallery"{% if path.startswith("/gallery") %} aria-current="{{ 'page' if path == '/gallery' else 'true' }}"{% endif %}>Gallery</a>
-          <a class="site-nav__link" href="/pricing"{% if path.startswith("/pricing") %} aria-current="page"{% endif %}>GPU pricing</a>
+          <a class="site-nav__link" href="/pricing"{% if path.startswith("/pricing") %} aria-current="{{ 'page' if path == '/pricing' else 'true' }}"{% endif %}>GPU pricing</a>
+          {% if signed_in_name %}
+            <a class="site-nav__link" href="/account/ssh-keys"{% if path.startswith("/account") %} aria-current="page"{% endif %}>SSH keys</a>
+          {% endif %}
         </nav>
         <div class="site-account">
           {% if signed_in_name %}

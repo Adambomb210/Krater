@@ -15,6 +15,7 @@ from krater.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
     from krater.models.budget_entry import BudgetEntry
+    from krater.models.project_member import ProjectMember
     from krater.models.project_revision import ProjectRevision
     from krater.models.spend_snapshot import SpendSnapshot
     from krater.models.user import User
@@ -55,8 +56,6 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     slack_channel_archived: Mapped[bool] = mapped_column(
         sa.Boolean, nullable=False, default=False, server_default=sa.false()
     )
-    # The table still has SkyPilot's unused `skypilot_workspace` and `skypilot_allowed_users` columns; Krater
-    # Compute's migrations drop them.
     # This project's own hourly price cap per rented machine, set by an admin
     # (`krater.services.projects.set_hourly_cost_cap`). `None` means the global default,
     # `Settings.compute_max_hourly_cost_cents`; see `krater.services.launch_rules.hourly_cap_cents`.
@@ -74,6 +73,10 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     budget_entries: Mapped[list[BudgetEntry]] = relationship(back_populates="project")
     spend_snapshots: Mapped[list[SpendSnapshot]] = relationship(back_populates="project")
+    # The team besides the lead (`submitter`), including pending invitations; see `krater.services.teams`.
+    members: Mapped[list[ProjectMember]] = relationship(
+        back_populates="project", order_by="ProjectMember.created_at", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<Project {self.title!r} status={self.status.value}>"

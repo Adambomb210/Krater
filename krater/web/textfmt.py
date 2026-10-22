@@ -16,4 +16,15 @@ def nl2br(value: str) -> Markup:
     return Markup("<br>\n").join(escaped.split("\n"))
 
 
-__all__ = ["nl2br"]
+def format_size(size_bytes: int) -> str:
+    """A file size for people: 812 bytes, 3.4 KB, 70.0 MB, 1.2 GB (powers of 1024)."""
+    if size_bytes < 1024:
+        return f"{size_bytes} bytes"
+    for unit in ("KB", "MB", "GB"):
+        size_bytes /= 1024
+        if size_bytes < 1024 or unit == "GB":
+            return f"{size_bytes:.1f} {unit}"
+    raise AssertionError("unreachable")
+
+
+__all__ = ["format_size", "nl2br"]

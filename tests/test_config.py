@@ -70,6 +70,24 @@ def test_renamed_settings_still_read_their_old_env_names(monkeypatch) -> None:
     assert Settings().compute_max_hourly_cost_cents == 900  # the new name wins
 
 
+def test_production_compute_on_vast_needs_the_live_vast_api() -> None:
+    with pytest.raises(ValueError, match="VAST_MODE"):
+        Settings(**{**_PRODUCTION_READY, "compute_mode": "vast", "vast_mode": "fake"})
+
+    with pytest.raises(ValueError, match="LABEL_PREFIX"):
+        Settings(**{**_PRODUCTION_READY, "compute_mode": "vast", "vast_mode": "live"})
+    Settings(
+        **{**_PRODUCTION_READY, "compute_mode": "vast", "vast_mode": "live", "compute_label_prefix": "krater-prod-"}
+    )
+
+
+@pytest.mark.parametrize("prefix", ["", "-", "krater", "krater-", "krater--", "kr-", "krater-prod"])
+def test_a_label_prefix_must_be_specific(prefix: str) -> None:
+    """The scheduler destroys unknown instances with its prefix: a vague one would match other tools' machines."""
+    with pytest.raises(ValueError, match="LABEL_PREFIX"):
+        Settings(compute_label_prefix=prefix)
+
+
 def test_production_rejects_the_default_secret_key() -> None:
     with pytest.raises(ValueError, match="SECRET_KEY"):
         Settings(**{**_PRODUCTION_READY, "secret_key": "insecure-dev-secret-change-me"})

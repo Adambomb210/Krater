@@ -5,13 +5,14 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #: Sentinel used as the default `secret_key`. Production must override it (and, either way, production
 #: requires at least `MIN_SECRET_KEY_LENGTH` characters -- see `_validate_production_safety`).
 DEFAULT_SECRET_KEY = "insecure-dev-secret-change-me"
 MIN_SECRET_KEY_LENGTH = 32
+DEFAULT_COMPUTE_LABEL_PREFIX = "krater-job-"
 
 
 class Settings(BaseSettings):
@@ -42,6 +43,12 @@ class Settings(BaseSettings):
     # Base URL of Weave's directory API (`/api/v1/directory/...`). Blank means `weave_issuer`.
     weave_api_base_url: str = ""
     weave_stub_users_file: str = ""
+    # The Krater CLI's own Weave app: a public (non-confidential) OAuth app the `krater` command signs in with
+    # (docs/compute/cli.md). Blank turns the CLI's API (`/api/v1/`) off.
+    weave_cli_client_id: str = ""
+    # Whether that app accepts a loopback redirect (`http://127.0.0.1/callback`, any port). Production Weave refuses
+    # plain-http redirect URIs, so the CLI's default is copy-and-paste (`urn:ietf:wg:oauth:2.0:oob`).
+    weave_cli_loopback: bool = False
 
     # How Weave's answers map onto Krater's roles (`ganymede:member`, `ganymede:reviewer`,
     # `ganymede:admin`). The `roles` claim (Krater's app-defined role keys in Weave) is the source of
@@ -54,9 +61,23 @@ class Settings(BaseSettings):
     weave_group_reviewer: str = "krater-reviewers"
     weave_group_admin: str = "krater-admins"
 
-    # Which compute layer launches members' machines. Only `off` for now: Krater runs proposals, review, budgets,
-    # Slack, the gallery and Quilt events, and launches nothing. Krater Compute (its own Vast layer) adds `vast`.
-    compute_mode: Literal["off"] = "off"
+    # Which provider Krater Compute rents members' machines from (`krater.providers`; a new provider adds its name
+    # here). `vast`: the worker rents Vast machines itself (`krater.compute`, docs/compute/). `off` launches nothing:
+    # Krater still runs proposals, review, budgets, Slack, the gallery and Quilt events. Off by default, so a developer
+    # with a live provider key can't rent by accident.
+    compute_mode: Literal["off", "vast"] = "off"
+    # Every instance Krater rents is labelled `<prefix><job>-<attempt>`. The scheduler destroys any instance on the
+    # account with this prefix that it has no record of, so give each Krater (staging, production) sharing a Vast
+    # account its own prefix, and never start another tool's labels with it.
+    compute_label_prefix: str = DEFAULT_COMPUTE_LABEL_PREFIX
+    # Where a rented machine reaches Krater: the runner downloads itself from here and reports to it. Blank means
+    # `base_url`; local staging sets its public tunnel URL.
+    compute_runner_url: str = ""
+    # The runner binary the portal serves and the worker checksums (built by the Dockerfile's runner stage).
+    compute_runner_binary_path: str = "/app/runner/dist/krater-runner-linux-amd64"
+    # The bucket for job checkpoints and outputs, on the same S3 storage as screenshots. Machines only ever get
+    # presigned URLs for their own job's keys in it.
+    compute_s3_bucket: str = "krater-compute"
 
     # Budgets and caps, whatever compute layer runs. The old SKYPILOT_ env names still work for one release, so a
     # deploy doesn't have to change its env file and Krater in the same step.
@@ -91,6 +112,50 @@ class Settings(BaseSettings):
     # before the project page flags the mismatch to reviewers.
     budget_estimate_flag_threshold_percent: int = 20
 
+    # Krater Compute's Vast.ai account (docs/compute/). Only the worker builds a Vast client; the org key never
+    # reaches the portal or a member's machine. `fake` serves an in-memory Vast (`krater.vast.fake.FakeVast`) for
+    # dev and tests, and nothing at all in production. `live` needs the key, preferably as a file
+    # (`vast_api_key_file`, mounted into the worker alone); `vast_api_key` is for local runs.
+    vast_mode: Literal["fake", "live"] = "fake"
+    vast_api_url: str = "https://console.vast.ai"
+    vast_api_key_file: str = ""
+    vast_api_key: str = ""
+    vast_timeout_seconds: float = 30.0
+    # Project secrets (an HF_TOKEN a job needs) are stored encrypted with these Fernet keys
+    # (`krater.services.project_secrets`): a file of one key per line, newest first, so a key can be rotated. Keep it
+    # apart from the database and KRATER_SECRET_KEY. Without a key, project secrets are switched off.
+    # `project_secrets_key` (comma-separated) is for local runs.
+    project_secrets_key_file: str = ""
+    project_secrets_key: str = ""
+    # Krater's own Vast price history (Vast's history API is for host accounts only, and its public feed needs a
+    # data license for bulk use). Every `price_history_interval_minutes`, one search per GPU model and rental type;
+    # rows hold the min, p10 and median of GPU price plus `price_history_disk_gb` of disk, for 1-GPU offers. A run
+    # costs about 500 of Vast's 20,000 daily search rows, so hourly (a divisor of 60, or whole hours); see
+    # docs/compute/vast-api.md.
+    price_history_interval_minutes: int = 60
+    price_history_disk_gb: int = 32
+    # Vast's own model names (checked against a live search on 2026-10-11).
+    price_history_gpus: list[str] = [
+        "RTX 3060",
+        "RTX 3090",
+        "RTX 4090",
+        "RTX 5060 Ti",
+        "RTX 5070 Ti",
+        "RTX 5080",
+        "RTX 5090",
+        "RTX A4000",
+        "RTX A6000",
+        "RTX 6000Ada",
+        "RTX PRO 6000 WS",
+        "L4",
+        "L40S",
+        "A100 PCIE",
+        "A100 SXM4",
+        "H100 PCIE",
+        "H100 SXM",
+        "H200",
+    ]
+
     # Slack integration (review happens in Slack; see docs/SPEC.md "Slack integration" and
     # docs/dev/slack-setup.md). `fake` is an in-memory Slack for dev and tests, mirroring `vast_mode`.
     slack_mode: Literal["fake", "live"] = "fake"
@@ -118,6 +183,22 @@ class Settings(BaseSettings):
     # The most outbox rows one sender run sends. The periodic task runs every minute.
     quilt_batch_size: int = 200
 
+    @property
+    def compute_on(self) -> bool:
+        """Whether Krater Compute runs, with any provider."""
+        return self.compute_mode != "off"
+
+    @field_validator("compute_label_prefix")
+    @classmethod
+    def _label_prefix_is_specific(cls, value: str) -> str:
+        # The scheduler destroys every instance with this prefix that it has no record of. An empty or bare
+        # "krater" prefix would match other tools' machines on a shared Vast account.
+        if len(value) < 7 or not value.endswith("-") or value.rstrip("-") == "krater":
+            raise ValueError(
+                "KRATER_COMPUTE_LABEL_PREFIX must be specific to this deployment and end with '-' (e.g. 'krater-prod-')"
+            )
+        return value
+
     @model_validator(mode="after")
     def _validate_production_safety(self) -> Settings:
         if self.env == "production":
@@ -126,6 +207,12 @@ class Settings(BaseSettings):
             if self.pricing_mode == "fake":
                 # Even with compute off: the budget estimator's GPU prices come from the public catalog.
                 raise ValueError("KRATER_PRICING_MODE cannot be 'fake' when KRATER_ENV=production")
+            if self.compute_mode == "vast" and self.vast_mode != "live":
+                raise ValueError("KRATER_VAST_MODE must be 'live' when KRATER_COMPUTE_MODE=vast in production")
+            if self.compute_on and self.compute_label_prefix == DEFAULT_COMPUTE_LABEL_PREFIX:
+                # The scheduler destroys unknown instances with its prefix: two Kraters on one Vast account with the
+                # same prefix would destroy each other's machines.
+                raise ValueError("Set KRATER_COMPUTE_LABEL_PREFIX to this deployment's own prefix in production")
             if self.slack_mode == "fake":
                 raise ValueError("KRATER_SLACK_MODE cannot be 'fake' when KRATER_ENV=production")
             if self.s3_mode == "fake":

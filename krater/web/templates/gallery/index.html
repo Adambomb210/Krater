@@ -26,6 +26,7 @@
         {% endif %}
         <div class="gallery-list__body">
           <h2><a href="/gallery/{{ entry.project.id }}">{{ entry.project.title or "Untitled project" }}</a></h2>
+          {% if entry.revision and entry.revision.summary %}<p>{{ entry.revision.summary }}</p>{% endif %}
           {% if entry.revision and entry.revision.tags %}
             <p class="tag-list">
               {% for tag in entry.revision.tags %}<span class="tag">{{ tag }}</span>{% endfor %}

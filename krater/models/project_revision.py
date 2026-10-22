@@ -28,22 +28,35 @@ class ProjectRevision(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     )
     number: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     kind: Mapped[RevisionKind] = mapped_column(pg_enum(RevisionKind, name="revision_kind"), nullable=False)
+    # The application's answers (docs/SPEC.md "The application"). `write_up` is the full explanation: what the
+    # project is, what it builds on or departs from, and why it matters. Word limits are checked on submit.
+    summary: Mapped[str] = mapped_column(sa.String(300), nullable=False, default="", server_default="")
+    experience: Mapped[str] = mapped_column(sa.Text, nullable=False, default="", server_default="")
     write_up: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    # `none`, `contest`, `professor` or `both` (krater.services.projects.AFFILIATIONS), with the contest's or
+    # professor's name and any link in `affiliation_detail`.
+    affiliation: Mapped[str] = mapped_column(sa.String(16), nullable=False, default="none", server_default="none")
+    affiliation_detail: Mapped[str] = mapped_column(sa.Text, nullable=False, default="", server_default="")
+    compute_use: Mapped[str] = mapped_column(sa.Text, nullable=False, default="", server_default="")
+
+    # What approval funds: the proof of concept for a proposal, the new total for an amendment.
     budget_requested_cents: Mapped[int] = mapped_column(sa.Integer, nullable=False)
 
-    # Set only when the submitter used the budget estimator (`krater.services.pricing`) to fill in
-    # `budget_requested_cents` -- null for a plain hand-typed budget. Always the server's own
-    # recomputed breakdown (see `krater.services.pricing.estimate_cost`), never anything a client sent
-    # directly, so a reviewer can trust the rate/refreshed_at shown next to the requested budget.
+    # The estimate behind `budget_requested_cents`: the card, hours and rental the team chose, priced by the server
+    # (`krater.services.pricing.estimate_cost`), or at the hourly price the team typed in instead (`rate_source`
+    # `member`, with Krater's own `market_rate_cents` beside it when it has one). The team may still request a
+    # different amount; the project page shows reviewers both. Null on revisions from before the application form.
     budget_estimate: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    # The finished product's rough cost, for reviewers to see where the project is heading. Information only:
+    # approval never funds it (that takes an amendment later), so it never feeds the budget ledger.
+    full_budget_cents: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    full_budget_estimate: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     # Completion-only fields; left empty/null for `proposal` and `amendment` revisions.
     demo_url: Mapped[str | None] = mapped_column(sa.String(2048), nullable=True)
     screenshot_keys: Mapped[list[str]] = mapped_column(
         ARRAY(sa.String), nullable=False, default=list, server_default="{}"
-    )
-    credited_builder_ids: Mapped[list[uuid.UUID]] = mapped_column(
-        ARRAY(UUID(as_uuid=True)), nullable=False, default=list, server_default="{}"
     )
     tags: Mapped[list[str]] = mapped_column(ARRAY(sa.String), nullable=False, default=list, server_default="{}")
 

@@ -2,18 +2,24 @@
 serve `/pricing` plus the proposal-form budget estimator. See `docs/dev/pricing.md` for where the numbers come from
 (SkyPilot's public catalog CSV on GitHub), how aggregation works, and the refresh/failure
 story. Framework-free like every other service: no FastAPI here.
+
+The estimator prefers Krater's own Vast price history (`krater.services.price_history`, sampled by the worker while
+it has a Vast key) once a GPU has at least a day of samples in the last week: the median of the samples' medians, a
+typical price rather than the catalog's cheapest offer. Otherwise it uses the catalog.
 """
 
 from __future__ import annotations
 
+import math
+import re
 import statistics
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from krater.models import GpuPrice
+from krater.models import GpuPrice, GpuPriceSample
 from krater.pricing.catalog import FakeCatalog, GpuOffer, LiveCatalog
 from krater.services.errors import ValidationFailed
 
@@ -21,6 +27,18 @@ from krater.services.errors import ValidationFailed
 BASIS_ON_DEMAND = "on_demand"
 BASIS_SPOT = "spot"
 VALID_BASES = (BASIS_ON_DEMAND, BASIS_SPOT)
+
+#: Where an estimate's rate came from (`BudgetEstimate.rate_source`).
+SOURCE_CATALOG = "catalog"
+SOURCE_SAMPLES = "krater_samples"
+# The team typed its own hourly price (a card Krater has no price for, or a price they expect to get).
+SOURCE_MEMBER = "member"
+#: Krater's samples are used once a GPU has at least `SAMPLE_MIN_SPAN` of them within `SAMPLE_WINDOW`.
+SAMPLE_WINDOW = timedelta(days=7)
+SAMPLE_MIN_SPAN = timedelta(days=1)
+#: Vast names variants the catalog lumps together (A100 SXM4 and A100 PCIE are both the catalog's A100). Never "Ti":
+#: an RTX 5070 Ti is a different GPU from an RTX 5070.
+_VARIANT_SUFFIXES = ("sxm", "sxm4", "sxm5", "pcie", "nvl")
 
 #: Sort keys accepted by `list_prices`' `sort` argument (also what `/pricing`'s `?sort=` reads).
 _SORT_COLUMNS: dict[str, tuple] = {
@@ -194,9 +212,22 @@ class BudgetEstimate:
     margin_cents: int
     total_cents: int
     refreshed_at: datetime
+    # `SOURCE_CATALOG` or `SOURCE_SAMPLES`. Estimates stored before this field read as the catalog.
+    rate_source: str = SOURCE_CATALOG
+    # Interruptible was asked for but Krater has no interruptible price for this GPU yet, so `basis` is on demand.
+    spot_unavailable: bool = False
+    # With `SOURCE_MEMBER`: what Krater's own prices say per GPU-hour, for reviewers to compare; `None` if it has none.
+    market_rate_cents: int | None = None
+    # The team's own price per GPU-hour in micro-dollars, exactly as typed: bids are often a fraction of a cent
+    # ($0.0587/h). `rate_cents` is that rounded, for display; the totals use this. `None` for Krater's rates.
+    rate_microusd: int | None = None
 
     def as_dict(self) -> dict:
         return {
+            "rate_source": self.rate_source,
+            "spot_unavailable": self.spot_unavailable,
+            "market_rate_cents": self.market_rate_cents,
+            "rate_microusd": self.rate_microusd,
             "accelerator_name": self.accelerator_name,
             "accelerator_count": self.accelerator_count,
             "hours": self.hours,
@@ -210,6 +241,78 @@ class BudgetEstimate:
         }
 
 
+def _normalized(name: str) -> str:
+    return re.sub(r"[\s_-]", "", name.lower())
+
+
+def sample_name_matches(catalog_name: str, sample_name: str) -> bool:
+    """Whether Vast's `sample_name` is the catalog's `catalog_name` (spacing aside, or one of its variants)."""
+    catalog, sample = _normalized(catalog_name), _normalized(sample_name)
+    return sample == catalog or (sample.startswith(catalog) and sample[len(catalog) :] in _VARIANT_SUFFIXES)
+
+
+def sampled_rate_cents(
+    session: Session, *, accelerator_name: str, basis: str, now: datetime
+) -> tuple[int, datetime] | None:
+    """A typical full hourly price for one `accelerator_name` (32 GB disk included) from Krater's samples of the last
+    `SAMPLE_WINDOW`, and when the newest was taken; `None` without `SAMPLE_MIN_SPAN` of samples."""
+    since = now - SAMPLE_WINDOW
+    names = [
+        name
+        for name in session.scalars(
+            sa.select(GpuPriceSample.gpu_name).where(GpuPriceSample.sampled_at >= since).distinct()
+        )
+        if sample_name_matches(accelerator_name, name)
+    ]
+    if not names:
+        return None
+    rows = session.execute(
+        sa.select(GpuPriceSample.median_microusd, GpuPriceSample.sampled_at).where(
+            GpuPriceSample.gpu_name.in_(names),
+            GpuPriceSample.rental_type == ("bid" if basis == BASIS_SPOT else "ondemand"),
+            GpuPriceSample.num_gpus == 1,
+            GpuPriceSample.sampled_at >= since,
+            GpuPriceSample.median_microusd.is_not(None),
+        )
+    ).all()
+    if not rows:
+        return None
+    times = [sampled_at for _, sampled_at in rows]
+    if max(times) - min(times) < SAMPLE_MIN_SPAN:
+        return None
+    median_microusd = statistics.median(median for median, _ in rows)
+    return math.ceil(median_microusd / 10_000), max(times)
+
+
+@dataclass(frozen=True)
+class _MarketRate:
+    rate_cents: int
+    refreshed_at: datetime
+    source: str
+    basis: str
+    spot_unavailable: bool
+
+
+def _market_rate(
+    session: Session, *, accelerator_name: str, accelerator_count: int, basis: str, now: datetime
+) -> _MarketRate | None:
+    """Krater's price per GPU-hour: its own Vast samples, else the catalog. Interruptible falls back to on demand
+    (`spot_unavailable`) when Krater has no interruptible price for the GPU. `None` when it has no price at all."""
+    sampled = sampled_rate_cents(session, accelerator_name=accelerator_name, basis=basis, now=now)
+    price = get_price(session, accelerator_name=accelerator_name, accelerator_count=accelerator_count)
+    spot_unavailable = False
+    if basis == BASIS_SPOT and sampled is None and (price is None or price.spot_min_cents is None):
+        basis, spot_unavailable = BASIS_ON_DEMAND, True
+        sampled = sampled_rate_cents(session, accelerator_name=accelerator_name, basis=BASIS_ON_DEMAND, now=now)
+    if sampled is not None:
+        rate_cents, refreshed_at = sampled
+        return _MarketRate(rate_cents, refreshed_at, SOURCE_SAMPLES, basis, spot_unavailable)
+    if price is None:
+        return None
+    rate_cents = price.spot_min_cents if basis == BASIS_SPOT else price.on_demand_median_cents
+    return _MarketRate(rate_cents, price.refreshed_at, SOURCE_CATALOG, basis, spot_unavailable)
+
+
 def estimate_cost(
     session: Session,
     *,
@@ -218,8 +321,18 @@ def estimate_cost(
     hours: float,
     basis: str,
     margin_percent: int,
+    rate_override_microusd: int | None = None,
+    now: datetime | None = None,
 ) -> BudgetEstimate:
-    """Recompute a budget estimate from Krater's own current `GpuPrice` row.
+    """Recompute a budget estimate from Krater's own Vast samples, or else its current `GpuPrice` (catalog) row.
+
+    Interruptible (`BASIS_SPOT`, Krater's default) prices at the typical bid Krater sampled. SkyPilot's catalog has no
+    interruptible prices, so a GPU Krater hasn't sampled yet is priced on demand instead, and the estimate says so
+    (`spot_unavailable`): an upper bound, never a refusal.
+
+    `rate_override_microusd` is the team's own price per GPU-hour, in micro-dollars. It replaces Krater's rate
+    (`SOURCE_MEMBER`), works for a card Krater has no price for, and keeps Krater's rate beside it
+    (`market_rate_cents`) for reviewers.
 
     Raises `ValidationFailed` (field name -> message, matching every other form-validating service
     call) for bad input or an accelerator/basis Krater has no current pricing for -- callers show these
@@ -236,23 +349,37 @@ def estimate_cost(
         errors["estimator_basis"] = "Choose a pricing basis."
     if margin_percent < 0:
         errors["estimator_margin_percent"] = "Safety margin can't be negative."
+    if rate_override_microusd is not None and rate_override_microusd <= 0:
+        errors["estimator_rate"] = "Enter an hourly price above zero, or leave it blank."
     if errors:
         raise ValidationFailed(errors)
 
-    price = get_price(session, accelerator_name=accelerator_name, accelerator_count=accelerator_count)
-    if price is None:
-        raise ValidationFailed({"estimator_gpu": f"No current pricing for {accelerator_name}×{accelerator_count}."})
-
-    if basis == BASIS_SPOT:
-        if price.spot_min_cents is None:
-            raise ValidationFailed(
-                {"estimator_basis": f"No spot pricing available for {accelerator_name}×{accelerator_count}."}
-            )
-        rate_cents = price.spot_min_cents
+    now = now or datetime.now(UTC)
+    market = _market_rate(
+        session, accelerator_name=accelerator_name, accelerator_count=accelerator_count, basis=basis, now=now
+    )
+    rate_microusd = None
+    if rate_override_microusd is not None:
+        rate_microusd = rate_override_microusd
+        rate_cents, refreshed_at, rate_source, spot_unavailable = (
+            round(rate_microusd / 10_000),
+            now,
+            SOURCE_MEMBER,
+            False,
+        )
+        market_rate_cents = market.rate_cents if market is not None and market.basis == basis else None
+    elif market is None:
+        raise ValidationFailed(
+            {"estimator_gpu": f"No current pricing for {accelerator_name}×{accelerator_count}: enter an hourly price."}
+        )
     else:
-        rate_cents = price.on_demand_median_cents
+        rate_cents, refreshed_at, rate_source = market.rate_cents, market.refreshed_at, market.source
+        basis, spot_unavailable, market_rate_cents = market.basis, market.spot_unavailable, None
 
-    subtotal_cents = round(rate_cents * accelerator_count * hours)
+    if rate_microusd is not None:
+        subtotal_cents = round(rate_microusd * accelerator_count * hours / 10_000)
+    else:
+        subtotal_cents = round(rate_cents * accelerator_count * hours)
     margin_cents = round(subtotal_cents * margin_percent / 100)
 
     return BudgetEstimate(
@@ -265,13 +392,20 @@ def estimate_cost(
         subtotal_cents=subtotal_cents,
         margin_cents=margin_cents,
         total_cents=subtotal_cents + margin_cents,
-        refreshed_at=price.refreshed_at,
+        refreshed_at=refreshed_at,
+        rate_source=rate_source,
+        spot_unavailable=spot_unavailable,
+        market_rate_cents=market_rate_cents,
+        rate_microusd=rate_microusd,
     )
 
 
 __all__ = [
     "BASIS_ON_DEMAND",
     "BASIS_SPOT",
+    "SOURCE_CATALOG",
+    "SOURCE_MEMBER",
+    "SOURCE_SAMPLES",
     "VALID_BASES",
     "BudgetEstimate",
     "aggregate_offers",
@@ -283,4 +417,6 @@ __all__ = [
     "list_prices",
     "parse_gpu_key",
     "refresh_prices",
+    "sample_name_matches",
+    "sampled_rate_cents",
 ]
