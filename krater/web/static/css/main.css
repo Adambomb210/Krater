@@ -713,6 +713,7 @@ a.stat .stat__value {
 .budget-banner,
 .guardian-banner,
 .demographics-banner,
+.residency-line,
 .notice {
   margin: 0 0 var(--space-4);
   padding: var(--space-3) var(--space-4);
@@ -758,9 +759,20 @@ a.stat .stat__value {
   background: var(--warn-soft);
 }
 
-.guardian-banner ul {
+.guardian-banner ul,
+.residency-line ul {
   margin: var(--space-2) 0 0;
   padding-left: var(--space-5);
+}
+
+/* Whether a project's whole team is verified US residents in Weave, for picking OSPool projects. */
+.residency-line p {
+  margin: 0;
+}
+
+.queue-filter {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-sm);
 }
 
 /* ── Flash messages ── */

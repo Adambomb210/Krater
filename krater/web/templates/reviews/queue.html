@@ -10,6 +10,14 @@
   </div>
 </div>
 
+<p class="queue-filter">
+  {% if us_residents %}
+    Showing projects whose whole team is verified US residents (OSPool-ready). <a href="/reviews">Show all</a>
+  {% else %}
+    <a href="/reviews?us_residents=true">Show only projects whose whole team is verified US residents (OSPool)</a>
+  {% endif %}
+</p>
+
 {% if queue %}
   <section class="card card--flush" aria-label="Review queue">
     <ul class="project-list">
@@ -21,6 +29,8 @@
               {{ revision.kind.value | capitalize }}
               &middot; {{ revision.budget_requested_cents | dollars }} requested
               {%- if revision.submitted_at %} &middot; submitted {{ revision.submitted_at.strftime("%Y-%m-%d") }}{% endif %}
+              {%- set team_residency = residency_by_project.get(revision.project_id) %}
+              {%- if team_residency and team_residency.all_residents %} &middot; <span class="badge badge--good">US residents</span>{% endif %}
             </span>
           </div>
           <a class="button button--small" href="/projects/{{ revision.project_id }}">Review</a>
@@ -30,7 +40,7 @@
   </section>
 {% else %}
   <div class="empty-state">
-    <p class="empty-state__title">Nothing waiting on your review.</p>
+    <p class="empty-state__title">{% if us_residents %}No project in your queue has a whole team of verified US residents.{% else %}Nothing waiting on your review.{% endif %}</p>
     <p>New submissions show here.</p>
   </div>
 {% endif %}

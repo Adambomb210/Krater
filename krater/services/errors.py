@@ -88,3 +88,30 @@ class DemographicsCheckUnavailable(InvalidState):
             "Krater couldn't reach Weave to check your demographics answers, so it didn't submit. "
             "Your draft is saved. Try again in a minute."
         )
+
+
+class UsResidencyRequired(InvalidState):
+    """The project can't use OSPool capacity: a team member is not a verified US resident in Weave, or Weave's
+    directory doesn't return them (`krater.services.residency`).
+
+    `members` holds `(label, reason)` for each such member."""
+
+    def __init__(self, members: list[tuple[str, str]]) -> None:
+        self.members = members
+        listed = "; ".join(f"{label}: {reason}" for label, reason in members)
+        super().__init__(
+            "This project can't use OSPool capacity. OSPool is open only to US residents, and these team members "
+            "are not verified US residents in Weave: " + listed + ". A member does the residency check on Weave's "
+            "verification page."
+        )
+
+
+class UsResidencyCheckUnavailable(InvalidState):
+    """Krater couldn't ask Weave about the team members' US residency, so it doesn't use OSPool capacity (fail
+    closed)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Krater couldn't reach Weave to check the team members' US residency, so it didn't use OSPool capacity. "
+            "Try again in a minute."
+        )

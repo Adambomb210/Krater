@@ -137,3 +137,13 @@ def test_set_demographics_answered_changes_the_record(stub_client: StubWeaveClie
     record = stub_client.get_user("PWLMEMBERONE")
     assert record is not None
     assert record.demographics_answered is False
+
+
+def test_set_us_resident_changes_the_record(stub_client: StubWeaveClient) -> None:
+    assert stub_client.get_user("PWLMEMBERONE").us_resident is None
+
+    stub_client.set_us_resident("PWLMEMBERONE", True)
+
+    record = stub_client.get_user("PWLMEMBERONE")
+    assert record is not None
+    assert record.us_resident is True

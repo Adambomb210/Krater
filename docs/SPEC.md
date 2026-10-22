@@ -100,6 +100,18 @@ channel.
   guests: invites use Slack's `force` flag, and anyone Slack refuses (a guest, a deactivated or stale id) is skipped and
   logged, so one person's Slack account never stops the channel, the rest of the team's invites or the review message.
 
+**OSPool.** OSPool (the Open Science Pool) runs NSF-funded donated capacity. It approves every user and every
+project after Patchwork's own review, and only US residents may use it. Weave checks residency (not citizenship) at
+identity verification, and its directory says `us_resident: true` while a yes result stands. Weave never sends the
+state.
+
+- A project may use OSPool capacity only when every team member is a verified US resident: `us_resident: true`.
+  False, a missing field and a 404 all count as no. If Weave can't be reached, the check fails.
+- `/reviews?us_residents=true` shows only the projects whose whole team is verified US residents, and each project page
+  tells reviewers and admins who is not. Reviewers use this to pick the projects to send to OSPool.
+- The OSPool job type (docs/compute/ospool.md, not built yet) must call `krater.services.residency.require_us_residents`
+  before it submits a job.
+
 **Demographics gate.** Funders need demographic answers from the members they fund. Weave keeps the answers sealed
 and never sends them to Krater. Weave's directory record says `demographics_answered: true` once the member saved an
 answer.

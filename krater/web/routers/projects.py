@@ -30,7 +30,7 @@ from krater.models import (
     User,
 )
 from krater.services import budget as budget_service
-from krater.services import demographics, guardian, people, slack_membership, teams
+from krater.services import demographics, guardian, people, residency, slack_membership, teams
 from krater.services import projects as project_service
 from krater.services import screenshots as screenshot_service
 from krater.services.actor import Actor
@@ -498,6 +498,14 @@ def _build_detail_context(
         guardian.pending_for_display(session, weave_client, project) if project.status not in _TERMINAL_STATUSES else []
     )
 
+    # Only verified US residents may use OSPool capacity (`krater.services.residency`). Reviewers and admins see
+    # it, to pick the projects to send to OSPool. `None` means Weave couldn't say right now.
+    team_residency = (
+        residency.team_status_for_display(session, weave_client, project)
+        if actor.is_reviewer or actor.is_admin
+        else None
+    )
+
     # For each revision with an estimate, whether the amount it asks for has drifted far enough from that estimate to
     # flag for reviewers -- e.g. the team estimated one thing, then typed a requested amount well past it. An
     # amendment's estimate is the extra compute, so it's compared with what the amendment adds to the ceiling; that's
@@ -527,6 +535,8 @@ def _build_detail_context(
         "budget_flag": budget_flag,
         "screenshots": screenshots,
         "guardian_pending": guardian_pending,
+        "team_residency": team_residency,
+        "show_residency": actor.is_reviewer or actor.is_admin,
         "revisions": revisions,
         "estimate_mismatch_by_revision": estimate_mismatch_by_revision,
         "amendment_adds_cents": amendment_adds_cents,

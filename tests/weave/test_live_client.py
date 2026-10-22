@@ -640,3 +640,16 @@ def test_an_expired_or_revoked_token_or_a_user_who_lost_access_is_refused() -> N
 def test_weave_failing_is_unavailable_not_refused() -> None:
     with pytest.raises(WeaveUnavailableError):
         _cli_weave(info_status=502).cli_token_sub("member-token")
+
+
+@pytest.mark.parametrize(("raw", "expected"), [(True, True), (False, False), (None, None), ("yes", None)])
+def test_get_user_reads_the_us_resident_field(
+    fake_weave: FakeWeave, live_client: LiveWeaveClient, raw: object, expected: bool | None
+) -> None:
+    # Weave sends null when the member has no standing residency result; older Weave versions leave it out.
+    fake_weave.directory_users["PWLDIR0001"] = {**DIRECTORY_USER, "us_resident": raw}
+
+    user = live_client.get_user("PWLDIR0001")
+
+    assert user is not None
+    assert user.us_resident is expected

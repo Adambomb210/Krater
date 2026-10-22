@@ -52,6 +52,7 @@ class StubUser:
     minor: bool | None = None  # None: Weave sends no `minor` field
     guardian_verified: bool | None = None  # None: Weave sends no `guardian_verified` field
     demographics_answered: bool | None = None  # None: Weave sends no `demographics_answered` field
+    us_resident: bool | None = None  # None: no standing US residency result, or no `us_resident` field
 
 
 class StubWeaveClient:
@@ -82,6 +83,7 @@ class StubWeaveClient:
                 minor=entry.get("minor"),
                 guardian_verified=entry.get("guardian_verified"),
                 demographics_answered=entry.get("demographics_answered"),
+                us_resident=entry.get("us_resident"),
             )
             self._users_by_sub[user.sub] = user
 
@@ -157,6 +159,7 @@ class StubWeaveClient:
         minor: bool | None = None,
         guardian_verified: bool | None = None,
         demographics_answered: bool | None = None,
+        us_resident: bool | None = None,
     ) -> None:
         """Add or replace a user. `roles` are Weave role keys (`None` for no `roles` field at all),
         `groups` are group slugs, and `minor`, `guardian_verified` or `demographics_answered` is `None` when
@@ -174,6 +177,7 @@ class StubWeaveClient:
             minor=minor,
             guardian_verified=guardian_verified,
             demographics_answered=demographics_answered,
+            us_resident=us_resident,
         )
 
     def set_roles(self, sub: str, roles: Iterable[str] | None, *, groups: Iterable[str] | None = None) -> None:
@@ -201,6 +205,10 @@ class StubWeaveClient:
         """Change whether Weave says `sub` saved an answer to the demographics form (`None`: no field)."""
         self._users_by_sub[sub] = dataclasses.replace(self._users_by_sub[sub], demographics_answered=answered)
 
+    def set_us_resident(self, sub: str, resident: bool | None) -> None:
+        """Change Weave's US residency result for `sub` (`None`: no standing result)."""
+        self._users_by_sub[sub] = dataclasses.replace(self._users_by_sub[sub], us_resident=resident)
+
     def remove_user(self, sub: str) -> None:
         """Make the directory answer 404 for `sub`, as Weave does for a user Krater may not see."""
         self._users_by_sub.pop(sub, None)
@@ -218,6 +226,7 @@ class StubWeaveClient:
             minor=user.minor,
             guardian_verified=user.guardian_verified,
             demographics_answered=user.demographics_answered,
+            us_resident=user.us_resident,
         )
 
 

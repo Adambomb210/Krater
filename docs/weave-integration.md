@@ -106,9 +106,11 @@ Endpoints:
 
 - `GET /api/v1/directory/users/{sub}` answers
   `{sub, name, email, email_verified, slack_id, slack_member, groups, roles, active, minor, guardian_verified,
-  demographics_answered}`. A 404 means the user is unknown or may not use Krater: Krater treats them as not a member.
-  Only `active: true` counts as active. `minor`, `guardian_verified` and `demographics_answered` are booleans that
-  older Weave versions leave out. Krater reads a value that isn't a boolean as missing.
+  demographics_answered, us_resident, us_residency_checked_on}`. A 404 means the user is unknown or may not use Krater:
+  Krater treats them as not a member. Only `active: true` counts as active. `minor`, `guardian_verified`,
+  `demographics_answered` and `us_resident` are booleans that older Weave versions leave out. Krater reads a value that
+  isn't a boolean as missing. `us_resident` is also null when the member has no standing residency result. Krater
+  doesn't read `us_residency_checked_on`.
 - `GET /api/v1/directory/users?role=<key>` (or `?group=<slug>`, which Krater doesn't use) answers
   `{"users": [...]}`, sorted by `sub`. Send exactly one parameter. A role or group that isn't linked to Krater answers
   404: Krater treats it as an empty list and logs a warning.
@@ -199,6 +201,22 @@ sequenceDiagram
 
 The project page uses the same lookup (from the short cache) to show which members block a grant, and why. If
 Weave can't answer, the page says so and still loads.
+
+### US residency (OSPool)
+
+Only verified US residents may use OSPool capacity. `krater.services.residency` reads the directory's `us_resident`
+for every team member (the lead and the accepted members):
+
+| Directory record | Krater's answer |
+| --- | --- |
+| `us_resident: true` | Counts as a verified US resident |
+| `us_resident: false`, null or missing | Not a verified US resident |
+| No record (404) | Not a verified US resident |
+| Weave can't be reached | `require_us_residents` fails ("try again"). Pages show no status |
+
+This fails closed, unlike the demographics and guardian gates' missing-field rule: it is a partner's condition, and no
+other Krater path depends on it. The review queue (`/reviews?us_residents=true`) and the project page read it from the
+short cache. A future OSPool job type checks it fresh.
 
 ### Demographics gate
 
