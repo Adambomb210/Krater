@@ -175,3 +175,9 @@ def test_production_accepts_a_blank_or_https_quilt_url() -> None:
 def test_production_rejects_a_plain_http_quilt_url() -> None:
     with pytest.raises(ValueError, match="KRATER_QUILT_URL"):
         Settings(**_PRODUCTION_READY, quilt_url="http://quilt.patchworklabs.example")
+
+
+@pytest.mark.parametrize(("warn", "final"), [(95, 95), (96, 95), (80, 100), (0, 95)])
+def test_budget_warnings_must_come_in_order_before_the_stop(warn: int, final: int) -> None:
+    with pytest.raises(ValueError, match="BUDGET_FINAL_WARN_PERCENT"):
+        Settings(budget_warn_percent=warn, budget_final_warn_percent=final)

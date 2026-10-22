@@ -370,6 +370,13 @@ def _budget_event_message(event: AuditEvent) -> tuple[list[dict], str]:
             f"torn down. Ceiling: {_format_cents(payload.get('ceiling_cents', 0))}, "
             f"spend: {_format_cents(payload.get('spend_cents', 0))}."
         )
+    elif payload.get("final"):
+        text = (
+            f":rotating_light: *Final budget warning*: this project has used {payload.get('percent', 0)}% of its "
+            f"ceiling ({_format_cents(payload.get('spend_cents', 0))} of "
+            f"{_format_cents(payload.get('ceiling_cents', 0))}). Krater stops every job and machine just before 100%. "
+            "Save your work now."
+        )
     else:
         text = (
             f":warning: *Budget warning*: this project has used {payload.get('percent', 0)}% of its ceiling "
