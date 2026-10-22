@@ -94,15 +94,14 @@ class UsResidencyRequired(InvalidState):
     """The project can't use OSPool capacity: a team member is not a verified US resident in Weave, or Weave's
     directory doesn't return them (`krater.services.residency`).
 
-    `members` holds `(label, reason)` for each such member."""
+    `members` holds `(label, reason)` for each such member, for reviewers, admins and the log. The message names
+    nobody: a team member may read it, and only reviewers and admins see who is not a resident."""
 
     def __init__(self, members: list[tuple[str, str]]) -> None:
         self.members = members
-        listed = "; ".join(f"{label}: {reason}" for label, reason in members)
         super().__init__(
-            "This project can't use OSPool capacity. OSPool is open only to US residents, and these team members "
-            "are not verified US residents in Weave: " + listed + ". A member does the residency check on Weave's "
-            "verification page."
+            "This project can't use OSPool capacity. OSPool is open only to US residents, and not every team member "
+            "is a verified US resident in Weave. Each member does the residency check on Weave's verification page."
         )
 
 

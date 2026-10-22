@@ -618,6 +618,14 @@ def submit_project(
         flash(request, membership_error, "error")
         return _redirect_to_project(project_id)
 
+    # Ask Weave about the demographics answers now, before `submit` locks the project row, so a slow Weave never holds
+    # the lock. The answer is used after the other checks (below), so a member fixes missing answers first.
+    demographics_error: DemographicsRequired | DemographicsCheckUnavailable | None = None
+    try:
+        demographics.require_answered(weave_client, actor.user)
+    except (DemographicsRequired, DemographicsCheckUnavailable) as exc:
+        demographics_error = exc
+
     try:
         project_service.submit(db_session, actor, project=project)
     except ValidationFailed as exc:
@@ -632,14 +640,14 @@ def submit_project(
 
     # The demographics gate runs last, so a member fixes missing answers first. The rollback undoes the submit and
     # leaves the saved draft as it was. The page links to Weave's form, which sends the member back here.
-    try:
-        demographics.require_answered(weave_client, actor.user)
-    except DemographicsRequired as exc:
+    if isinstance(demographics_error, DemographicsRequired):
         db_session.rollback()
-        context = _build_detail_context(db_session, weave_client, project, actor, demographics_error=str(exc))
+        context = _build_detail_context(
+            db_session, weave_client, project, actor, demographics_error=str(demographics_error)
+        )
         return templates.TemplateResponse(request, "projects/detail.html", context, status_code=409)
-    except DemographicsCheckUnavailable as exc:
-        return _invalid_state_redirect(db_session, request, project_id, exc)
+    if isinstance(demographics_error, DemographicsCheckUnavailable):
+        return _invalid_state_redirect(db_session, request, project_id, demographics_error)
 
     revision_id = project.current_revision_id
 

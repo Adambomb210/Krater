@@ -215,8 +215,9 @@ for every team member (the lead and the accepted members):
 | Weave can't be reached | `require_us_residents` fails ("try again"). Pages show no status |
 
 This fails closed, unlike the demographics and guardian gates' missing-field rule: it is a partner's condition, and no
-other Krater path depends on it. The review queue (`/reviews?us_residents=true`) and the project page read it from the
-short cache. A future OSPool job type checks it fresh.
+other Krater path depends on it. The review queue filter (`/reviews?us_residents=true`, the pending queue plus the
+approved projects) and the project page read it from the short cache, each member once. A future OSPool job type
+checks it fresh.
 
 ### Demographics gate
 

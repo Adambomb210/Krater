@@ -107,8 +107,10 @@ state.
 
 - A project may use OSPool capacity only when every team member is a verified US resident: `us_resident: true`.
   False, a missing field and a 404 all count as no. If Weave can't be reached, the check fails.
-- `/reviews?us_residents=true` shows only the projects whose whole team is verified US residents, and each project page
-  tells reviewers and admins who is not. Reviewers use this to pick the projects to send to OSPool.
+- `/reviews?us_residents=true` shows the pending queue and the approved projects, each only when the whole team is
+  verified US residents. Each project page tells reviewers and admins who is not. Reviewers use this to pick the
+  projects to send to OSPool. The lookups run only with the filter on, and a down Weave costs one timeout.
+- The gate's message names nobody, because a team member may read it.
 - The OSPool job type (docs/compute/ospool.md, not built yet) must call `krater.services.residency.require_us_residents`
   before it submits a job.
 

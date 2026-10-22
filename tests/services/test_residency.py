@@ -63,6 +63,8 @@ def test_one_member_without_a_yes_blocks_the_whole_team(
 
     assert exc_info.value.members == [(f"Bea Builder ({builder.user.weave_sub})", residency.REASON_NOT_RESIDENT)]
     assert "OSPool is open only to US residents" in str(exc_info.value)
+    # A team member may read the message, so it names nobody.
+    assert "Bea Builder" not in str(exc_info.value)
     assert not residency.team_status_for_display(db_session, weave, project).all_residents
 
 
@@ -82,3 +84,51 @@ def test_weave_down_fails_closed_and_the_page_shows_nothing(db_session: Session,
     with pytest.raises(UsResidencyCheckUnavailable):
         residency.require_us_residents(db_session, _DownWeave(), project)
     assert residency.team_status_for_display(db_session, _DownWeave(), project) is None
+
+
+def test_a_pending_invitee_does_not_count(db_session: Session, lead: Actor, builder: Actor, weave) -> None:
+    project = _project(db_session, lead)
+    add_to_team(db_session, project, builder, accepted=False)
+
+    residency.require_us_residents(db_session, weave, project)
+
+
+class _SpyWeave:
+    """Records the `fresh` flag of every directory lookup, then asks the real stub."""
+
+    def __init__(self, inner: StubWeaveClient) -> None:
+        self.inner = inner
+        self.fresh_flags: list[bool] = []
+
+    def get_user(self, sub: str, *, fresh: bool = False):
+        self.fresh_flags.append(fresh)
+        return self.inner.get_user(sub, fresh=fresh)
+
+
+def test_the_gate_asks_weave_fresh_and_pages_use_the_cache(db_session: Session, lead: Actor, weave) -> None:
+    project = _project(db_session, lead)
+    spy = _SpyWeave(weave)
+
+    residency.require_us_residents(db_session, spy, project)
+    assert spy.fresh_flags == [True]
+
+    spy.fresh_flags.clear()
+    residency.team_status_for_display(db_session, spy, project)
+    residency.resident_teams(db_session, spy, [project])
+    assert spy.fresh_flags == [False, False]
+
+
+def test_resident_teams_looks_each_member_up_once_and_stops_when_weave_is_down(
+    db_session: Session, lead: Actor, builder: Actor, weave
+) -> None:
+    weave.set_us_resident(builder.user.weave_sub, True)
+    first = _project(db_session, lead, builder)
+    second = _project(db_session, lead)
+    spy = _SpyWeave(weave)
+
+    kept, unavailable = residency.resident_teams(db_session, spy, [first, second])
+
+    assert kept == [first, second]
+    assert unavailable is False
+    assert len(spy.fresh_flags) == 2
+    assert residency.resident_teams(db_session, _DownWeave(), [first, second]) == ([], True)

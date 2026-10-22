@@ -11,7 +11,10 @@
 </div>
 
 <p class="queue-filter">
-  {% if us_residents %}
+  {% if us_residents and residency_unavailable %}
+    Krater couldn't reach Weave to check US residency, so the filter shows nothing. Try again in a minute.
+    <a href="/reviews">Show all</a>
+  {% elif us_residents %}
     Showing projects whose whole team is verified US residents (OSPool-ready). <a href="/reviews">Show all</a>
   {% else %}
     <a href="/reviews?us_residents=true">Show only projects whose whole team is verified US residents (OSPool)</a>
@@ -29,8 +32,6 @@
               {{ revision.kind.value | capitalize }}
               &middot; {{ revision.budget_requested_cents | dollars }} requested
               {%- if revision.submitted_at %} &middot; submitted {{ revision.submitted_at.strftime("%Y-%m-%d") }}{% endif %}
-              {%- set team_residency = residency_by_project.get(revision.project_id) %}
-              {%- if team_residency and team_residency.all_residents %} &middot; <span class="badge badge--good">US residents</span>{% endif %}
             </span>
           </div>
           <a class="button button--small" href="/projects/{{ revision.project_id }}">Review</a>
@@ -43,5 +44,22 @@
     <p class="empty-state__title">{% if us_residents %}No project in your queue has a whole team of verified US residents.{% else %}Nothing waiting on your review.{% endif %}</p>
     <p>New submissions show here.</p>
   </div>
+{% endif %}
+
+{% if us_residents and approved_residents %}
+  <h2>Approved projects with a whole team of verified US residents</h2>
+  <section class="card card--flush" aria-label="Approved OSPool-ready projects">
+    <ul class="project-list">
+      {% for project in approved_residents %}
+        <li class="project-list__item">
+          <div class="project-list__main">
+            <a class="project-list__title" href="/projects/{{ project.id }}">{{ project.title or "Untitled proposal" }}</a>
+            <span class="project-list__meta"><span class="badge badge--good">US residents</span></span>
+          </div>
+          <a class="button button--small" href="/projects/{{ project.id }}">Open</a>
+        </li>
+      {% endfor %}
+    </ul>
+  </section>
 {% endif %}
 {% endblock %}

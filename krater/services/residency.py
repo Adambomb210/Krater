@@ -13,8 +13,9 @@ Krater stores none of this.
 - **Weave down.** The gate fails (`UsResidencyCheckUnavailable`). Krater never guesses.
 
 `require_us_residents` is the gate for the OSPool job type (docs/compute/ospool.md); call it before Krater submits
-a job to OSPool. `team_status_for_display` gives reviewers the filter on `/reviews` and the line on a project page,
-so they can pick the projects to send to OSPool.
+a job to OSPool. `resident_teams` gives reviewers the filter on `/reviews`, and `team_status_for_display` the line
+on a project page, so they can pick the projects to send to OSPool. The gate's message names no member, because a
+member may read it; the names are on the exception (`members`) for reviewers, admins and the log.
 """
 
 from __future__ import annotations
@@ -97,6 +98,25 @@ def require_us_residents(session: Session, weave_client: WeaveClient, project: P
         raise UsResidencyRequired([(member.label, member.reason) for member in others])
 
 
+def resident_teams(session: Session, weave_client: WeaveClient, projects: list[Project]) -> tuple[list[Project], bool]:
+    """The projects in `projects` whose whole team is verified US residents, for a list page. Each member is looked
+    up once (from the directory cache). Returns `(projects, unavailable)`: when Weave can't be reached, it stops at the
+    first failure and gives `([], True)`, so a down Weave costs one timeout, not one for each project."""
+    answers: dict[str, bool] = {}
+    kept = []
+    try:
+        for project in projects:
+            team = team_users(session, project)
+            for user in team:
+                if user.weave_sub not in answers:
+                    answers[user.weave_sub] = _not_resident(weave_client, user, fresh=False) is None
+            if team and all(answers[user.weave_sub] for user in team):
+                kept.append(project)
+    except WeaveUnavailableError:
+        return [], True
+    return kept, False
+
+
 def team_status_for_display(session: Session, weave_client: WeaveClient, project: Project) -> TeamResidency | None:
     """The team's residency for a page view: may use the directory cache, and gives `None` instead of failing the
     page when Weave can't be reached."""
@@ -115,5 +135,6 @@ __all__ = [
     "TeamResidency",
     "non_residents",
     "require_us_residents",
+    "resident_teams",
     "team_status_for_display",
 ]
