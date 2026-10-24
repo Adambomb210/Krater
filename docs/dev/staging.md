@@ -74,6 +74,8 @@ Keep it outside the repo (a `.env` in the repo root leaks into `uv run pytest`) 
 `--env-file` and `KRATER_ENV_FILE`. Start from `.env.example`, then set:
 
 ```ini
+# Every page gets a hazard-stripe frame and a STAGING tab, as on Weave and Quilt staging.
+KRATER_STAGING=true
 KRATER_WEAVE_MODE=live
 KRATER_WEAVE_ISSUER=http://host.docker.internal:3000
 KRATER_WEAVE_CLIENT_ID=<from step 2>

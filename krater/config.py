@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KRATER_", env_file=".env", extra="ignore", populate_by_name=True)
 
     env: Literal["development", "test", "production"] = "development"
+    # Marks a staging deployment on every page (a hazard-stripe frame and a STAGING tab, the same as Weave and
+    # Quilt). Staging runs with `env=production` to get the production checks, so it needs its own switch.
+    staging: bool = False
     database_url: str = "postgresql+psycopg://root:root@localhost:5432/krater_dev"
     secret_key: str = DEFAULT_SECRET_KEY
     base_url: str = "http://localhost:8000"

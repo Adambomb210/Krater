@@ -18,6 +18,12 @@
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
+    {#- The staging marker (KRATER_STAGING): the same look as Weave's and Quilt's. Both parts ignore the pointer and
+        take no space, so they never cover a control. #}
+    {% if is_staging() %}
+      <div class="staging-frame" aria-hidden="true"></div>
+      <div class="staging-tab" role="status">Staging</div>
+    {% endif %}
     {% set path = request.url.path %}
     {% set signed_in_name = request.session.get('display_name') %}
     <header class="site-header">
