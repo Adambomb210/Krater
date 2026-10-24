@@ -5,11 +5,14 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from krater.config import get_settings
+from krater.config import Settings, get_settings
 from tests.conftest import MEMBER_SUB
 
 
-def test_no_marker_by_default(client: TestClient) -> None:
+def test_no_marker_by_default(client: TestClient, monkeypatch) -> None:
+    # A developer's own .env may set KRATER_STAGING; the default is what this checks.
+    monkeypatch.setattr(get_settings(), "staging", Settings.model_fields["staging"].default)
+
     html = client.get("/").text
 
     assert "staging-frame" not in html
@@ -34,8 +37,6 @@ def test_marker_on_signed_in_pages_when_staging(client: TestClient, monkeypatch,
 
 
 def test_marker_setting_reads_the_env(monkeypatch) -> None:
-    from krater.config import Settings
-
     monkeypatch.setenv("KRATER_STAGING", "true")
 
     assert Settings().staging is True
