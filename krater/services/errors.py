@@ -114,3 +114,13 @@ class UsResidencyCheckUnavailable(InvalidState):
             "Krater couldn't reach Weave to check the team members' US residency, so it didn't use OSPool capacity. "
             "Try again in a minute."
         )
+
+
+class FunderPacketUnavailable(InvalidState):
+    """Krater couldn't ask Weave about US residency, so it made no funder packet (`krater.services.funder_packet`):
+    a packet that leaves Krater lists only teams checked just now, never from a cache."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Krater couldn't reach Weave to check the teams' US residency, so it made no packet. Try again in a minute."
+        )
