@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KRATER_", env_file=".env", extra="ignore", populate_by_name=True)
 
     env: Literal["development", "test", "production"] = "development"
+    # Marks a staging deployment on every page (a hazard-stripe frame and a STAGING tab, the same as Weave and
+    # Quilt). Staging runs with `env=production` to get the production checks, so it needs its own switch.
+    staging: bool = False
     database_url: str = "postgresql+psycopg://root:root@localhost:5432/krater_dev"
     secret_key: str = DEFAULT_SECRET_KEY
     base_url: str = "http://localhost:8000"
@@ -84,6 +87,9 @@ class Settings(BaseSettings):
     budget_warn_percent: int = Field(
         80, validation_alias=AliasChoices("KRATER_BUDGET_WARN_PERCENT", "KRATER_SKYPILOT_BUDGET_WARN_PERCENT")
     )
+    # A second, last warning before the hard stop near 100%, so members have time to save their work
+    # (patchworklabsorg/krater#2).
+    budget_final_warn_percent: int = 95
     # The default hourly price cap per machine; a project can have its own.
     compute_max_hourly_cost_cents: int = Field(
         500,
@@ -190,6 +196,14 @@ class Settings(BaseSettings):
     def compute_on(self) -> bool:
         """Whether Krater Compute runs, with any provider."""
         return self.compute_mode != "off"
+
+    @property
+    def budget_warn_percents(self) -> tuple[int, ...]:
+        """The budget warning thresholds, first then final. A final threshold at or below the first one turns the
+        final warning off, so a deploy that already set a high KRATER_BUDGET_WARN_PERCENT keeps working."""
+        if self.budget_final_warn_percent <= self.budget_warn_percent:
+            return (self.budget_warn_percent,)
+        return (self.budget_warn_percent, self.budget_final_warn_percent)
 
     @field_validator("compute_label_prefix")
     @classmethod
