@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
+from krater.compute.scheduler import PassResult
 from krater.config import get_settings
 from krater.slack import SlackError
 from krater.worker.app import COMPUTE_SCHEDULER_LOCK, app, compute_schedule
@@ -50,11 +51,27 @@ def test_compute_schedule_runs_a_pass(monkeypatch) -> None:
         patch("krater.worker.app.slack_notify"),
     ):
         session = mock_sessionmaker.return_value.return_value
+        mock_scheduler.run_pass.return_value = PassResult()
         compute_schedule.func(timestamp=1_791_700_000)
 
         args, _ = mock_scheduler.run_pass.call_args
         assert args[0] is session and args[1] is mock_client.return_value
         session.close.assert_called_once()
+
+
+def test_a_pass_with_provider_errors_counts_towards_the_admin_alert(monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "compute_mode", "vast")
+    with (
+        patch("krater.providers.get_provider"),
+        patch("krater.worker.app.compute_scheduler") as mock_scheduler,
+        patch("krater.worker.app.get_sessionmaker"),
+        patch("krater.worker.app.slack_notify"),
+        patch("krater.worker.app._report_failure") as mock_report,
+    ):
+        mock_scheduler.run_pass.return_value = PassResult(errors=2)
+        compute_schedule.func(timestamp=1_791_700_000)
+
+    assert mock_report.call_args.args[0] == "compute_schedule"
 
 
 def test_compute_schedule_posts_budget_notices_right_after_the_pass(monkeypatch) -> None:
@@ -67,7 +84,7 @@ def test_compute_schedule_posts_budget_notices_right_after_the_pass(monkeypatch)
         patch("krater.worker.app.get_sessionmaker"),
         patch("krater.worker.app.slack_notify") as mock_slack_notify,
     ):
-        mock_scheduler.run_pass.side_effect = lambda *a, **k: calls.append("pass") or MagicMock()
+        mock_scheduler.run_pass.side_effect = lambda *a, **k: calls.append("pass") or PassResult()
         mock_slack_notify.sync_budget_notifications.side_effect = lambda *a, **k: calls.append("notices")
         compute_schedule.func(timestamp=1_791_700_000)
 
@@ -78,10 +95,11 @@ def test_a_slack_failure_after_the_pass_is_logged_and_rolled_back(monkeypatch) -
     monkeypatch.setattr(get_settings(), "compute_mode", "vast")
     with (
         patch("krater.providers.get_provider"),
-        patch("krater.worker.app.compute_scheduler"),
+        patch("krater.worker.app.compute_scheduler") as mock_scheduler,
         patch("krater.worker.app.get_sessionmaker") as mock_sessionmaker,
         patch("krater.worker.app.slack_notify") as mock_slack_notify,
     ):
+        mock_scheduler.run_pass.return_value = PassResult()
         mock_slack_notify.sync_budget_notifications.side_effect = SlackError("slack is down")
         session = mock_sessionmaker.return_value.return_value
         compute_schedule.func(timestamp=1_791_700_000)
