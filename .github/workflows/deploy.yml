@@ -1,40 +1,118 @@
 name: Deploy
 
-# Deploys a commit of this repo to alastor. There's no registry image: the NixOS module
-# (patchworklabsorg/infra, modules/krater) builds the image on alastor from the commit written to
-# /var/lib/krater/source-rev. This workflow writes that file, builds while the running site keeps
-# serving, then restarts krater-web, which migrates and starts; krater-worker follows it. Manual only,
-# like Weave's production deploys. See docs/dev/production.md.
+# Deploys Krater staging (krater-staging.patchworklabs.org) on weft. Runs after CI passes on main, so every
+# tested commit on main goes out. Run it by hand from the Actions tab to deploy the tip of main again.
+# Production is not deployed from here yet.
 #
-# Required repository secrets:
-#   ALASTOR_HOST           - alastor's SSH host / IP
-#   KRATER_DEPLOY_SSH_KEY  - private key for the krater-deploy user on alastor (its public key goes in
-#                            the infra repo's hosts/alastor/krater.nix, deployAuthorizedKeys)
+# There's no registry image: the NixOS module (patchworklabsorg/infra, modules/krater) builds the image on
+# weft from the commit written to /var/lib/krater/source-rev. This workflow writes that file, builds while
+# the running site keeps serving, then restarts krater-web, which migrates and starts; krater-worker follows
+# it. See docs/dev/production.md.
+#
+# weft is on the tailnet only. The job joins it as an ephemeral tag:ci-krater node with Tailscale workload
+# identity federation (no Tailscale secret is stored here), then uses sshd on port 2222 as krater-deploy.
+# tag:ci-krater reaches weft:2222 and nothing else (jaspermayone/infra tailscale/policy.hujson).
+#
+# Required secrets, in the `staging` environment (not the repository, so a workflow on another branch
+# cannot read them; the environment only allows main):
+#   TS_OAUTH_CLIENT_ID     - client id of the Tailscale federated identity (scope auth_keys, tag:ci-krater,
+#                            issuer GitHub, subject repo:patchworklabsorg/krater:environment:staging)
+#   TS_AUDIENCE            - audience of that federated identity
+#   KRATER_DEPLOY_SSH_KEY  - private key for the krater-deploy user on weft (its public key is in the infra
+#                            repo's hosts/weft/krater.nix, deployAuthorizedKeys)
 
 on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
-  group: deploy-krater
+  group: deploy-krater-staging
   cancel-in-progress: false
+
+env:
+  HOST: weft.wildebeest-stargazer.ts.net
+  # weft's SSH host key (patchworklabsorg/infra secrets/secrets.nix).
+  HOST_KEY: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAbzni2Be82ORFcHSPVr7OPpfs80Py04JtwyCKc4L28X
+  URL: https://krater-staging.patchworklabs.org
 
 jobs:
   deploy:
+    # A CI run on a push to main that passed, or a manual run from main.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
+    # The environment is also the OIDC subject the Tailscale federated identity trusts.
+    environment:
+      name: staging
+      url: https://krater-staging.patchworklabs.org
     permissions:
       contents: read
+      id-token: write
     steps:
-      - name: Deploy ${{ github.sha }}
-        uses: appleboy/ssh-action@v1
+      - name: Pick the commit
+        id: sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          # CI runs can finish out of order. Deploy only the tip of main, so an older commit never
+          # replaces a newer one.
+          tip=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)
+          if [ "$SHA" != "$tip" ]; then
+            echo "::notice::$SHA is no longer the tip of main ($tip). Skipping."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Join the tailnet
+        if: steps.sha.outputs.deploy == 'true'
+        uses: tailscale/github-action@v4
         with:
-          host: ${{ secrets.ALASTOR_HOST }}
-          username: krater-deploy
-          key: ${{ secrets.KRATER_DEPLOY_SSH_KEY }}
-          # The first build of the Python dependencies takes several minutes on alastor.
-          command_timeout: 50m
-          script: |
-            set -e
-            echo "${{ github.sha }}" > /var/lib/krater/source-rev
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci-krater
+          version: latest
+
+      - name: Deploy ${{ steps.sha.outputs.sha }}
+        if: steps.sha.outputs.deploy == 'true'
+        env:
+          KEY: ${{ secrets.KRATER_DEPLOY_SSH_KEY }}
+          SHA: ${{ steps.sha.outputs.sha }}
+        # The first build of the Python dependencies takes several minutes on weft.
+        timeout-minutes: 50
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          echo "[$HOST]:2222 $HOST_KEY" > ~/.ssh/known_hosts
+          ssh_weft() {
+            ssh -p 2222 -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 \
+              -o StrictHostKeyChecking=yes "krater-deploy@$HOST" "$@"
+          }
+          # The tailnet takes a moment to tell weft about this new node.
+          for i in 1 2 3 4 5 6; do
+            ssh_weft true && break
+            [ "$i" = 6 ] && exit 1
+            sleep 10
+          done
+          ssh_weft "set -e
+            echo $SHA > /var/lib/krater/source-rev
             sudo systemctl start krater-build
             sudo systemctl restart krater-web
-            systemctl is-active krater-web krater-worker
+            systemctl is-active krater-web krater-worker"
+
+      - name: Check the site
+        if: steps.sha.outputs.deploy == 'true'
+        run: |
+          for _ in $(seq 1 12); do
+            if curl -fsS --max-time 10 "$URL/healthz"; then exit 0; fi
+            sleep 10
+          done
+          echo "::error::$URL/healthz did not answer 200 after the deploy"
+          exit 1
