@@ -19,7 +19,9 @@ Section 1 (DNS, Weave, Slack, Vast) applies to both. The image builds for arm64,
 There's no registry image. `krater-build` fetches one pushed commit of this repo, builds it on weft with this
 repo's `Dockerfile` and tags it `krater:<sha>`. Staging deploys itself: the `Deploy` workflow
 (`.github/workflows/deploy.yml`) runs after `CI` passes on `main`, joins the tailnet as `tag:ci-krater` and runs
-these steps over SSH (port 2222) as the `krater-deploy` user. Run it by hand from the Actions tab to deploy the tip
+these steps over SSH (port 2222) as the `krater-deploy` user. Its key may only run that deploy command, which
+also puts the old commit back in `source-rev` if the build fails. It deploys only the tip of `main`: if the tip's CI
+fails, staging stays on the last good deploy until a fix lands. Run it by hand from the Actions tab to deploy the tip
 of `main` again. Production has no CI deploy yet.
 
 ```bash
