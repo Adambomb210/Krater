@@ -5,20 +5,24 @@ staging run first ([staging.md](staging.md)); this page assumes everything there
 
 ## 0. Where it runs
 
-- **On alastor: the NixOS module.** Weave on alastor isn't run with Compose: its containers are systemd units defined
-  in [patchworklabsorg/infra](https://github.com/patchworklabsorg/infra), behind the host's Traefik, with agenix
-  secrets. Krater has the same: `modules/krater` and `hosts/alastor/krater.nix` in that repo (section 0.1).
+- **On weft: the NixOS module.** Krater isn't run with Compose there: its containers are systemd units defined
+  in [patchworklabsorg/infra](https://github.com/patchworklabsorg/infra), behind nginx on weft and Traefik on
+  alastor, with agenix secrets: `modules/krater` and `hosts/weft/krater.nix` in that repo (section 0.1).
 - **On any other Docker host: this Compose file**, with the opt-in `proxy` (Caddy, automatic TLS) and `backup`
   profiles. Sections 2 to 5 describe that path.
 
 Section 1 (DNS, Weave, Slack, Vast) applies to both. The image builds for arm64, which alastor is, as well as amd64
 (checked under emulation; not yet run on arm64 hardware).
 
-### 0.1 On alastor (NixOS)
+### 0.1 On weft (NixOS)
 
-There's no registry image. `krater-build` fetches one pushed commit of this repo, builds it on alastor with this
-repo's `Dockerfile` and tags it `krater:<sha>`. A deploy is the manual `Deploy` workflow
-(`.github/workflows/deploy.yml`), which runs as the `krater-deploy` user:
+There's no registry image. `krater-build` fetches one pushed commit of this repo, builds it on weft with this
+repo's `Dockerfile` and tags it `krater:<sha>`. Staging deploys itself: the `Deploy` workflow
+(`.github/workflows/deploy.yml`) runs after `CI` passes on `main`, joins the tailnet as `tag:ci-krater` and runs
+these steps over SSH (port 2222) as the `krater-deploy` user. Its key may only run that deploy command, which
+also puts the old commit back in `source-rev` if the build fails. It deploys only the tip of `main`: if the tip's CI
+fails, staging stays on the last good deploy until a fix lands. Run it by hand from the Actions tab to deploy the tip
+of `main` again. Production has no CI deploy yet.
 
 ```bash
 echo <full sha> > /var/lib/krater/source-rev
@@ -26,7 +30,7 @@ sudo systemctl start krater-build     # the running site keeps serving meanwhile
 sudo systemctl restart krater-web     # migrates, then starts; krater-worker follows
 ```
 
-Settings live in `hosts/alastor/krater.nix` (hostnames, Weave client id, the fallback commit). The proposed hostnames
+Settings live in `hosts/weft/krater.nix` (hostnames, Weave client id, the fallback commit). The proposed hostnames
 are `krater` and `krater-storage` under `patchworklabs.org`, added by a PR to
 [patchworklabsorg/dns](https://github.com/patchworklabsorg/dns). They're proxied through Cloudflare like Weave's,
 whose edge certificate covers only one subdomain level. Behind Cloudflare and Traefik, `KRATER_TRUSTED_PROXY_COUNT`
@@ -34,8 +38,8 @@ probably needs to be 2 (see the host file). Secrets are the agenix file
 `secrets/krater-env.age`, with the keys listed at the top of `modules/krater/default.nix`, plus
 `secrets/central-prod-krater.age` (the database password alone, for skein); infra's `bin/new-krater-secrets` writes
 both. The module splits the env file so each container gets only its own. Getting a module change
-onto alastor takes a merge in `patchworklabsorg/infra`, then `nix flake update patchwork-infra` and a deploy from
-`jaspermayone/infra`. Krater releases don't need that, only the `Deploy` workflow.
+onto weft takes a merge in `patchworklabsorg/infra` and `deploy .#weft` from that repo. Krater releases don't need
+that, only the `Deploy` workflow.
 
 The database is Krater's schema `krater` in `patchwork_central` on skein (infra's `modules/central-db`), not a
 Postgres of its own: the role `krater` has `search_path = krater`, so Krater's tables, its procrastinate queue and
