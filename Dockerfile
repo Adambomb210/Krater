@@ -18,26 +18,29 @@ COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /uvx /usr/local/bin/
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
+    UV_CACHE_DIR=/home/krater/.cache/uv \
     PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH"
 
+# The app runs as krater (uid and gid 999, as before). Every file under /app is written as krater, by
+# COPY --chown and by `uv sync` running as krater, so no `chown -R` layer copies the whole venv again.
+# That step took minutes on a slow disk.
+RUN groupadd --system --gid 999 krater \
+    && useradd --system --uid 999 --gid krater --create-home --home-dir /home/krater krater \
+    && install -d -o krater -g krater /app
 WORKDIR /app
+USER krater
 
 # Install dependencies before copying the rest of the source, so `docker build` caches this layer as
 # long as pyproject.toml / uv.lock haven't changed.
-COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv \
+COPY --chown=krater:krater pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/home/krater/.cache/uv,uid=999,gid=999 \
     uv sync --frozen --no-install-project --no-dev
 
-COPY . .
-RUN --mount=type=cache,target=/root/.cache/uv \
+COPY --chown=krater:krater . .
+RUN --mount=type=cache,target=/home/krater/.cache/uv,uid=999,gid=999 \
     uv sync --frozen --no-dev
-COPY --from=runner /out/krater-runner-linux-amd64 /app/runner/dist/krater-runner-linux-amd64
-
-RUN groupadd --system krater \
-    && useradd --system --gid krater --create-home --home-dir /home/krater krater \
-    && chown -R krater:krater /app
-USER krater
+COPY --chown=krater:krater --from=runner /out/krater-runner-linux-amd64 /app/runner/dist/krater-runner-linux-amd64
 
 EXPOSE 8000
 
