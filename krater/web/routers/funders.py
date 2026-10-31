@@ -1,5 +1,5 @@
-"""Sharing proposals with funders: `/admin/funders/ospool`, admins only. The page lists the OSPool-ready projects;
-the export gives them as CSV or PDF (`krater.services.funder_packet` has the rules)."""
+"""Sharing proposals with funders: `/admin/funders/ospool`, admins only. The page lists every project; the admin
+ticks the ones to send and gets them as a PDF (`krater.services.funder_packet` has the rules)."""
 
 from __future__ import annotations
 
@@ -26,8 +26,6 @@ router = APIRouter()
 
 PAGE = "/admin/funders/ospool"
 
-_MEDIA_TYPES = {"csv": "text/csv; charset=utf-8", "pdf": "application/pdf"}
-
 
 @router.get(PAGE)
 def ospool_page(
@@ -35,21 +33,16 @@ def ospool_page(
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(require_admin)],
     weave_client: Annotated[WeaveClient, Depends(get_weave_client)],
-    include_pending: bool = False,
 ):
-    try:
-        # A page view may use the directory cache; the export checks again, fresh.
-        packet = funder_packet.build(db_session, weave_client, actor, include_pending=include_pending, fresh=False)
-    except FunderPacketUnavailable:
-        packet = None
+    # A page view may use the directory cache; the export asks Weave again, fresh.
+    candidates = funder_packet.candidates(db_session, weave_client, actor)
     return templates.TemplateResponse(
         request,
         "admin/funders.html",
         {
-            "packet": packet,
-            "include_pending": include_pending,
+            "candidates": candidates,
+            "weave_down": any(row.residency is None for row in candidates),
             "names_full": site_settings.current(db_session).gallery_minor_names is GalleryMinorNames.FULL,
-            "team_text": funder_export.team_text,
         },
     )
 
@@ -60,32 +53,26 @@ def ospool_export(
     db_session: Annotated[Session, Depends(get_session)],
     actor: Annotated[Actor, Depends(require_admin)],
     weave_client: Annotated[WeaveClient, Depends(get_weave_client)],
-    file_format: Annotated[str, Form(alias="format")] = "",
     project_id: Annotated[list[uuid.UUID] | None, Form()] = None,
-    include_pending: Annotated[bool, Form()] = False,
 ):
-    back = f"{PAGE}?include_pending=true" if include_pending else PAGE
     try:
-        packet = funder_packet.build(
-            db_session, weave_client, actor, include_pending=include_pending, project_ids=project_id or []
-        )
-        funder_packet.record_export(db_session, actor, packet, file_format=file_format)
+        packet = funder_packet.build(db_session, weave_client, actor, project_ids=project_id or [])
+        funder_packet.record_export(db_session, actor, packet)
     except FunderPacketUnavailable as exc:
         db_session.rollback()
         flash(request, str(exc), "error")
-        return RedirectResponse(back, status_code=303)
+        return RedirectResponse(PAGE, status_code=303)
     except ValidationFailed as exc:
         db_session.rollback()
         flash(request, " ".join(exc.errors.values()), "error")
-        return RedirectResponse(back, status_code=303)
-    # The byte-order mark makes Excel read the CSV as UTF-8; Sheets and Numbers ignore it.
-    body = funder_export.to_csv(packet).encode("utf-8-sig") if file_format == "csv" else funder_export.to_pdf(packet)
+        return RedirectResponse(PAGE, status_code=303)
+    body = funder_export.to_pdf(packet)
     db_session.commit()
     return Response(
         content=body,
-        media_type=_MEDIA_TYPES[file_format],
+        media_type="application/pdf",
         headers={
-            "Content-Disposition": f'attachment; filename="{funder_export.filename(packet, file_format)}"',
+            "Content-Disposition": f'attachment; filename="{funder_export.filename(packet)}"',
             "Cache-Control": "no-store",
         },
     )

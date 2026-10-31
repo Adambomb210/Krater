@@ -1,10 +1,8 @@
-"""The funder packet's CSV and PDF (`krater.web.funder_export`). Members wrote most of the text in them, so a
-formula or markup in a title must not run, and a character the PDF font lacks must not break the file."""
+"""The funder packet's PDF (`krater.web.funder_export`). Members wrote most of the text in it, so markup in a title
+must not run, and a character the PDF font lacks must not break the file."""
 
 from __future__ import annotations
 
-import csv
-import io
 import uuid
 from datetime import UTC, datetime
 
@@ -26,6 +24,7 @@ def _row(**fields) -> PacketRow:
         "team_names": ["Ada Lead", "Bea"],
         "unnamed": 0,
         "team_size": 2,
+        "all_us_residents": True,
     }
     return PacketRow(**{**values, **fields})
 
@@ -34,38 +33,15 @@ def _packet(*rows: PacketRow) -> Packet:
     return Packet(
         funder="ospool",
         generated_at=datetime(2026, 10, 25, 12, tzinfo=UTC),
-        include_pending=False,
         rows=list(rows),
-        left_out=0,
     )
 
 
-def test_the_csv_has_one_row_per_project_with_dollar_amounts() -> None:
-    rows = list(csv.reader(io.StringIO(funder_export.to_csv(_packet(_row())))))
-
-    assert rows[0] == list(funder_export.CSV_COLUMNS)
-    assert rows[1] == [
-        "Rover",
-        "Maps caves.",
-        "Training a mapping model.",
-        "Approved",
-        "123.45",
-        "100.00",
-        "2× A100 × 40h, on-demand",
-        "Ada Lead, Bea",
-        "2",
-        "Every team member is a verified US resident",
-    ]
-
-
-def test_a_formula_in_member_text_does_not_run_in_a_spreadsheet() -> None:
-    row = _row(title='=HYPERLINK("https://evil.example")', summary="+1", compute_use="@SUM(A1)")
-
-    [_, cells] = list(csv.reader(io.StringIO(funder_export.to_csv(_packet(row)))))
-
-    assert cells[0].startswith("'=")
-    assert cells[1] == "'+1"
-    assert cells[2] == "'@SUM(A1)"
+def test_each_project_says_whether_its_team_is_all_verified_us_residents() -> None:
+    assert funder_export.residency_text(_row()) == "Every team member is a verified US resident"
+    assert (
+        funder_export.residency_text(_row(all_us_residents=False)) == "Not every team member is a verified US resident"
+    )
 
 
 def test_unnamed_members_are_counted_not_named() -> None:
@@ -83,4 +59,4 @@ def test_the_pdf_is_a_pdf_even_with_markup_and_characters_the_font_lacks() -> No
 
 
 def test_the_file_name_says_who_and_when() -> None:
-    assert funder_export.filename(_packet(), "pdf") == "ganymede-ospool-2026-10-25.pdf"
+    assert funder_export.filename(_packet()) == "ganymede-ospool-2026-10-25.pdf"

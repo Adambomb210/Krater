@@ -1,10 +1,8 @@
-"""The funder packet's files: CSV for a spreadsheet and PDF to send as is (`krater.services.funder_packet` decides
-what is in them). Members wrote most of the text, so the CSV defuses spreadsheet formulas and the PDF escapes
-reportlab's markup."""
+"""The funder packet's PDF, to send as is (`krater.services.funder_packet` decides what is in it). Members wrote most
+of the text, so the PDF escapes reportlab's markup and replaces characters its font can't draw."""
 
 from __future__ import annotations
 
-import csv
 import io
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -23,22 +21,6 @@ from krater.web.money import format_cents
 
 FUNDER_NAMES = {"ospool": "OSPool"}
 
-CSV_COLUMNS = (
-    "Project",
-    "Summary",
-    "How the compute is used",
-    "Status",
-    "Requested (USD)",
-    "Granted (USD)",
-    "GPU estimate",
-    "Team",
-    "Team size",
-    "US residency",
-)
-
-#: A cell starting with one of these runs as a formula in Excel and Sheets (CSV injection).
-_FORMULA_STARTS = ("=", "+", "-", "@", "\t", "\r")
-
 # Vera ships with reportlab and covers Latin-1. A TrueType font, unlike the PDF base fonts, lets `_printable` know
 # exactly which characters it can draw.
 _FONT, _FONT_BOLD = "KraterVera", "KraterVera-Bold"
@@ -47,12 +29,16 @@ _INK = colors.HexColor("#2a2050")
 _GRAPE = colors.HexColor("#6c3ec1")
 _HAIRLINE = colors.HexColor("#c7b7e2")
 
-#: Every row says so: the packet holds only teams of verified US residents.
-RESIDENCY_TEXT = "Every team member is a verified US resident"
+RESIDENTS_TEXT = "Every team member is a verified US resident"
+NOT_RESIDENTS_TEXT = "Not every team member is a verified US resident"
 
 
-def filename(packet: Packet, file_format: str) -> str:
-    return f"ganymede-{packet.funder}-{packet.generated_at:%Y-%m-%d}.{file_format}"
+def filename(packet: Packet) -> str:
+    return f"ganymede-{packet.funder}-{packet.generated_at:%Y-%m-%d}.pdf"
+
+
+def residency_text(row: PacketRow) -> str:
+    return RESIDENTS_TEXT if row.all_us_residents else NOT_RESIDENTS_TEXT
 
 
 def team_text(row: PacketRow) -> str:
@@ -61,37 +47,6 @@ def team_text(row: PacketRow) -> str:
         others = f"{row.unnamed} member{'s' if row.unnamed != 1 else ''} not named"
         names = f"{names} and {others}" if names else others.capitalize()
     return names
-
-
-def _dollars(cents: int) -> str:
-    whole, remainder = divmod(cents, 100)
-    return f"{whole}.{remainder:02d}"
-
-
-def _cell(value: str) -> str:
-    return "'" + value if value.startswith(_FORMULA_STARTS) else value
-
-
-def to_csv(packet: Packet) -> str:
-    out = io.StringIO()
-    writer = csv.writer(out)
-    writer.writerow(CSV_COLUMNS)
-    for row in packet.rows:
-        writer.writerow(
-            [
-                _cell(row.title),
-                _cell(row.summary),
-                _cell(row.compute_use),
-                row.status_label,
-                _dollars(row.requested_cents),
-                _dollars(row.granted_cents),
-                row.gpu.text if row.gpu else "",
-                _cell(team_text(row)),
-                row.team_size,
-                RESIDENCY_TEXT,
-            ]
-        )
-    return out.getvalue()
 
 
 def _register_fonts() -> None:
@@ -125,8 +80,7 @@ def to_pdf(packet: Packet) -> bytes:
             _printable(
                 f"Prepared by Patchwork Labs on {packet.generated_at:%B} {packet.generated_at.day}, "
                 f"{packet.generated_at:%Y}. {len(packet.rows)} project{'s' if len(packet.rows) != 1 else ''}. "
-                "Every team member of every project here is a verified US resident, checked in Weave when this "
-                "file was made. Amounts are in US dollars."
+                "US residency is as Weave reported it when this file was made. Amounts are in US dollars."
             ),
             note,
         ),
@@ -141,7 +95,7 @@ def to_pdf(packet: Packet) -> bytes:
             ("Granted", format_cents(row.granted_cents)),
             ("GPU estimate", row.gpu.text if row.gpu else "None given"),
             ("Team", team_text(row)),
-            ("US residency", RESIDENCY_TEXT),
+            ("US residency", residency_text(row)),
         ]
         table = Table(
             [
@@ -187,4 +141,4 @@ def to_pdf(packet: Packet) -> bytes:
     return out.getvalue()
 
 
-__all__ = ["CSV_COLUMNS", "RESIDENCY_TEXT", "filename", "team_text", "to_csv", "to_pdf"]
+__all__ = ["NOT_RESIDENTS_TEXT", "RESIDENTS_TEXT", "filename", "residency_text", "team_text", "to_pdf"]

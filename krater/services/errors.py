@@ -117,10 +117,11 @@ class UsResidencyCheckUnavailable(InvalidState):
 
 
 class FunderPacketUnavailable(InvalidState):
-    """Krater couldn't ask Weave about US residency, so it made no funder packet (`krater.services.funder_packet`):
-    a packet that leaves Krater lists only teams checked just now, never from a cache."""
+    """Krater couldn't ask Weave for the teams' names and US residency, so it made no funder packet
+    (`krater.services.funder_packet`): what leaves Krater is checked just now, never from a cache."""
 
     def __init__(self) -> None:
         super().__init__(
-            "Krater couldn't reach Weave to check the teams' US residency, so it made no packet. Try again in a minute."
+            "Krater couldn't reach Weave for the teams' names and US residency, so it made no PDF. "
+            "Try again in a minute."
         )

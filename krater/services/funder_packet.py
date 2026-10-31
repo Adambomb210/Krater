@@ -1,19 +1,20 @@
 """The funder packet: the proposals an admin shares with a funder, for now OSPool (docs/SPEC.md "Funder packet").
 
-OSPool approves every project after Patchwork's own review (`krater.services.residency`), so an admin sends it the
-projects it could take: those whose whole team is verified US residents. The packet is what leaves Krater, so the
-rules here decide what a funder sees.
+The admin decides what goes to OSPool. The page lists every project, whatever its status, and the admin ticks the
+ones to send; Krater makes them into a PDF the admin sends themselves. The packet is what leaves Krater, so the rules
+here decide what a funder sees.
 
-- **Which projects.** Approved ones (with a budget, until completion is approved), and with `include_pending` the
-  proposals waiting for review too. Only teams where every member is a verified US resident in Weave. The admin can
-  narrow the packet to the projects they pick.
+- **Which projects.** Exactly the ones the admin ticked. Nothing is filtered or ticked for them: the list shows each
+  project's status and whether its whole team is verified US residents (OSPool takes only US residents), and the
+  admin chooses.
 - **Which fields.** Title, summary, how the team will use the compute, status, the amount requested and granted, the
-  GPU estimate, and the team's names. Names follow the public gallery's rule for members under 18
-  (`krater.services.people.public_names`). Never emails, Patchwork IDs, demographics, secrets, logs or anything
-  else: a field is shared only when it is added here.
-- **Fresh or not.** An export checks residency fresh in Weave and fails closed when Weave can't be reached
-  (`FunderPacketUnavailable`). Only the admin's page view may use the directory cache.
-- **Audit.** Every export writes an `AuditEvent` with the format and the projects in it.
+  GPU estimate, the team's names, and whether every member is a verified US resident. Names follow the public
+  gallery's rule for members under 18 (`krater.services.people.public_names`). Never emails, Patchwork IDs,
+  demographics, secrets, logs or anything else: a field is shared only when it is added here.
+- **Fresh or not.** The export reads names and residency fresh from Weave and fails closed when Weave can't be
+  reached (`FunderPacketUnavailable`). The admin's page view may use the directory cache, and still lists every
+  project when Weave is down.
+- **Audit.** Every export writes an `AuditEvent` with the projects in it.
 """
 
 from __future__ import annotations
@@ -31,25 +32,23 @@ from krater.services import audit, budget, people, residency, site_settings
 from krater.services.actor import Actor
 from krater.services.errors import FunderPacketUnavailable, NotAllowed, ValidationFailed
 from krater.services.guardian import team_users
+from krater.services.residency import TeamResidency
 from krater.weave import WeaveClient, WeaveUnavailableError
 
 AUDIT_EXPORT = "funder_packet_export"
 
 FUNDER_OSPOOL = "ospool"
-FORMATS = ("csv", "pdf")
-
-#: Projects with a granted budget that is still in use: approved, until their completion is approved.
-GRANTED_STATUSES = (
-    ProjectStatus.APPROVED,
-    ProjectStatus.PENDING_COMPLETION_REVIEW,
-    ProjectStatus.COMPLETION_CHANGES_REQUESTED,
-)
+FORMAT_PDF = "pdf"
 
 STATUS_LABELS = {
+    ProjectStatus.DRAFT: "Draft, not submitted",
+    ProjectStatus.PENDING_REVIEW: "Waiting for review",
+    ProjectStatus.CHANGES_REQUESTED: "Changes requested",
     ProjectStatus.APPROVED: "Approved",
     ProjectStatus.PENDING_COMPLETION_REVIEW: "Approved, completion in review",
     ProjectStatus.COMPLETION_CHANGES_REQUESTED: "Approved, completion in review",
-    ProjectStatus.PENDING_REVIEW: "Waiting for review",
+    ProjectStatus.COMPLETED: "Completed",
+    ProjectStatus.WITHDRAWN: "Withdrawn",
 }
 
 
@@ -70,6 +69,24 @@ class GpuEstimate:
 
 
 @dataclass(frozen=True)
+class Candidate:
+    """One project on the admin's list. Only for the admin's page: none of it leaves Krater."""
+
+    project_id: uuid.UUID
+    title: str
+    summary: str
+    status: ProjectStatus
+    requested_cents: int
+    granted_cents: int
+    #: `None` when Weave couldn't be reached for the page view.
+    residency: TeamResidency | None
+
+    @property
+    def status_label(self) -> str:
+        return STATUS_LABELS[self.status]
+
+
+@dataclass(frozen=True)
 class PacketRow:
     """One project as a funder sees it. Everything here may leave Krater."""
 
@@ -85,6 +102,8 @@ class PacketRow:
     #: Team members the packet doesn't name (Weave didn't return them, or the gallery rule hides minors' names).
     unnamed: int
     team_size: int
+    #: Every team member is a verified US resident in Weave, checked when the packet was made.
+    all_us_residents: bool
 
     @property
     def status_label(self) -> str:
@@ -95,10 +114,39 @@ class PacketRow:
 class Packet:
     funder: str
     generated_at: datetime
-    include_pending: bool
     rows: list[PacketRow]
-    #: Candidate projects left out because not every team member is a verified US resident.
-    left_out: int
+
+
+def _require_admin(actor: Actor) -> None:
+    if not actor.is_admin:
+        raise NotAllowed("Only an admin may share proposals with funders.")
+
+
+def _revision(project: Project) -> ProjectRevision | None:
+    # An approved project shows what was approved, not an amendment still in review; any other shows its newest.
+    return project.approved_revision or project.current_revision
+
+
+def candidates(session: Session, weave_client: WeaveClient, actor: Actor) -> list[Candidate]:
+    """Every project, newest first, for the admin to pick from. Admin only. Uses the directory cache, and gives
+    `residency=None` for a project whose team Weave couldn't be asked about."""
+    _require_admin(actor)
+    found = session.scalars(sa.select(Project).order_by(Project.created_at.desc()))
+    rows = []
+    for project in found:
+        revision = _revision(project)
+        rows.append(
+            Candidate(
+                project_id=project.id,
+                title=project.title,
+                summary=revision.summary if revision else "",
+                status=project.status,
+                requested_cents=revision.budget_requested_cents if revision else 0,
+                granted_cents=budget.ceiling_cents(session, project),
+                residency=residency.team_status_for_display(session, weave_client, project),
+            )
+        )
+    return rows
 
 
 def build(
@@ -106,60 +154,50 @@ def build(
     weave_client: WeaveClient,
     actor: Actor,
     *,
-    include_pending: bool = False,
-    project_ids: Collection[uuid.UUID] | None = None,
-    fresh: bool = True,
+    project_ids: Collection[uuid.UUID],
     now: datetime | None = None,
 ) -> Packet:
-    """The OSPool packet. Admin only. `project_ids` narrows it to those projects (any that no longer qualify are
-    left out). `fresh=False` is only for the admin's page view; an export must check residency fresh.
+    """The OSPool packet of the projects the admin chose (`project_ids`; ids Krater doesn't know are ignored). Admin
+    only. Reads names and residency fresh from Weave.
 
     Raises `FunderPacketUnavailable` when Weave can't be reached."""
-    if not actor.is_admin:
-        raise NotAllowed("Only an admin may share proposals with funders.")
-    statuses = [*GRANTED_STATUSES, *([ProjectStatus.PENDING_REVIEW] if include_pending else [])]
-    stmt = sa.select(Project).where(Project.status.in_(statuses)).order_by(Project.created_at)
-    if project_ids is not None:
-        stmt = stmt.where(Project.id.in_(list(project_ids)))
-    candidates = list(session.scalars(stmt))
+    _require_admin(actor)
+    chosen = list(
+        session.scalars(sa.select(Project).where(Project.id.in_(list(project_ids))).order_by(Project.created_at.desc()))
+    )
     minors = site_settings.current(session).gallery_minor_names
 
     rows: list[PacketRow] = []
     try:
-        for project in candidates:
-            if residency.non_residents(session, weave_client, project, fresh=fresh):
-                continue
+        for project in chosen:
             team = team_users(session, project)
-            if not team:
-                continue
             names, unnamed = people.public_names(weave_client, team, minors=minors)
-            rows.append(_row(session, project, team_names=names, unnamed=unnamed, team_size=len(team)))
+            residents = bool(team) and not residency.non_residents(session, weave_client, project, fresh=True)
+            rows.append(
+                _row(session, project, team_names=names, unnamed=unnamed, team_size=len(team), residents=residents)
+            )
     except WeaveUnavailableError as exc:
         raise FunderPacketUnavailable() from exc
-    return Packet(
-        funder=FUNDER_OSPOOL,
-        generated_at=now or datetime.now(UTC),
-        include_pending=include_pending,
-        rows=rows,
-        left_out=len(candidates) - len(rows),
-    )
+    return Packet(funder=FUNDER_OSPOOL, generated_at=now or datetime.now(UTC), rows=rows)
 
 
-def _row(session: Session, project: Project, *, team_names: list[str], unnamed: int, team_size: int) -> PacketRow:
-    # An approved project shows what was approved, not an amendment still in review; a pending proposal shows itself.
-    revision: ProjectRevision = project.approved_revision or project.current_revision
+def _row(
+    session: Session, project: Project, *, team_names: list[str], unnamed: int, team_size: int, residents: bool
+) -> PacketRow:
+    revision = _revision(project)
     return PacketRow(
         project_id=project.id,
         title=project.title,
-        summary=revision.summary,
-        compute_use=revision.compute_use,
+        summary=revision.summary if revision else "",
+        compute_use=revision.compute_use if revision else "",
         status=project.status,
-        requested_cents=revision.budget_requested_cents,
+        requested_cents=revision.budget_requested_cents if revision else 0,
         granted_cents=budget.ceiling_cents(session, project),
-        gpu=_gpu(revision.budget_estimate),
+        gpu=_gpu(revision.budget_estimate if revision else None),
         team_names=team_names,
         unnamed=unnamed,
         team_size=team_size,
+        all_us_residents=residents,
     )
 
 
@@ -174,23 +212,19 @@ def _gpu(estimate: dict | None) -> GpuEstimate | None:
     )
 
 
-def record_export(session: Session, actor: Actor, packet: Packet, *, file_format: str) -> None:
-    """Audit an export of `packet` as `file_format` (`csv` or `pdf`). Refuses an empty packet: there is nothing to
-    send. Flushes, doesn't commit."""
-    if not actor.is_admin:
-        raise NotAllowed("Only an admin may share proposals with funders.")
-    if file_format not in FORMATS:
-        raise ValidationFailed({"format": "Choose CSV or PDF."})
+def record_export(session: Session, actor: Actor, packet: Packet) -> None:
+    """Audit an export of `packet` as a PDF. Refuses an empty packet: there is nothing to send. Flushes, doesn't
+    commit."""
+    _require_admin(actor)
     if not packet.rows:
-        raise ValidationFailed({"project_id": "Choose at least one OSPool-ready project."})
+        raise ValidationFailed({"project_id": "Tick at least one project to send."})
     audit.record(
         session,
         actor,
         AUDIT_EXPORT,
         payload={
             "funder": packet.funder,
-            "format": file_format,
-            "include_pending": packet.include_pending,
+            "format": FORMAT_PDF,
             "project_ids": [str(row.project_id) for row in packet.rows],
         },
     )
@@ -198,12 +232,14 @@ def record_export(session: Session, actor: Actor, packet: Packet, *, file_format
 
 __all__ = [
     "AUDIT_EXPORT",
-    "FORMATS",
+    "FORMAT_PDF",
     "FUNDER_OSPOOL",
-    "GRANTED_STATUSES",
+    "STATUS_LABELS",
+    "Candidate",
     "GpuEstimate",
     "Packet",
     "PacketRow",
     "build",
+    "candidates",
     "record_export",
 ]

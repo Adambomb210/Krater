@@ -6,7 +6,7 @@
 <div class="page-head">
   <div>
     <h1>Share with OSPool</h1>
-    <p class="page-subtitle">Projects whose whole team is verified US residents in Weave, as a CSV or PDF to send to OSPool.</p>
+    <p class="page-subtitle">Tick the projects and proposals to send, and download them as a PDF to send to OSPool.</p>
   </div>
   <div class="page-actions">
     <a class="button" href="/admin">Admin</a>
@@ -14,61 +14,57 @@
 </div>
 
 <p class="notice">
-  The files hold each project's title, summary, compute use, status, amounts requested and granted, GPU estimate and
-  team names. {% if names_full %}Members under 18 are named in full, as the gallery setting says.{% else %}Members
-  under 18 are named as the gallery setting on the admin page says.{% endif %} Never emails, Patchwork IDs,
-  demographics or secrets. Each export checks residency again in Weave, and is recorded in the audit log.
+  OSPool takes only teams whose every member is a verified US resident; each project says whether its team is. The
+  PDF holds each ticked project's title, summary, compute use, status, amounts requested and granted, GPU estimate,
+  team names and that residency line. {% if names_full %}Members under 18 are named in full, as the gallery setting
+  says.{% else %}Members under 18 are named as the gallery setting on the admin page says.{% endif %} Never emails,
+  Patchwork IDs, demographics or secrets. Each download asks Weave again, and is recorded in the audit log.
 </p>
 
-<p class="queue-filter">
-  {% if include_pending %}
-    Showing approved projects and proposals waiting for review. <a href="/admin/funders/ospool">Show approved only</a>
-  {% else %}
-    Showing approved projects. <a href="/admin/funders/ospool?include_pending=true">Also show proposals waiting for review</a>
-  {% endif %}
-</p>
+{% if weave_down %}
+  <p class="flash flash--error">Krater couldn't reach Weave to check every team's US residency. You can still tick
+  projects; the download asks Weave again.</p>
+{% endif %}
 
-{% if packet is none %}
+{% if not candidates %}
   <div class="empty-state">
-    <p class="empty-state__title">Krater couldn't reach Weave to check US residency.</p>
-    <p>Try again in a minute.</p>
-  </div>
-{% elif not packet.rows %}
-  <div class="empty-state">
-    <p class="empty-state__title">No project has a whole team of verified US residents yet.</p>
-    {% if packet.left_out %}<p>{{ packet.left_out }} project{{ "s" if packet.left_out != 1 }} left out: not every member is a verified US resident.</p>{% endif %}
+    <p class="empty-state__title">No projects or proposals yet.</p>
   </div>
 {% else %}
   <form method="post" action="/admin/funders/ospool/export" class="stack">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    {% if include_pending %}<input type="hidden" name="include_pending" value="true">{% endif %}
-    <section class="card card--flush" aria-label="OSPool-ready projects">
+    <section class="card card--flush" aria-label="Projects and proposals">
       <ul class="project-list">
-        {% for row in packet.rows %}
+        {% for row in candidates %}
           <li class="project-list__item">
             <div class="project-list__main">
               <label class="project-list__title">
-                <input type="checkbox" name="project_id" value="{{ row.project_id }}" checked>
+                <input type="checkbox" name="project_id" value="{{ row.project_id }}">
                 {{ row.title or "Untitled proposal" }}
               </label>
               <span class="project-list__meta">
                 <span class="badge badge--{{ row.status.value }}">{{ row.status_label }}</span>
-                Requested {{ row.requested_cents | dollars }}, granted {{ row.granted_cents | dollars }}{% if row.gpu %} · {{ row.gpu.text }}{% endif %}
+                Requested {{ row.requested_cents | dollars }}, granted {{ row.granted_cents | dollars }}
               </span>
               {% if row.summary %}<span class="project-list__meta">{{ row.summary }}</span>{% endif %}
-              <span class="project-list__meta">Team: {{ team_text(row) }}</span>
+              <span class="project-list__meta">
+                {% if row.residency is none %}
+                  US residency: couldn't check
+                {% elif row.residency.all_residents %}
+                  Every team member is a verified US resident
+                {% else %}
+                  Not OSPool-ready: {{ row.residency.others | length }} of {{ row.residency.team_size }} team
+                  members aren't verified US residents
+                {% endif %}
+              </span>
             </div>
             <a class="button button--small" href="/projects/{{ row.project_id }}">Open</a>
           </li>
         {% endfor %}
       </ul>
     </section>
-    {% if packet.left_out %}
-      <p class="muted">{{ packet.left_out }} other project{{ "s" if packet.left_out != 1 }} left out: not every member is a verified US resident.</p>
-    {% endif %}
     <div class="form-actions">
-      <button class="button button--primary" type="submit" name="format" value="pdf">Download PDF</button>
-      <button class="button" type="submit" name="format" value="csv">Download CSV</button>
+      <button class="button button--primary" type="submit">Download PDF</button>
       <p class="muted">Only the ticked projects go in the file.</p>
     </div>
   </form>
