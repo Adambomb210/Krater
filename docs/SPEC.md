@@ -67,18 +67,21 @@ changes don't spread through the app. The contract is in [weave-integration.md](
 
 **Weave owns roles** (maintainer decision, Oct 7, 2026). Krater never stores a role as its own source of truth:
 
-- Krater is an OAuth app in Weave with three app-defined role keys: `member`, `reviewer` and `admin`. A Weave admin
-  gives people these roles. Weave sends the keys a user holds in the `roles` claim and in each directory record.
+- **Every Patchwork member can use Krater and submit a proposal** (maintainer decision, Oct 30, 2026). Weave decides
+  who that is through the Krater app's access policy: whoever Weave signs in to Krater, or its directory returns, is
+  `ganymede:member`. There is no member role in Weave.
+- Krater is an OAuth app in Weave with two app-defined role keys: `reviewer` and `admin`. A Weave admin gives them to
+  people or groups (on staging, the Ganymede Reviewer and Ganymede Admin groups). Weave sends the keys a user holds in
+  the `roles` claim and in each directory record.
 - The `roles` field is the source of truth. Only when Weave sends no `roles` field at all (absent, not empty) does Krater
-  fall back to group slugs linked to the Krater app: `ganymede-members`, `krater-reviewers` and `krater-admins`. The keys
-  and slugs are settings (`KRATER_WEAVE_ROLE_*`, `KRATER_WEAVE_GROUP_*`).
+  fall back to group slugs linked to the Krater app: `krater-reviewers` and `krater-admins`. The keys and slugs are
+  settings (`KRATER_WEAVE_ROLE_*`, `KRATER_WEAVE_GROUP_*`).
 - Inside Krater the roles keep the names `ganymede:member`, `ganymede:reviewer` and `ganymede:admin`, so review snapshots
   and approval policies read the same. `krater.weave` translates at the boundary. Later tiers
   (`ganymede:reviewer:<tier>`) will need a matching Weave role key.
-- Sign-in refuses anyone without `member` ("ask a Ganymede admin to give you the member role in Weave").
 - Every state-changing action re-checks Weave: web actions through `fresh_actor`, Slack Approve/Reject clicks through
   the same `users.authorize`. Krater asks Weave's directory API for the user by `sub`, with an access token of its own
-  OAuth app (client_credentials). A 404, an inactive account or a missing `member` role refuses the action. If Weave
+  OAuth app (client_credentials). A 404 or an inactive account refuses the action. If Weave
   can't be reached, the action fails rather than guessing. These lookups are never cached; only page views may reuse
   a directory answer, for up to 60 seconds.
 - Krater keeps `users.roles_cached` (what Weave said last) for display and navigation only.
@@ -204,7 +207,7 @@ The proposal form (`projects/_application.html`) asks, in three parts:
 
 - **You.** Name, email and Patchwork ID are shown from Weave, not asked; country, age and parental approval are
   Weave's to confirm, not the form's. Then: *Who are you, and what's your experience in this field?* (300 words at most), and *Applying as a
-  group?*: teammates invited by Patchwork ID or email (see "Project teams"; more can be added later).
+  group?*: teammates invited by Patchwork ID (see "Project teams"; more can be added later).
 - **The project.** A name; *What is your project, in a sentence normal people would understand?* (one sentence, 300
   characters); *What is it, what does it build on or depart from, and why does it matter?* (the write-up, 500 words at
   most); an optional repo link; *Are you doing this as part of a contest or with the help of a professor?* (neither, a
@@ -296,9 +299,10 @@ mirrored into Krater in v1; the project page links to the channel instead.
 ## Project teams
 
 A project has one **lead** (its submitter) and any number of **team members**. Anyone on the team, or an admin, can
-invite a Ganymede member by Patchwork ID or email, at any time until the project is completed or withdrawn. Krater
-finds them in Weave's directory and stores only their Patchwork ID. The invitation grants nothing until they accept
-it from their Krater home page or the project page; then they can do everything the lead can except withdraw the
+invite a Patchwork member by Patchwork ID (the Weave ID on their Weave account page), at any time until the project is
+completed or withdrawn. Krater finds them in Weave's directory and stores only their Patchwork ID. It can't find
+people by email: Weave's directory has no search by email, and with no member role there is no member list to search.
+The invitation grants nothing until they accept it from their Krater home page or the project page; then they can do everything the lead can except withdraw the
 project or remove others: edit and submit drafts, start amendments and the completion, see compute output and files,
 manage project secrets, and run jobs and boxes. A member can leave; the lead or an admin can remove anyone, but not
 while that person has a job or box on the project that hasn't finished (it would keep running on the project's

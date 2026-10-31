@@ -63,10 +63,12 @@ tests/             mirrors krater/ layout
   `krater.vast.usd_to_microusd`); Vast's JSON floats are parsed with `Decimal(str(x))` in `krater.vast` and never
   used as floats. Compare a rate with a `*_cents` cap only after converting one of them explicitly.
 - **Primary keys are UUIDs** (`uuid.uuid4`), safe to show in URLs.
-- **Weave owns roles.** Krater's role keys in Weave are `member`, `reviewer` and `admin`, sent in the `roles` claim
-  and in directory records. Only when the `roles` field is absent does Krater fall back to the group slugs
-  `ganymede-members`, `krater-reviewers` and `krater-admins`. `krater.weave.roles` is the one place that maps them to
-  Krater's internal names `ganymede:member`, `ganymede:reviewer`, `ganymede:admin`; nothing else knows the keys or slugs.
+- **Every Patchwork member is a Ganymede member.** Whoever Weave lets use the Krater app (it signs them in, or its
+  directory returns them) holds `ganymede:member`; there is no member role in Weave.
+- **Weave owns roles.** Krater's role keys in Weave are `reviewer` and `admin`, sent in the `roles` claim and in
+  directory records. Only when the `roles` field is absent does Krater fall back to the group slugs `krater-reviewers`
+  and `krater-admins`. `krater.weave.roles` is the one place that maps them to Krater's internal names
+  `ganymede:reviewer`, `ganymede:admin` (and adds `ganymede:member`); nothing else knows the keys or slugs.
   Every state-changing action (`fresh_actor`, the Slack click path) re-checks Weave's directory by `sub` through
   `krater.services.users.authorize`, and fails closed if Weave is down. `users.roles_cached` is for display only.
   Krater has no role tables, no admin users page and no disable switch: those are done in Weave.

@@ -30,26 +30,31 @@ def test_lookup_falls_back_to_the_patchwork_id_when_weave_cant_say(weave: StubWe
     assert people.lookup(_DownWeave(), "PWL1AAAAAAAAA").label == "PWL1AAAAAAAAA"
 
 
-def test_find_member_by_patchwork_id_or_email(weave: StubWeaveClient) -> None:
-    weave.put_user("PWL1AAAAAAAAA", name="Ada", email="Ada@Example.com", roles=["member"])
+def test_find_member_by_patchwork_id_with_no_weave_role(weave: StubWeaveClient) -> None:
+    weave.put_user("PWL1AAAAAAAAA", name="Ada", email="Ada@Example.com", roles=[])
 
-    assert people.find_member(weave, "pwl1aaaaaaaaa").sub == "PWL1AAAAAAAAA"
-    assert people.find_member(weave, " ada@example.COM ").sub == "PWL1AAAAAAAAA"
-    assert people.find_member(weave, "nobody@example.com") is None
+    assert people.find_member(weave, " pwl1aaaaaaaaa ").sub == "PWL1AAAAAAAAA"
+    assert people.find_member(weave, "PWL0NOSUCHONE") is None
     assert people.find_member(weave, "") is None
 
 
-def test_find_member_only_finds_active_ganymede_members(weave: StubWeaveClient) -> None:
-    weave.put_user("PWL1NOTAMEMBR", name="Outsider", email="out@example.com", roles=[])
-    weave.put_user("PWL1LOCKED000", name="Locked", email="locked@example.com", roles=["member"], active=False)
+def test_find_member_finds_nobody_by_email(weave: StubWeaveClient) -> None:
+    # Weave's directory can't search by email, and there's no member list to match against.
+    weave.put_user("PWL1AAAAAAAAA", name="Ada", email="ada@example.com", roles=[])
 
-    for query in ("PWL1NOTAMEMBR", "out@example.com", "PWL1LOCKED000", "locked@example.com"):
-        assert people.find_member(weave, query) is None
+    assert people.is_email("ada@example.com")
+    assert people.find_member(weave, "ada@example.com") is None
+
+
+def test_find_member_skips_an_inactive_account(weave: StubWeaveClient) -> None:
+    weave.put_user("PWL1LOCKED000", name="Locked", email="locked@example.com", roles=[], active=False)
+
+    assert people.find_member(weave, "PWL1LOCKED000") is None
 
 
 def test_user_for_creates_a_row_holding_only_the_patchwork_id(db_session: Session, weave: StubWeaveClient) -> None:
-    weave.put_user("PWL1NEWCOMER0", name="New", email="new@example.com", roles=["member"])
-    record = people.find_member(weave, "new@example.com")
+    weave.put_user("PWL1NEWCOMER0", name="New", email="new@example.com", roles=[])
+    record = people.find_member(weave, "PWL1NEWCOMER0")
 
     user = people.user_for(db_session, record)
 

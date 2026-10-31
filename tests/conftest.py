@@ -38,7 +38,8 @@ OTHER_MEMBER_SUB = "PWLMEMBERTWO"
 REVIEWER_SUB = "PWLREVIEWERONE"
 OTHER_REVIEWER_SUB = "PWLREVIEWERTWO"
 ADMIN_SUB = "PWLADMINONE"
-NON_MEMBER_SUB = "PWLNONMEMBER"
+# A Patchwork member with no Weave role: still a Ganymede member.
+NO_ROLE_SUB = "PWLNOROLE"
 
 
 @pytest.fixture(scope="session")

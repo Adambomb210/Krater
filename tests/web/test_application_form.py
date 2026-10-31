@@ -186,7 +186,7 @@ def test_teammates_are_invited_as_the_proposal_is_saved(client: TestClient, logi
     login_as(MEMBER_SUB)
     _seed_price(db_session)
 
-    response = _create(client, teammates="max@example.com")
+    response = _create(client, teammates=OTHER_MEMBER_SUB.lower())
 
     assert response.status_code == 303
     revision = _revision(db_session, response)
@@ -198,10 +198,21 @@ def test_an_unknown_teammate_saves_nothing(client: TestClient, login_as, db_sess
     login_as(MEMBER_SUB)
     _seed_price(db_session)
 
-    response = _create(client, teammates="max@example.com, nobody@example.com")
+    response = _create(client, teammates=f"{OTHER_MEMBER_SUB}, PWL0NOSUCHONE")
 
     assert response.status_code == 422
-    assert "No Ganymede member has this Patchwork ID or email: nobody@example.com." in response.text
+    assert "No Patchwork member has this Patchwork ID: PWL0NOSUCHONE." in response.text
+    assert db_session.scalar(sa.select(sa.func.count()).select_from(Project)) == 0
+
+
+def test_a_teammate_email_asks_for_the_patchwork_id(client: TestClient, login_as, db_session: Session) -> None:
+    login_as(MEMBER_SUB)
+    _seed_price(db_session)
+
+    response = _create(client, teammates="max@example.com")
+
+    assert response.status_code == 422
+    assert "Ask them for their Patchwork ID" in response.text
     assert db_session.scalar(sa.select(sa.func.count()).select_from(Project)) == 0
 
 

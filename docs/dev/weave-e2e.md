@@ -26,7 +26,8 @@ idempotently create, in Weave's own database:
   itself refuses them. The script **recreates** the app every run, because Weave hashes its secret at rest and
   shows it only right after creation.
 - Krater's app roles `member`, `reviewer` and `admin` on that app. The member gets `member`. The admin gets `member`
-  and `admin`. The non-member gets no role.
+  and `admin`. The "non-member" gets no role. Krater no longer reads `member` (every Patchwork member is a Ganymede
+  member), so the script's `member` role is ignored and the "non-member" signs in as a member with no other role.
 
 The fixture then says `"roles_provisioned": true`, and the role tests in `tests/live/test_weave_live.py` run.
 

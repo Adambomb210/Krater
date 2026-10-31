@@ -99,14 +99,8 @@ def auth_callback(
     except WeaveUnavailableError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Weave is unavailable") from exc
 
-    result = sign_in(db_session, identity)
-    # Committed whatever the outcome, so the user's cached roles match what Weave just said.
+    user = sign_in(db_session, identity)
     db_session.commit()
-    if result.status == "not_a_member":
-        # Also drops any earlier signed-in session in this browser: a refused sign-in leaves nobody signed in.
-        request.session.clear()
-        return templates.TemplateResponse(request, "auth/not_a_member.html", status_code=status.HTTP_403_FORBIDDEN)
-    user = result.user
 
     # Session fixation: throw away everything the pre-login session held (state/nonce/verifier included)
     # before writing an authenticated identity into it.

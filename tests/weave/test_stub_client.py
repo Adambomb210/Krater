@@ -20,15 +20,13 @@ def test_bundled_fixture_covers_every_role(stub_client: StubWeaveClient) -> None
     users = stub_client.list_all_users()
     assert len(users) >= 6
 
-    members = [u for u in users if GROUP_MEMBER in u.roles]
     reviewers = [u for u in users if GROUP_REVIEWER in u.roles]
     admins = [u for u in users if GROUP_ADMIN in u.roles]
-    non_members = [u for u in users if GROUP_MEMBER not in u.roles]
 
-    assert len(members) >= 4  # plain members + reviewers + admin all hold member
+    # Everyone Weave lets use Krater is a member; there's no member role to leave out.
+    assert all(GROUP_MEMBER in u.roles for u in users)
     assert len(reviewers) >= 2
     assert len(admins) >= 1
-    assert len(non_members) >= 1
 
 
 def test_the_fixture_exercises_the_group_fallback(stub_client: StubWeaveClient) -> None:
@@ -86,7 +84,7 @@ def test_a_custom_role_mapping_is_applied(tmp_path) -> None:
     assert record is not None and record.roles == frozenset({GROUP_MEMBER})
 
 
-def test_a_minimal_fixture_entry_defaults_to_verified_and_active_with_no_roles(tmp_path) -> None:
+def test_a_minimal_fixture_entry_defaults_to_a_verified_active_member(tmp_path) -> None:
     fixture = tmp_path / "users.json"
     fixture.write_text('[{"sub": "PWLMIN", "name": "Min", "email": "min@example.com"}]')
 
@@ -97,7 +95,7 @@ def test_a_minimal_fixture_entry_defaults_to_verified_and_active_with_no_roles(t
     assert record.active is True
     assert record.slack_id is None
     assert record.slack_member is None
-    assert record.roles == frozenset()
+    assert record.roles == frozenset({GROUP_MEMBER})
 
 
 def test_the_stub_quilt_token_is_a_fixed_fake_and_counts_calls() -> None:

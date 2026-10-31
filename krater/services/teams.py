@@ -63,7 +63,7 @@ def _require_open(project: Project) -> None:
 
 
 def invite(session: Session, actor: Actor, weave_client: WeaveClient, *, project: Project, query: str) -> ProjectMember:
-    """Invite the Ganymede member whose Patchwork ID or email is `query` to `project`'s team.
+    """Invite the Ganymede member whose Patchwork ID is `query` to `project`'s team.
 
     The team (or an admin) invites. The invitee must be an active member in Weave. Raises `ValidationFailed` on the
     `member` field for an unknown person or someone already on (or invited to) the team; `WeaveUnavailableError`
@@ -73,11 +73,13 @@ def invite(session: Session, actor: Actor, weave_client: WeaveClient, *, project
         raise NotAllowed("Only the project's team or an admin can invite people to it.")
     _require_open(project)
     if not query.strip():
-        raise ValidationFailed({"member": "Enter a Patchwork ID or email."})
+        raise ValidationFailed({"member": "Enter a Patchwork ID."})
+    if people.is_email(query):
+        raise ValidationFailed({"member": people.NO_EMAIL_SEARCH})
 
     record = people.find_member(weave_client, query)
     if record is None:
-        raise ValidationFailed({"member": "No Ganymede member has that Patchwork ID or email."})
+        raise ValidationFailed({"member": "No Patchwork member has that Patchwork ID."})
     user = people.user_for(session, record)
     if user.id == project.submitter_id:
         raise ValidationFailed({"member": "They lead this project already."})

@@ -53,14 +53,12 @@ class Settings(BaseSettings):
     # plain-http redirect URIs, so the CLI's default is copy-and-paste (`urn:ietf:wg:oauth:2.0:oob`).
     weave_cli_loopback: bool = False
 
-    # How Weave's answers map onto Krater's roles (`ganymede:member`, `ganymede:reviewer`,
-    # `ganymede:admin`). The `roles` claim (Krater's app-defined role keys in Weave) is the source of
-    # truth. Only when Weave sends no `roles` at all does Krater fall back to these group slugs.
+    # How Weave's answers map onto Krater's roles `ganymede:reviewer` and `ganymede:admin`. Everyone Weave lets use
+    # Krater is `ganymede:member`, with no role in Weave. The `roles` claim (Krater's app-defined role keys in Weave)
+    # is the source of truth. Only when Weave sends no `roles` at all does Krater fall back to these group slugs.
     # See `krater.weave.roles`.
-    weave_role_member: str = "member"
     weave_role_reviewer: str = "reviewer"
     weave_role_admin: str = "admin"
-    weave_group_member: str = "ganymede-members"
     weave_group_reviewer: str = "krater-reviewers"
     weave_group_admin: str = "krater-admins"
 

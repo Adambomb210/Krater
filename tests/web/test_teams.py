@@ -22,7 +22,7 @@ def _invite(client: TestClient, project_id, member: str):
     )
 
 
-def test_the_lead_invites_by_email_and_the_invitee_joins_from_home(
+def test_the_lead_invites_by_patchwork_id_and_the_invitee_joins_from_home(
     client: TestClient, login_as, create_project, db_session: Session, monkeypatch
 ) -> None:
     lead = login_as(MEMBER_SUB)
@@ -30,7 +30,7 @@ def test_the_lead_invites_by_email_and_the_invitee_joins_from_home(
     db_session.commit()
 
     assert "Add a teammate" in client.get(f"/projects/{project.id}").text
-    response = _invite(client, project.id, "max@example.com")
+    response = _invite(client, project.id, OTHER_MEMBER_SUB)
     assert response.status_code == 303
 
     page = client.get(f"/projects/{project.id}").text
@@ -65,11 +65,11 @@ def test_an_unknown_person_redisplays_the_form_with_an_error(
     project = create_project(lead)
     db_session.commit()
 
-    response = _invite(client, project.id, "nobody@example.com")
+    response = _invite(client, project.id, "PWL0NOSUCHONE")
 
     assert response.status_code == 422
-    assert "No Ganymede member has that Patchwork ID or email." in response.text
-    assert 'value="nobody@example.com"' in response.text
+    assert "No Patchwork member has that Patchwork ID." in response.text
+    assert 'value="PWL0NOSUCHONE"' in response.text
 
 
 def test_people_with_no_part_in_the_project_cant_see_or_invite(
@@ -112,7 +112,7 @@ def test_a_reviewer_invited_to_a_team_loses_the_review_form(
     lead = login_as(MEMBER_SUB)
     project = submitted_project(lead)
     db_session.commit()
-    _invite(client, project.id, "rae@example.com")
+    _invite(client, project.id, REVIEWER_SUB)
 
     login_as(REVIEWER_SUB)
     page = client.get(f"/projects/{project.id}").text

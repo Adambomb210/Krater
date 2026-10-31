@@ -30,9 +30,8 @@ def test_get_new_project_form_requires_sign_in(client: TestClient) -> None:
 
 
 def test_a_member_who_lost_ganymede_membership_cannot_create(client: TestClient, login_as, revoke_membership) -> None:
-    """Krater's `/login` already refuses a non-member outright, so the case this route must guard
-    against is a *previously* signed-in member whose live Weave groups no longer include
-    `ganymede:member` -- exactly what `fresh_actor` re-checks on every request."""
+    """A *previously* signed-in member whose account Weave no longer lets use Krater: exactly what
+    `fresh_actor` re-checks on every request."""
     member = login_as(MEMBER_SUB)
     revoke_membership(member)
 

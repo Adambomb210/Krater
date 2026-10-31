@@ -39,10 +39,10 @@ At `http://localhost:3000/admin/oauth_applications`, create a **confidential** a
 
 ### Make yourself a Ganymede admin
 
-Weave owns Krater's roles. As a Weave superadmin, open the Krater app's page in Weave and create the roles `member`,
-`reviewer` and `admin`. Then give yourself `member` and `admin` (and `reviewer` if you want to review). Give
-everyone else their roles the same way. To shut someone out of Krater, remove their roles or app access in Weave and
-revoke their tokens there.
+Weave owns Krater's roles. As a Weave superadmin, open the Krater app's page in Weave and create the roles `reviewer`
+and `admin`. Then give `admin` to yourself or your admin group (and `reviewer` if you want to review). Everyone the
+app's access policy lets in is a member and needs no role. To shut someone out of Krater, restrict the app's access
+or lock their account in Weave and revoke their tokens there.
 
 Every staging user must also have accepted the Code of Conduct. Since patchworklabsorg/weave#171, Weave refuses every
 app to a user who hasn't: sign-in ends on Weave's `/slack` page, and the directory hides them, so Krater treats them as

@@ -264,8 +264,8 @@
       <div class="field">
         <label for="team-member">Add a teammate</label>
         <input type="text" id="team-member" name="member" value="{{ posted.member if error_form == 'team' else '' }}"
-               placeholder="Patchwork ID or email" autocomplete="off"{% if errors.member %} aria-invalid="true"{% endif %}>
-        <p class="field-hint">They need a Patchwork account with Ganymede access. They join once they accept.</p>
+               placeholder="Patchwork ID" autocomplete="off"{% if errors.member %} aria-invalid="true"{% endif %}>
+        <p class="field-hint">They need a Patchwork account; their Patchwork ID is the Weave ID on their Weave account page. They join once they accept.</p>
         {% if errors.member %}<p class="field-error">{{ errors.member }}</p>{% endif %}
       </div>
       <button type="submit" class="button">Invite</button>

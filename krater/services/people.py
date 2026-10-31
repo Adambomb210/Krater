@@ -20,7 +20,6 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from krater.models import GalleryMinorNames, User
-from krater.services.actor import GROUP_MEMBER
 from krater.weave import WeaveClient, WeaveUnavailableError, WeaveUser
 
 logger = logging.getLogger(__name__)
@@ -84,27 +83,30 @@ def public_names(
     return shown, unnamed
 
 
-def find_member(weave_client: WeaveClient, query: str) -> WeaveUser | None:
-    """The active Ganymede member whose Patchwork ID or email is `query`, or `None`.
+#: What a teammate search by email says. Weave's directory has no search by email, and with no member role in Weave
+#: there is no list of members to search, so Krater finds people by Patchwork ID only.
+NO_EMAIL_SEARCH = (
+    "Krater can't find people by email. Ask them for their Patchwork ID: it's the Weave ID on their Weave "
+    "account page (Who am I)."
+)
 
-    A Patchwork ID is looked up directly. Weave's directory has no search by email, so an email is
-    matched against the list of members; only members are ever returned, because only they can use
-    Krater. Raises `WeaveUnavailableError` if Weave can't answer: callers show an error rather than
-    "not found".
+
+def is_email(query: str) -> bool:
+    return "@" in query
+
+
+def find_member(weave_client: WeaveClient, query: str) -> WeaveUser | None:
+    """The active Patchwork member whose Patchwork ID is `query`, or `None` (also for an email: see
+    `NO_EMAIL_SEARCH`, which callers show instead of "not found").
+
+    The directory returns only people Weave lets use Krater, and they are all Ganymede members. Raises
+    `WeaveUnavailableError` if Weave can't answer: callers show an error rather than "not found".
     """
     query = query.strip()
-    if not query:
+    if not query or is_email(query):
         return None
-    if "@" not in query:
-        record = weave_client.get_user(query.upper(), fresh=True)
-        if record is not None and record.active and GROUP_MEMBER in record.roles:
-            return record
-        return None
-    wanted = query.casefold()
-    for record in weave_client.list_users_with_role(GROUP_MEMBER):
-        if record.active and record.email and record.email.casefold() == wanted:
-            return record
-    return None
+    record = weave_client.get_user(query.upper(), fresh=True)
+    return record if record is not None and record.active else None
 
 
 def user_for(session: Session, record: WeaveUser) -> User:
@@ -118,4 +120,4 @@ def user_for(session: Session, record: WeaveUser) -> User:
     return user
 
 
-__all__ = ["Person", "find_member", "lookup", "names", "public_names", "user_for"]
+__all__ = ["NO_EMAIL_SEARCH", "Person", "find_member", "is_email", "lookup", "names", "public_names", "user_for"]

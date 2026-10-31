@@ -14,7 +14,8 @@ from krater.weave import StubWeaveClient
 
 # Fixture subs from krater/weave/stub_users.json.
 MEMBER_SUB = "PWLMEMBERONE"
-NON_MEMBER_SUB = "PWLNONMEMBER"
+NO_ROLE_SUB = "PWLNOROLE"
+REVIEWER_SUB = "PWLREVIEWERONE"
 FALLBACK_REVIEWER_SUB = "PWLREVIEWERTWO"  # no `roles` field: roles come from group slugs
 
 
@@ -87,29 +88,16 @@ def test_callback_rejects_when_no_login_was_started(client: TestClient) -> None:
     assert response.status_code == 400
 
 
-def test_callback_rejects_a_non_member(client: TestClient, db_session: Session) -> None:
+def test_anyone_weave_signs_in_is_a_member_with_no_role(client: TestClient, db_session: Session) -> None:
     state = _start_login(client)
 
-    response = client.get("/auth/callback", params={"code": NON_MEMBER_SUB, "state": state})
+    response = client.get("/auth/callback", params={"code": NO_ROLE_SUB, "state": state}, follow_redirects=False)
 
-    assert response.status_code == 403
-    assert "Ask a Ganymede admin" in response.text
-    # An empty `roles` claim is not "absent": the member group slug the fixture carries is ignored.
-    user = db_session.execute(select(User).where(User.weave_sub == NON_MEMBER_SUB)).scalar_one()
-    assert user.roles_cached == []
-    assert user.last_login_at is None
-    assert "Sign out" not in client.get("/").text
-
-
-def test_a_refused_sign_in_drops_an_earlier_session(client: TestClient, login_as) -> None:
-    login_as(MEMBER_SUB)
+    assert response.status_code == 302
+    user = db_session.execute(select(User).where(User.weave_sub == NO_ROLE_SUB)).scalar_one()
+    assert user.roles_cached == ["ganymede:member"]
+    assert user.last_login_at is not None
     assert "Sign out" in client.get("/").text
-
-    state = _start_login(client)
-    response = client.get("/auth/callback", params={"code": NON_MEMBER_SUB, "state": state})
-
-    assert response.status_code == 403
-    assert "Sign out" not in client.get("/").text
 
 
 def test_callback_maps_group_slugs_when_weave_sends_no_roles(client: TestClient, db_session: Session) -> None:
@@ -124,18 +112,16 @@ def test_callback_maps_group_slugs_when_weave_sends_no_roles(client: TestClient,
     assert user.roles_cached == ["ganymede:member", "ganymede:reviewer"]
 
 
-def test_callback_rejects_a_user_whose_member_role_weave_removed(
+def test_sign_in_drops_a_role_weave_removed(
     client: TestClient, db_session: Session, weave_stub: StubWeaveClient
 ) -> None:
-    weave_stub.set_roles(MEMBER_SUB, ["reviewer"])
+    weave_stub.set_roles(REVIEWER_SUB, [])
     state = _start_login(client)
 
-    response = client.get("/auth/callback", params={"code": MEMBER_SUB, "state": state})
+    client.get("/auth/callback", params={"code": REVIEWER_SUB, "state": state}, follow_redirects=False)
 
-    assert response.status_code == 403
-    user = db_session.execute(select(User).where(User.weave_sub == MEMBER_SUB)).scalar_one()
-    assert user.roles_cached == ["ganymede:reviewer"]
-    assert "Sign out" not in client.get("/").text
+    user = db_session.execute(select(User).where(User.weave_sub == REVIEWER_SUB)).scalar_one()
+    assert user.roles_cached == ["ganymede:member"]
 
 
 def test_admin_users_page_is_gone(client: TestClient, login_as) -> None:

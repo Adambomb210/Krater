@@ -88,10 +88,10 @@ def test_fresh_actor_sees_a_role_weave_removed_after_sign_in(db_session: Session
     assert exc_info.value.status_code == 403
 
 
-def test_fresh_actor_refuses_once_weave_revokes_the_member_role(db_session: Session) -> None:
+def test_fresh_actor_refuses_once_weave_locks_the_account(db_session: Session) -> None:
     user = _make_user(db_session)
-    weave = _weave(["member", "admin"])
-    weave.set_roles(SUB, ["admin"])
+    weave = _weave(["admin"])
+    weave.set_active(SUB, False)
 
     with pytest.raises(HTTPException) as exc_info:
         fresh_actor(_POST, user, db_session, weave)

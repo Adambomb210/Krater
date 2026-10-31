@@ -39,17 +39,18 @@ def _email(actor: Actor) -> str:
     return PROFILES[actor.user.weave_sub][1]
 
 
-def test_the_lead_invites_by_patchwork_id_or_email_and_access_starts_at_accept(
+def test_the_lead_invites_by_patchwork_id_and_access_starts_at_accept(
     db_session: Session, member: Actor, make_actor, weave: StubWeaveClient
 ) -> None:
     by_id = make_actor(groups=frozenset({GROUP_MEMBER}))
-    by_email = make_actor(groups=frozenset({GROUP_MEMBER}))
+    # No Weave role at all: every Patchwork member Weave lets use Krater can be invited.
+    no_role = make_actor(groups=frozenset())
     project = _project(db_session, member)
 
     first = teams.invite(db_session, member, weave, project=project, query=by_id.user.weave_sub.lower())
-    second = teams.invite(db_session, member, weave, project=project, query=_email(by_email).upper())
+    second = teams.invite(db_session, member, weave, project=project, query=no_role.user.weave_sub)
 
-    assert [m.user_id for m in project.members] == [by_id.user.id, by_email.user.id]
+    assert [m.user_id for m in project.members] == [by_id.user.id, no_role.user.id]
     assert not teams.on_team(project, by_id.user.id)
     assert teams.has_conflict(project, by_id.user.id)
     with pytest.raises(NotAllowed):
@@ -82,7 +83,11 @@ def test_an_accepted_teammate_can_invite_more_people_later(
 
 @pytest.mark.parametrize(
     "query,message",
-    [("", "Enter a Patchwork ID"), ("nobody@example.com", "No Ganymede member"), ("PWL0NOSUCHONE", "No Ganymede")],
+    [
+        ("", "Enter a Patchwork ID"),
+        ("nobody@example.com", "can't find people by email"),
+        ("PWL0NOSUCHONE", "No Patchwork"),
+    ],
 )
 def test_unknown_people_are_refused(
     db_session: Session, member: Actor, weave: StubWeaveClient, query: str, message: str
@@ -95,10 +100,27 @@ def test_unknown_people_are_refused(
     assert message in exc.value.errors["member"]
 
 
-def test_only_ganymede_members_can_be_invited(
+def test_an_email_is_refused_even_for_a_member(
     db_session: Session, member: Actor, make_actor, weave: StubWeaveClient
 ) -> None:
+    teammate = make_actor(groups=frozenset({GROUP_MEMBER}))
+    project = _project(db_session, member)
+
+    with pytest.raises(ValidationFailed) as exc:
+        teams.invite(db_session, member, weave, project=project, query=_email(teammate))
+
+    assert "Patchwork ID" in exc.value.errors["member"]
+
+
+@pytest.mark.parametrize("gone", ["removed", "inactive"])
+def test_only_people_weave_lets_use_krater_can_be_invited(
+    db_session: Session, member: Actor, make_actor, weave: StubWeaveClient, gone: str
+) -> None:
     outsider = make_actor(groups=frozenset())
+    if gone == "removed":
+        weave.remove_user(outsider.user.weave_sub)
+    else:
+        weave.set_active(outsider.user.weave_sub, False)
     project = _project(db_session, member)
 
     with pytest.raises(ValidationFailed):

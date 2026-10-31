@@ -85,7 +85,8 @@ def test_unknown_slack_user_gets_an_ephemeral_error(db_session: Session, member:
 def test_a_linked_non_member_gets_an_ephemeral_error(
     db_session: Session, member: Actor, make_actor, weave: StubWeaveClient
 ) -> None:
-    make_actor(groups=frozenset({GROUP_REVIEWER}), slack_user_id="U_EX_MEMBER")
+    gone = make_actor(groups=frozenset({GROUP_REVIEWER}), slack_user_id="U_EX_MEMBER")
+    weave.remove_user(gone.user.weave_sub)
     _project, revision = _submitted_revision(db_session, member)
     slack_client = FakeSlackClient()
 

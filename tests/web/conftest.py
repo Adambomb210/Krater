@@ -16,8 +16,8 @@ from sqlalchemy.orm import Session
 from krater.models import Project, ReviewDecision, ReviewSource, User
 from krater.services import projects as project_service
 from krater.services import users as user_service
-from krater.services.actor import GROUP_MEMBER, Actor
-from krater.weave import RoleMapping, StubWeaveClient
+from krater.services.actor import Actor
+from krater.weave import StubWeaveClient
 from tests.factories import new_project
 
 #: A real PNG magic-byte header, for tests that need `confirm_screenshot`'s signature check to pass.
@@ -77,15 +77,11 @@ def approved_project(
 
 @pytest.fixture
 def revoke_membership(weave_stub: StubWeaveClient) -> Callable[[User], None]:
-    """Take Krater's `member` role away from an already-signed-in `user` in the stub Weave, so
-    `fresh_actor` sees the change on their *next* request (sign-in itself already refuses non-members)."""
+    """Lock an already-signed-in `user`'s account in the stub Weave, so `fresh_actor` sees on their *next* request
+    that Weave no longer lets them use Krater."""
 
     def _revoke(user: User) -> None:
-        record = weave_stub.get_user(user.weave_sub)
-        assert record is not None
-        mapping = RoleMapping.default()
-        weave_stub.set_roles(
-            user.weave_sub, [mapping.weave_role_key(role) for role in record.roles if role != GROUP_MEMBER]
-        )
+        assert weave_stub.get_user(user.weave_sub) is not None
+        weave_stub.set_active(user.weave_sub, False)
 
     return _revoke

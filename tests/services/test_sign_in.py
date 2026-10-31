@@ -50,22 +50,13 @@ def test_a_slack_id_from_weave_moves_off_a_stale_holder(db_session: Session, mak
 
 
 def test_a_member_signs_in_and_last_login_is_stamped(db_session: Session) -> None:
-    result = sign_in(db_session, _identity())
+    user = sign_in(db_session, _identity())
 
-    assert result.status == "ok"
-    assert result.user.last_login_at is not None
-
-
-def test_sign_in_rejects_a_user_without_the_member_role(db_session: Session) -> None:
-    result = sign_in(db_session, _identity(roles=frozenset({GROUP_REVIEWER})))
-
-    assert result.status == "not_a_member"
-    assert result.user.last_login_at is None
-    assert result.user.roles_cached == [GROUP_REVIEWER]
+    assert user.last_login_at is not None
 
 
 def test_cached_actor_reads_roles_cached(db_session: Session) -> None:
-    user = sign_in(db_session, _identity(roles=frozenset({GROUP_MEMBER, GROUP_REVIEWER}))).user
+    user = sign_in(db_session, _identity(roles=frozenset({GROUP_MEMBER, GROUP_REVIEWER})))
 
     assert cached_actor(user).groups == frozenset({GROUP_MEMBER, GROUP_REVIEWER})
 
@@ -75,8 +66,8 @@ def test_cached_actor_reads_roles_cached(db_session: Session) -> None:
 
 @pytest.fixture
 def signed_in(db_session: Session, weave: StubWeaveClient):
-    weave.put_user("PWLSIGNIN01", name="Sig Nin", email="signin@example.com", roles=["member", "reviewer"])
-    return sign_in(db_session, _identity(roles=frozenset({GROUP_MEMBER, GROUP_REVIEWER}))).user
+    weave.put_user("PWLSIGNIN01", name="Sig Nin", email="signin@example.com", roles=["reviewer"])
+    return sign_in(db_session, _identity(roles=frozenset({GROUP_MEMBER, GROUP_REVIEWER})))
 
 
 def test_authorize_builds_an_actor_from_the_directory(db_session: Session, weave: StubWeaveClient, signed_in) -> None:
@@ -84,7 +75,7 @@ def test_authorize_builds_an_actor_from_the_directory(db_session: Session, weave
         "PWLSIGNIN01",
         name="New Name",
         email="signin@example.com",
-        roles=["member"],
+        roles=[],
         slack_id="U_DIR",
         slack_member=True,
     )
@@ -103,7 +94,7 @@ def test_authorize_builds_an_actor_from_the_directory(db_session: Session, weave
 def test_authorize_uses_the_group_fallback_when_roles_are_absent(
     db_session: Session, weave: StubWeaveClient, signed_in
 ) -> None:
-    weave.set_roles("PWLSIGNIN01", None, groups=["ganymede-members", "krater-admins"])
+    weave.set_roles("PWLSIGNIN01", None, groups=["krater-admins"])
 
     assert authorize(db_session, weave, signed_in).groups == frozenset({GROUP_MEMBER, GROUP_ADMIN})
 
@@ -117,14 +108,11 @@ def test_authorize_refuses_a_user_the_directory_no_longer_returns(
         authorize(db_session, weave, signed_in)
 
 
-def test_authorize_refuses_once_weave_revokes_the_member_role(
-    db_session: Session, weave: StubWeaveClient, signed_in
-) -> None:
-    weave.set_roles("PWLSIGNIN01", ["reviewer"])
+def test_authorize_drops_a_role_weave_removed(db_session: Session, weave: StubWeaveClient, signed_in) -> None:
+    weave.set_roles("PWLSIGNIN01", [])
 
-    with pytest.raises(NotAMember):
-        authorize(db_session, weave, signed_in)
-    assert signed_in.roles_cached == [GROUP_REVIEWER]
+    assert authorize(db_session, weave, signed_in).groups == frozenset({GROUP_MEMBER})
+    assert signed_in.roles_cached == [GROUP_MEMBER]
 
 
 def test_authorize_refuses_an_inactive_user(db_session: Session, weave: StubWeaveClient, signed_in) -> None:

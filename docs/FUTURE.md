@@ -15,8 +15,8 @@ this list covers what comes after, plus loose ends from building v1.
   `patchworklabsorg/infra` (`modules/krater`) builds the image on the host. Still open: merging that module, its
   secrets and DNS, off-machine backup copies, a screenshot volume backup, and alerting when the reconcile job fails.
   None of it has run on a real host yet.
-- **Set up Krater's roles in Weave** on each real deployment: a Weave superadmin creates `member`, `reviewer` and
-  `admin` on the Krater app page, an admin adds the `directory` scope to the app, and admins give people the roles
+- **Set up Krater's roles in Weave** on each real deployment: a Weave superadmin creates `reviewer` and `admin` on
+  the Krater app page (members need no role), an admin adds the `directory` scope to the app, and admins give people the roles
   (see [weave-integration.md](weave-integration.md)).
 - **Create Krater's Slack app** in the Patchwork workspace ([dev/slack-setup.md](dev/slack-setup.md)), and a tunnel
   for local testing.

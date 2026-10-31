@@ -147,10 +147,11 @@
         </ul>
       {% endif %}
       <input type="text" id="teammates" name="teammates" value="{{ values.teammates }}" autocomplete="off"
-             placeholder="Patchwork IDs or emails, separated by commas"{% if errors.teammates %} aria-invalid="true"{% endif %}>
+             placeholder="Patchwork IDs, separated by commas"{% if errors.teammates %} aria-invalid="true"{% endif %}>
       <p class="field-hint">
-        Each teammate needs a Patchwork account with Ganymede access. They join once they accept the invitation on
-        their Krater home page. You can add more people later from the project page.
+        Each teammate needs a Patchwork account. Their Patchwork ID is the Weave ID on their Weave account page.
+        They join once they accept the invitation on their Krater home page. You can add more people later from the
+        project page.
       </p>
       {% if errors.teammates %}<p class="field-error">{{ errors.teammates }}</p>{% endif %}
     </div>

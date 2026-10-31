@@ -163,12 +163,13 @@ def test_outsiders_see_no_project_and_reviewers_cannot_launch(client: TestClient
     assert response.status_code == 403
 
 
-def test_a_member_removed_in_weave_is_refused_at_once(client: TestClient, project, weave_stub) -> None:
-    weave_stub.set_roles(MEMBER_SUB, [])
+def test_a_member_locked_in_weave_is_refused_at_once(client: TestClient, project, weave_stub) -> None:
+    weave_stub.set_active(MEMBER_SUB, False)
 
     response = client.post(f"/api/v1/projects/{project.id}/jobs", json=JOB, headers=_as(MEMBER_SUB))
 
-    assert response.status_code == 403
+    # Weave stops honouring a locked account's CLI token, so the request never reaches the directory check.
+    assert response.status_code == 401
 
 
 def test_secrets_can_be_set_and_listed_but_never_read_back(client: TestClient, project, monkeypatch) -> None:

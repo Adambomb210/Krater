@@ -81,7 +81,7 @@ feature is off. Losing the key loses every stored secret, so back it up with the
 - **Weave** (production Weave, not staging), following [weave-integration.md](../weave-integration.md):
   - Krater's app has redirect URI `https://<KRATER_DOMAIN>/auth/callback` and scopes
     `openid profile email groups roles slack directory`.
-  - A Weave superadmin creates the roles `member`, `reviewer` and `admin` on it, and gives you `member` and `admin`.
+  - A Weave superadmin creates the roles `reviewer` and `admin` on it, and gives you `admin`. Members need no role.
 - **Slack:** the app's interactivity URL is `https://<KRATER_DOMAIN>/slack/interactions` ([slack-setup.md](slack-setup.md)).
 - **Vast** (compute on only): the production API key, in a file only root can read, mounted into the worker alone
   (compose: `KRATER_VAST_KEY_FILE` on the host, `KRATER_VAST_API_KEY_FILE=/run/secrets/vast_api_key`). Keep the

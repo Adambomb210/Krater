@@ -177,15 +177,16 @@ def _fill_from_action(form_action: str) -> str | None:
 
 
 def _check_teammates(weave_client: WeaveClient, raw: str) -> str | None:
-    """Why the "Invite teammates" entries can't all be invited, or `None` when every one is a Ganymede member."""
+    """Why the "Invite teammates" entries can't all be invited, or `None` when every one is a Patchwork member."""
+    entries = application_form.teammate_entries(raw)
+    if any(people.is_email(entry) for entry in entries):
+        return people.NO_EMAIL_SEARCH
     try:
-        unknown = [
-            entry for entry in application_form.teammate_entries(raw) if people.find_member(weave_client, entry) is None
-        ]
+        unknown = [entry for entry in entries if people.find_member(weave_client, entry) is None]
     except WeaveUnavailableError:
         return "Weave isn't answering, so Krater can't look your teammates up. Try again shortly."
     if unknown:
-        return f"No Ganymede member has this Patchwork ID or email: {', '.join(unknown)}."
+        return f"No Patchwork member has this Patchwork ID: {', '.join(unknown)}."
     return None
 
 

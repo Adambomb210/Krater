@@ -141,16 +141,11 @@ def test_development_and_test_envs_are_unconstrained() -> None:
 def test_weave_role_keys_and_group_slugs_have_the_contract_defaults() -> None:
     settings = Settings()
 
-    assert (settings.weave_role_member, settings.weave_role_reviewer, settings.weave_role_admin) == (
-        "member",
-        "reviewer",
-        "admin",
-    )
-    assert (settings.weave_group_member, settings.weave_group_reviewer, settings.weave_group_admin) == (
-        "ganymede-members",
-        "krater-reviewers",
-        "krater-admins",
-    )
+    assert (settings.weave_role_reviewer, settings.weave_role_admin) == ("reviewer", "admin")
+    assert (settings.weave_group_reviewer, settings.weave_group_admin) == ("krater-reviewers", "krater-admins")
+    # Everyone Weave lets use Krater is a member: there is no member role or group to configure.
+    assert not hasattr(settings, "weave_role_member")
+    assert not hasattr(settings, "weave_group_member")
 
 
 def test_weave_role_keys_read_from_the_environment(monkeypatch) -> None:

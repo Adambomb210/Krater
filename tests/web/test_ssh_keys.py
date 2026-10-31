@@ -152,7 +152,7 @@ def test_adding_needs_the_csrf_token(client: TestClient, login_as) -> None:
 def test_someone_who_lost_membership_cannot_add_keys(client: TestClient, login_as, weave_stub) -> None:
     login_as(MEMBER_SUB)
     page = client.get("/account/ssh-keys")
-    weave_stub.set_roles(MEMBER_SUB, [])
+    weave_stub.remove_user(MEMBER_SUB)
 
     response = client.post(
         "/account/ssh-keys", data={"name": "x", "key": _ed25519(), "csrf_token": get_csrf_token(page.text)}

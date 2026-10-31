@@ -212,8 +212,7 @@ def _sign_in(client: httpx.Client, fixture: dict[str, Any], email: str) -> SignI
     """Drives the real Authorization Code + PKCE flow: Krater `/login` -> Weave's magic-link
     confirmation (using a freshly minted token in place of "the user clicked the emailed link") ->
     the OAuth consent screen (submitted for real, when Weave shows one) -> back to Krater's
-    `/auth/callback`. Returns the final response Krater gave (a redirect on success, a 403 page for
-    a non-member).
+    `/auth/callback`. Returns the final response Krater gave (a redirect on success).
     """
     weave_base = fixture["issuer"]
 
@@ -289,16 +288,16 @@ def test_signin_maps_the_admin_role(fixture: dict[str, Any], http_client: httpx.
     assert {"ganymede:member", "ganymede:admin"} <= row["roles"]
 
 
-def test_signin_refuses_a_non_member(fixture: dict[str, Any], http_client: httpx.Client) -> None:
+def test_signin_lets_in_a_user_with_no_krater_role(fixture: dict[str, Any], http_client: httpx.Client) -> None:
+    # The fixture's "non_member" holds no Krater role in Weave: every Patchwork member is a Ganymede member.
     email = fixture["users"]["non_member"]["email"]
 
     result = _sign_in(http_client, fixture, email)
 
-    assert result.final_response.status_code == 403
-    assert "Ask a Ganymede admin" in result.final_response.text
+    assert result.final_response.status_code == 302
     row = _krater_user(email)
     assert row is not None
-    assert "ganymede:member" not in row["roles"]
+    assert row["roles"] == {"ganymede:member"}
 
 
 def test_directory_get_user_matches_the_fixture(fixture: dict[str, Any], weave_client: LiveWeaveClient) -> None:
@@ -326,13 +325,13 @@ def test_directory_lists_admins(fixture: dict[str, Any], weave_client: LiveWeave
     assert fixture["users"]["admin"]["sub"] in subs
 
 
-def test_directory_lists_members(fixture: dict[str, Any], weave_client: LiveWeaveClient) -> None:
+def test_directory_returns_a_user_with_no_krater_role_as_a_member(
+    fixture: dict[str, Any], weave_client: LiveWeaveClient
+) -> None:
     """A directory lookup by sub, as every state-changing action makes."""
     _needs_weave_roles(fixture)
 
-    records = {record.sub: record for record in weave_client.list_users_with_role("ganymede:member")}
+    record = weave_client.get_user(fixture["users"]["non_member"]["sub"])
 
-    assert fixture["users"]["member"]["sub"] in records
-    assert fixture["users"]["admin"]["sub"] in records
-    assert fixture["users"]["non_member"]["sub"] not in records
-    assert all(records[fixture["users"][key]["sub"]].active for key in ("member", "admin"))
+    assert record is not None and record.active
+    assert record.roles == {"ganymede:member"}
